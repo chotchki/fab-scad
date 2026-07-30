@@ -2035,14 +2035,21 @@ pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
          // bytes are regenerated verbatim anyway — reformatting would only fail the currency gate.\n\
          #![cfg_attr(rustfmt, rustfmt::skip)]\n\
          #![allow(\n\
+         \x20   unused_variables,\n\
+         \x20   non_snake_case,\n\
          \x20   clippy::unreadable_literal,\n\
          \x20   clippy::cloned_ref_to_slice_refs,\n\
          \x20   clippy::used_underscore_items,\n\
          \x20   clippy::possible_missing_else,\n\
          \x20   clippy::collapsible_else_if,\n\
+         \x20   clippy::similar_names,\n\
+         \x20   clippy::needless_else,\n\
+         \x20   clippy::if_same_then_else,\n\
+         \x20   clippy::too_many_lines,\n\
          \x20   reason = \"generated code: bit-exact from_bits literals, mechanical clones, \\\n\
-         \x20             upstream's underscore-prefixed names, and one-line block emission \\\n\
-         \x20             are the emitter's idiom\"\n\
+         \x20             upstream's underscore-prefixed names (params too — `p__total`), unused \\\n\
+         \x20             loop binders a body never reads, fresh idents differing by counter, and \\\n\
+         \x20             one-line block emission are the emitter's idiom\"\n\
          )]\n\n\
          // AR.13: `rt` is the ONLY thing generated code names. `extern crate self as fab_lang`\n\
          // makes this path resolve inside fab-lang too, so moving this file into its own crate\n\
@@ -2251,6 +2258,34 @@ pub const GENERATED_ENTRIES: &[&str] = &[
     // and 2, so slot 1 must come back as the callee's default (7) rather than undef.
     "_fab_poc_sib",
     "_fab_poc_hole",
+    // AR.17 stage A — the migration-closed batch: every HAND native whose emitted code resolves
+    // its sibling calls inside this list (measured by `hand_native_closed_batch`, not argued).
+    // What stays hand traces almost entirely to `is_vector`, whose only decline is the AN.10
+    // param-shadow (`all_nonzero`) — the exact shape the FnCtx ABI flip un-declines; the rest
+    // rides it (is_matrix/sum/unit/v_abs/... call is_vector) or waits on a registry entry for a
+    // callee (`is_range`, `constrain`, `is_vnf`, `list_wrap`) or a value-typed bootstrap bake
+    // (`UP`, `_NO_ARG`).
+    "_is_liststr",
+    "point3d",
+    "_list_pattern",
+    "same_shape",
+    "is_consistent",
+    "num_defined",
+    "force_list",
+    "_tri_class",
+    "_is_at_left",
+    "_sum",
+    "is_2d_transform",
+    "_is_point_on_line",
+    "ident",
+    "affine3d_zrot",
+    "affine3d_xrot",
+    "affine3d_yrot",
+    "in_list",
+    "_group_sort_by_index",
+    "point2d",
+    "affine3d_identity",
+    "affine3d_translate",
 ];
 
 /// Record a CALL by name: builtin or user dep. Deliberately IGNORES the lexical scope — a name
@@ -2559,6 +2594,124 @@ mod tests {
              used to handle now declines, which does not fail anything else because the decline \
              just falls back to interpretation"
         );
+    }
+
+    /// AR.17 stage A scoping: which HAND-WRITTEN registry natives could the emitter regenerate
+    /// today? Per-entry emit/decline against the FULL registry batch (sibling table included, so
+    /// a hand native calling another registry name is not a false decline). Run:
+    /// `cargo test -p fab-lib hand_native_migration_census -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement probe, not a gate"]
+    fn hand_native_migration_census() {
+        let (subjects, _pins) = fab_lang::bootstrap_all();
+        let generated: std::collections::BTreeSet<&str> =
+            super::GENERATED_ENTRIES.iter().copied().collect();
+        // Bakes + siblings the way `generate_module` builds them; a subject whose bake refuses
+        // (a value-typed const the bootstrap path cannot re-render) is its own decline bucket.
+        let mut sink = std::collections::BTreeMap::new();
+        let mut sibs: Vec<super::Sibling> = Vec::new();
+        let mut baked_by_name: std::collections::BTreeMap<&str, Vec<(&str, super::Baked)>> =
+            std::collections::BTreeMap::new();
+        for b in &subjects {
+            let baked = super::bake_bootstrap(b, &mut sink).unwrap_or_default();
+            if let Ok(s) = super::sibling_of(&super::Subject {
+                name: b.name,
+                source: b.source,
+                baked: baked.clone(),
+            }) {
+                sibs.push(s);
+            }
+            baked_by_name.insert(b.name, baked);
+        }
+        let mut emit = Vec::new();
+        let mut decline = Vec::new();
+        for b in &subjects {
+            if generated.contains(b.name) {
+                continue;
+            }
+            let baked = baked_by_name.remove(b.name).unwrap_or_default();
+            match super::generate_native(b.source, &baked, &sibs) {
+                Ok(_) => emit.push(b.name),
+                Err(e) => decline.push((b.name, e)),
+            }
+        }
+        eprintln!("=== hand-native migration census ===");
+        eprintln!("EMITS ({}):", emit.len());
+        for n in &emit {
+            eprintln!("  {n}");
+        }
+        eprintln!("DECLINES ({}):", decline.len());
+        for (n, e) in &decline {
+            eprintln!("  {n}: {e}");
+        }
+    }
+
+    /// AR.17 stage A scoping, part 2: the largest MIGRATION-CLOSED batch — candidates whose
+    /// emitted code resolves every sibling call INSIDE the batch (the regen constraint the
+    /// per-entry census cannot see, because it hands out the full-registry sibling table). Run:
+    /// `cargo test -p fab-lib hand_native_closed_batch -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement probe, not a gate"]
+    fn hand_native_closed_batch() {
+        let candidates = [
+            "_is_liststr",
+            "point3d",
+            "_list_pattern",
+            "same_shape",
+            "is_consistent",
+            "num_defined",
+            "force_list",
+            "all_nonzero",
+            "is_matrix",
+            "_tri_class",
+            "_is_at_left",
+            "_none_inside",
+            "_sum",
+            "sum",
+            "unit",
+            "is_2d_transform",
+            "_apply",
+            "_bt_search",
+            "_point_dist",
+            "_is_point_on_line",
+            "ident",
+            "affine3d_zrot",
+            "affine3d_xrot",
+            "affine3d_yrot",
+            "_get_ear",
+            "in_list",
+            "is_path",
+            "_group_sort_by_index",
+            "v_abs",
+            "v_theta",
+            "point2d",
+            "affine3d_identity",
+            "affine3d_rot_from_to",
+            "affine3d_translate",
+        ];
+        let mut batch: Vec<&str> = super::GENERATED_ENTRIES.to_vec();
+        batch.extend(candidates);
+        loop {
+            match super::generate_module(&batch) {
+                Ok(_) => break,
+                Err(e) => {
+                    let name = e.split(':').next().unwrap_or("").trim().to_string();
+                    let before = batch.len();
+                    batch.retain(|n| *n != name);
+                    assert!(
+                        batch.len() < before,
+                        "decline named no removable entry: {e}"
+                    );
+                    eprintln!("dropped {name}: {e}");
+                }
+            }
+        }
+        eprintln!("=== migration-closed batch ({} total) ===", batch.len());
+        for n in &batch {
+            if !super::GENERATED_ENTRIES.contains(n) {
+                eprintln!("  {n}");
+            }
+        }
     }
 
     /// The MODULE decline census (AR.14.4 scoping): who is still outside the band, bucketed by

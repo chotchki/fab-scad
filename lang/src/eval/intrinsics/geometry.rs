@@ -1,6 +1,6 @@
 use super::generated::approx;
 use super::generated::idx;
-use super::lists::{force_list, select};
+use super::lists::select;
 use super::math::sum;
 use super::shape::is_vector;
 use super::{bosl_assert, no_progress, non_terminating, v_is_list};
@@ -39,14 +39,6 @@ pub(super) fn tri_class_2d(t0: [f64; 2], t1: [f64; 2], t2: [f64; 2], eps: f64) -
     }
 }
 
-/// BOSL2 `_tri_class(tri, eps=_EPSILON)` — CW(1)/collinear(0)/CCW(-1) of a 2D triangle. Fast path for the
-/// `[[x,y],[x,y],[x,y]]` + numeric-eps shape; everything else (3D points → undef, short lists, exotic eps)
-/// routes through the real builtins/ops.
-pub(super) fn tri_class(args: &[Value]) -> crate::Result<Value> {
-    let tri = args.first().cloned().unwrap_or(Value::Undef);
-    let eps = args.get(1).cloned().unwrap_or(Value::Num(1e-9));
-    Ok(tri_class_val(&tri, &eps))
-}
 pub(super) fn tri_class_val(tri: &Value, eps: &Value) -> Value {
     if let (Value::Num(e), Value::List(xs)) = (eps, tri)
         && xs.len() == 3
@@ -86,15 +78,6 @@ pub(super) fn tri_class_val(tri: &Value, eps: &Value) -> Value {
     }
 }
 
-/// BOSL2 `_is_at_left(pt,line,eps=_EPSILON) = _tri_class([pt,line[0],line[1]],eps) <= 0` — is `pt` left of
-/// (or on) the directed 2D line? The routed tail builds the triangle with the interpreter's `build_vector`
-/// (three Nums would coalesce to a `NumList` exactly like the literal would).
-pub(super) fn is_at_left(args: &[Value]) -> crate::Result<Value> {
-    let pt = args.first().cloned().unwrap_or(Value::Undef);
-    let line = args.get(1).cloned().unwrap_or(Value::Undef);
-    let eps = args.get(2).cloned().unwrap_or(Value::Num(1e-9));
-    Ok(is_at_left_val(&pt, &line, &eps))
-}
 pub(super) fn is_at_left_val(pt: &Value, line: &Value, eps: &Value) -> Value {
     if let (Value::Num(e), Some(p), Value::List(ls)) = (eps, as_p2(pt), line)
         && ls.len() == 2
@@ -320,71 +303,6 @@ pub(super) fn point_dist(args: &[Value]) -> crate::Result<Value> {
     }
     let list = build_vector(dists);
     Ok(builtins::apply("min", std::slice::from_ref(&list)))
-}
-
-/// BOSL2 `_is_point_on_line(point, line, bounded=false, eps=_EPSILON)` — collinearity within tolerance,
-/// optionally clamped to the segment on either end (`bounded` goes through the real [`force_list`]). The
-/// 2D/3D split (`abs(cross)` vs `norm(cross)`) and the `t` parameter all route through ops.
-pub(super) fn is_point_on_line(args: &[Value]) -> crate::Result<Value> {
-    let point = args.first().cloned().unwrap_or(Value::Undef);
-    let line = args.get(1).cloned().unwrap_or(Value::Undef);
-    let bounded = args.get(2).cloned().unwrap_or(Value::Bool(false));
-    let eps = args.get(3).cloned().unwrap_or(Value::Num(1e-9));
-    let l0 = ops::index(line.clone(), &Value::Num(0.0));
-    let l1 = ops::index(line, &Value::Num(1.0));
-    let v1 = ops::apply_binary(BinOp::Sub, l1, l0.clone());
-    let v0 = ops::apply_binary(BinOp::Sub, point, l0);
-    let t = ops::apply_binary(
-        BinOp::Div,
-        ops::apply_binary(BinOp::Mul, v0.clone(), v1.clone()),
-        ops::apply_binary(BinOp::Mul, v1.clone(), v1.clone()),
-    );
-    let bounded2 = force_list(&[bounded, Value::Num(2.0)])?;
-    let crx = builtins::apply("cross", &[v0, v1.clone()]);
-    let ncp = if ops::apply_binary(
-        BinOp::Eq,
-        builtins::apply("len", std::slice::from_ref(&v1)),
-        Value::Num(2.0),
-    )
-    .is_truthy()
-    {
-        builtins::apply("abs", std::slice::from_ref(&crx))
-    } else {
-        builtins::apply("norm", std::slice::from_ref(&crx))
-    };
-    let on_line = ops::apply_binary(
-        BinOp::Le,
-        ncp,
-        ops::apply_binary(
-            BinOp::Mul,
-            eps.clone(),
-            builtins::apply("norm", std::slice::from_ref(&v1)),
-        ),
-    );
-    if !on_line.is_truthy() {
-        return Ok(Value::Bool(false));
-    }
-    if ops::index(bounded2.clone(), &Value::Num(0.0)).is_truthy()
-        && !ops::apply_binary(
-            BinOp::Ge,
-            t.clone(),
-            ops::apply_unary(crate::parser::UnOp::Neg, eps.clone()),
-        )
-        .is_truthy()
-    {
-        return Ok(Value::Bool(false));
-    }
-    if ops::index(bounded2, &Value::Num(1.0)).is_truthy()
-        && !ops::apply_binary(
-            BinOp::Lt,
-            t,
-            ops::apply_binary(BinOp::Add, Value::Num(1.0), eps),
-        )
-        .is_truthy()
-    {
-        return Ok(Value::Bool(false));
-    }
-    Ok(Value::Bool(true))
 }
 
 /// The [`PINS`]' `is_vnf(x)` as [`vnf_centroid`]'s assert needs it, composed from the band's own natives

@@ -4,21 +4,6 @@ use crate::eval::value::Value;
 use crate::eval::{build_vector, builtins, iter_values_raw, ops};
 use crate::parser::BinOp;
 
-/// BOSL2 `_is_liststr(s) = is_list(s) || is_str(s)` — true iff `s` is a list (either representation) or a
-/// string. A pure leaf: `is_list` is true for `List`/`NumList`, `is_str` for `Str`.
-pub(super) fn is_liststr(args: &[Value]) -> crate::Result<Value> {
-    Ok(Value::Bool(matches!(
-        args.first(),
-        Some(Value::List(_) | Value::NumList(_) | Value::Str(_))
-    )))
-}
-
-/// BOSL2 `_list_pattern(list)` — the shape skeleton: every non-list leaf becomes `0`, lists recurse. Results
-/// coalesce through the interpreter's own `build_vector`, so a flat numeric level becomes the same `NumList`
-/// the comprehension would build — VARIANT identity matters, the callers compare patterns with `==`/`!=`.
-pub(super) fn list_pattern(args: &[Value]) -> crate::Result<Value> {
-    Ok(list_pattern_of(args.first().unwrap_or(&Value::Undef)))
-}
 pub(super) fn list_pattern_of(v: &Value) -> Value {
     if v_is_list(v) {
         let out: Vec<Value> = iter_values_raw(v).iter().map(list_pattern_of).collect();
@@ -74,19 +59,6 @@ pub(super) fn is_consistent(args: &[Value]) -> crate::Result<Value> {
 /// BOSL2 `num_defined(v) = len([for(vi=v) if(!is_undef(vi)) 1])` — how many entries are defined? Iteration
 /// via `iter_values_raw` (the interpreter's own `for` expansion: a scalar iterates once, a range expands), count
 /// as the `len` builtin would report it.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "matches the `len` builtin's `count as f64`; a list past 2^52 elements is unreachable"
-)]
-pub(super) fn num_defined(args: &[Value]) -> crate::Result<Value> {
-    let v = args.first().cloned().unwrap_or(Value::Undef);
-    let count = iter_values_raw(&v)
-        .iter()
-        .filter(|vi| !matches!(vi, Value::Undef))
-        .count();
-    Ok(Value::Num(count as f64))
-}
-
 /// BOSL2 `is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON)` — THE type predicate (8.8s of self
 /// time across the O.4 four). Core + the three optional clauses in reference order; the `length` assert is
 /// the one raise-site; `zero` compares `norm(v) >= eps` against `!zero`; a truthy `all_nonzero` delegates to

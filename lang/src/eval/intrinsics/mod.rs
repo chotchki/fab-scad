@@ -68,20 +68,22 @@ use affine::{
 use generated::{_fab_poc_isup as poc_isup, _fab_poc_near0 as poc_near0, _fab_poc_sq as poc_sq};
 #[cfg(test)]
 use generated::{approx, idx, posmod};
+// AR.17 stage A — these hand natives are DELETED; their direct-call unit tests now exercise the
+// generated versions under the old names, which is strictly better: the tests cover what ships.
 #[cfg(test)]
-use geometry::{
-    get_ear, is_at_left, is_point_on_line, none_inside, point_dist, point2d, tri_class,
-    vnf_centroid,
+use generated::{
+    _group_sort_by_index as group_sort_by_index, _is_at_left as is_at_left,
+    _is_point_on_line as is_point_on_line, _list_pattern as list_pattern, _tri_class as tri_class,
+    num_defined,
 };
 #[cfg(test)]
-use lists::{force_list, group_sort_by_index, in_list};
+use geometry::{get_ear, none_inside, point_dist, point2d, vnf_centroid};
+#[cfg(test)]
+use lists::{force_list, in_list};
 #[cfg(test)]
 use math::{sum, sum_tail};
 #[cfg(test)]
-use shape::{
-    all_nonzero, is_consistent, is_matrix, is_path, is_vector, list_pattern, num_defined,
-    same_shape,
-};
+use shape::{all_nonzero, is_consistent, is_matrix, is_path, is_vector, same_shape};
 #[cfg(test)]
 use vectors::{bt_search, unit, v_abs, v_theta, vector_angle, vector_axis};
 
@@ -615,7 +617,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_str"],
         builtins: &["is_list", "is_string"],
-        func: shape::is_liststr,
+        func: generated::_is_liststr,
     },
     Entry {
         name: "point3d",
@@ -624,7 +626,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["is_list"],
-        func: geometry::point3d,
+        func: generated::point3d,
     },
     // BOSL2 `select` (lists.scad) — the WRAPAROUND list indexer, the single hottest function in the path/list
     // layer: 86% of the ipad_holder_decorative_front profile's user-fn calls (5.8M at $fn=20), hammered by
@@ -778,7 +780,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["is_list"],
-        func: shape::list_pattern,
+        func: generated::_list_pattern,
     },
     Entry {
         name: "same_shape",
@@ -787,7 +789,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_def", "_list_pattern"],
         builtins: &["is_undef", "is_list"],
-        func: shape::same_shape,
+        func: generated::same_shape,
     },
     Entry {
         name: "is_consistent",
@@ -800,7 +802,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["_list_pattern"],
         builtins: &["is_list", "len", "is_undef"],
-        func: shape::is_consistent,
+        func: generated::is_consistent,
     },
     Entry {
         name: "num_defined",
@@ -810,7 +812,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["len", "is_undef"],
-        func: shape::num_defined,
+        func: generated::num_defined,
     },
     Entry {
         name: "force_list",
@@ -821,7 +823,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["is_list", "is_undef"],
-        func: lists::force_list,
+        func: generated::force_list,
     },
     // ── O.5.2, the `_EPSILON` family (vectors/comparisons/math/lists/linalg.scad) ───────────────────────
     // The band's core: is_vector 8.8s / approx 5.9s of cross-model self time (every BOSL2 input assert
@@ -932,7 +934,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["cross", "norm", "abs", "sign"],
-        func: geometry::tri_class,
+        func: generated::_tri_class,
     },
     Entry {
         name: "_is_at_left",
@@ -941,7 +943,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["_tri_class"],
         builtins: &["cross", "norm", "abs", "sign"],
-        func: geometry::is_at_left,
+        func: generated::_is_at_left,
     },
     // `eps` here is an EXPLICIT parameter (no default) — every internal call forwards it — so this entry
     // needs no `_EPSILON` guard despite living knee-deep in the tolerance family. The exotic-input
@@ -1008,7 +1010,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["len"],
-        func: math::sum_tail,
+        func: generated::_sum,
     },
     Entry {
         name: "sum",
@@ -1051,7 +1053,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &[],
-        func: affine::is_2d_transform,
+        func: generated::is_2d_transform,
     },
     Entry {
         name: "_apply",
@@ -1192,7 +1194,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["force_list"],
         builtins: &["abs", "cross", "norm", "len", "is_list", "is_undef"],
-        func: geometry::is_point_on_line,
+        func: generated::_is_point_on_line,
     },
     // `sum` runs its `_sum` lane here (the summands are [scalar, vector] pairs — not vectors), and the
     // final `approx(pos[0], 0, eps)` is a plain num/num compare — both already entries, called natively.
@@ -1249,7 +1251,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &[],
-        func: affine::ident,
+        func: generated::ident,
     },
     Entry {
         name: "affine3d_zrot",
@@ -1265,7 +1267,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_finite", "is_nan"],
         builtins: &["sin", "cos", "is_num"],
-        func: affine::affine3d_zrot,
+        func: generated::affine3d_zrot,
     },
     Entry {
         name: "affine3d_xrot",
@@ -1281,7 +1283,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_finite", "is_nan"],
         builtins: &["sin", "cos", "is_num"],
-        func: affine::affine3d_xrot,
+        func: generated::affine3d_xrot,
     },
     Entry {
         name: "affine3d_yrot",
@@ -1297,7 +1299,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_finite", "is_nan"],
         builtins: &["sin", "cos", "is_num"],
-        func: affine::affine3d_yrot,
+        func: generated::affine3d_yrot,
     },
     // eps is explicit here, but the wiskers lane runs `idx` → `posmod` → `approx`, whose DEFAULT eps is
     // `_EPSILON` — so the guard rides along.
@@ -1360,7 +1362,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_finite", "is_nan", "is_def"],
         builtins: &["search", "is_list", "is_undef", "is_num"],
-        func: lists::in_list,
+        func: generated::in_list,
     },
     Entry {
         name: "is_path",
@@ -1412,7 +1414,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["len", "floor", "concat"],
-        func: lists::group_sort_by_index,
+        func: generated::_group_sort_by_index,
     },
     // ── O.9 tree 1 (vectors/coords/affine.scad) — the band the O.8 Value-const guard unlocked ───────────
     // vector_axis bakes UP/RIGHT (consts_v) and affine3d_rot_from_to composes it with the whole
@@ -1447,7 +1449,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["is_list"],
-        func: geometry::point2d,
+        func: generated::point2d,
     },
     Entry {
         name: "affine3d_identity",
@@ -1456,7 +1458,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["ident"],
         builtins: &[],
-        func: affine::affine3d_identity,
+        func: generated::affine3d_identity,
     },
     // `is_vector(v1, zero=false)` runs the zero clause with its DEFAULT eps → the `_EPSILON` guard; the
     // `all_nonzero` branch stays unreachable (the flag is never passed). The in-body `eps = 1e-6` is a
@@ -1622,7 +1624,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["default"],
         builtins: &["is_list", "is_undef"],
-        func: affine::affine3d_translate,
+        func: generated::affine3d_translate,
     },
     // `approx(ang, 0)` runs on ASSERTED-finite numbers — its list branch (and the idx/posmod knot) is
     // unreachable, but its default eps is `_EPSILON` → the guard. `u=UP` is the reference's own default.

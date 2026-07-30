@@ -1604,7 +1604,10 @@ mod tests {
             p.match_indices("rands(0, 1, ")
                 .any(|(i, _)| p[i..].chars().nth(13) == Some(')'))
         });
-        assert!(seedless, "the seedless rands arm never fired in 512 AB programs");
+        assert!(
+            seedless,
+            "the seedless rands arm never fired in 512 AB programs"
+        );
     }
 
     /// AR.3's payoff: the native surface is DERIVED, so it describes the registry without anyone

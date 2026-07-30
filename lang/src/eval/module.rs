@@ -61,7 +61,13 @@ pub(super) fn eval_module<'a>(
     // subscriber-less build pays one atomic load and `release_max_level_off` strips it entirely.
     let _span = tracing::trace_span!("module", module = mi.name.as_str()).entered();
     let (positional, named, child) = eval_args(mi, scope, ctx)?;
-    Ok(eval_primitive(mi.name.as_str(), &positional, &named, &child, ctx))
+    Ok(eval_primitive(
+        mi.name.as_str(),
+        &positional,
+        &named,
+        &child,
+        ctx,
+    ))
 }
 
 /// [`eval_module`] with the arguments ALREADY evaluated — the entry a COMPILED module reaches.

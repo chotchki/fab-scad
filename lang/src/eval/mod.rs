@@ -1057,7 +1057,7 @@ impl<'a> FnOracle<'a> {
             data_needs: RefCell::default(),
             module_depth: Cell::default(),
             peak_module_depth: Cell::default(),
-        native_child_declines: Cell::default(),
+            native_child_declines: Cell::default(),
             children_stack: RefCell::default(),
             local_modules: RefCell::default(),
             module_stack: RefCell::default(),
@@ -1110,7 +1110,8 @@ impl<'a> FnOracle<'a> {
         if v == Value::Undef {
             return None;
         }
-        self.global.bind(name.to_string(), name_closure(v.clone(), name));
+        self.global
+            .bind(name.to_string(), name_closure(v.clone(), name));
         if let Some(slot) = self.ctx.island_globals.borrow_mut().get_mut(0) {
             *slot = self.global.clone();
         }
@@ -4198,7 +4199,10 @@ fn format_echo_line(args: &[Arg], vals: &[Value]) -> crate::Result<String> {
 /// drift. Errs on a past-[`MAX_ECHO_NESTING`] value (upstream's `EchoString` stack exhaust, as a
 /// deterministic bound).
 pub(crate) fn format_echo_pairs(pairs: &[(Option<&str>, &Value)]) -> crate::Result<String> {
-    if pairs.iter().any(|(_, v)| nests_deeper_than(v, MAX_ECHO_NESTING)) {
+    if pairs
+        .iter()
+        .any(|(_, v)| nests_deeper_than(v, MAX_ECHO_NESTING))
+    {
         return Err(crate::Error::Eval(format!(
             "echo value nests deeper than {MAX_ECHO_NESTING} levels (upstream stack-exhausts converting this to an EchoString)"
         )));

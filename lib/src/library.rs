@@ -315,7 +315,10 @@ impl Library {
                         );
                     }
                     StmtKind::ModuleDef { name, params, body } => {
-                        mod_sites.entry(name.clone()).or_default().push(file.clone());
+                        mod_sites
+                            .entry(name.clone())
+                            .or_default()
+                            .push(file.clone());
                         out.modules.insert(
                             name.clone(),
                             LibMod {
@@ -803,7 +806,8 @@ mod tests {
             );
         }
         assert!(
-            lib.module_collisions.contains_key("trapezoid") && lib.functions.contains_key("trapezoid"),
+            lib.module_collisions.contains_key("trapezoid")
+                && lib.functions.contains_key("trapezoid"),
             "BOSL2's `trapezoid` is an ambiguous MODULE and an unambiguous FUNCTION; the two \
              namespaces must not withdraw each other"
         );
@@ -1032,4 +1036,3 @@ mod fold_tests {
         }
     }
 }
-

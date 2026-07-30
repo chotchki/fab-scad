@@ -28,8 +28,8 @@ pub use crate::error::Result;
 /// a pure arm was a silent `undef` — the AR.20.10 bug class, closed by construction.
 pub use crate::eval::builtins::bi;
 pub use crate::eval::geo2d::Geo;
-pub use crate::eval::intrinsics::{assert_decline, bosl_assert};
 pub use crate::eval::intrinsics::native_rt::{DepthGuard, run_interpreted};
+pub use crate::eval::intrinsics::{assert_decline, bosl_assert};
 pub use crate::eval::ops::{apply_binary, apply_unary, index, member};
 pub use crate::eval::value::Value;
 pub use crate::eval::{build_range, build_vector, iter_values_native};

@@ -212,6 +212,9 @@ pub fn generate_module_native(
         fresh: 0,
         in_module: true,
         registered_defs: Vec::new(),
+        def_name: None,
+        def_root: None,
+        fn_locals: Vec::new(),
     };
     let fn_ident = rust_fn_ident(name)?;
     let mut out = String::new();
@@ -472,13 +475,19 @@ pub fn generate_native(
         fresh: 0,
         in_module: false,
         registered_defs: Vec::new(),
+        def_name: Some(name),
+        def_root: Some(body),
+        fn_locals: Vec::new(),
     };
+    // The Rust fn NAME is keyword-escaped (BOSL2 has `function while(...)`); every STRING —
+    // the fallback lookup, the mint def — stays the scad name, which is the runtime's key.
+    let fn_ident = rust_fn_ident(name)?;
     let mut out = String::new();
     let _ = write!(
         out,
         "/// Generated native for `{name}` — semantics route through the interpreter's own value\n\
          /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.\n\
-         pub(super) fn {name}(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {{\n\
+         pub(super) fn {fn_ident}(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {{\n\
          \x20   let _ = fx; // AR.17: the closure capability — unused until a body reaches one\n\
          \x20   // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,\n\
          \x20   // same proven semantics; recursion cannot ride the Rust stack unbounded.\n\
@@ -546,11 +555,23 @@ enum ModPlan {
 /// included — that is how self- and mutual recursion resolve, and how named sibling arguments bind
 /// at COMPILE time), plus the LEXICAL SCOPE — scad name to Rust ident, innermost last, so `let`
 /// shadowing resolves exactly as the interpreter's scope does.
-struct Emitter<'a> {
+struct Emitter<'a, 'e> {
     baked: &'a [(&'a str, Baked)],
     siblings: &'a [Sibling],
     locals: Vec<(String, String)>,
     fresh: usize,
+    /// AR.17.2 — the def this emission compiles: scad NAME and parsed body ROOT, the two things
+    /// a mint call needs (the name is baked into `fx.mint_fn` because siblings share one `fx`;
+    /// the root is where literal paths are computed from). `None` outside a function-def
+    /// emission — module bodies and the sibling default probe — where a literal declines.
+    def_name: Option<&'e str>,
+    def_root: Option<&'e Expr>,
+    /// Rust idents whose binding RHS was SYNTACTICALLY a function literal. A call through one
+    /// emits `call_value` UNCONDITIONALLY — the value is a `Function` by construction — where
+    /// the general AN.10 shape needs a static else-half (which the letrec workers, bound to
+    /// names that are no builtin or sibling, do not have). Never truncated: `fresh_ident`
+    /// makes idents unique, so a stale entry cannot collide.
+    fn_locals: Vec<String>,
     /// Emitting a MODULE body (so `fx` is a `ModuleCtx` in scope) rather than a function.
     ///
     /// It gates exactly one thing today — whether a `$`-read can be answered by `fx.dollar` — and
@@ -566,7 +587,7 @@ struct Emitter<'a> {
     registered_defs: Vec<(usize, usize)>,
 }
 
-impl Emitter<'_> {
+impl Emitter<'_, '_> {
     /// A collision-proof Rust ident for a `let`-bound scad name (shadowing gets a new number).
     fn fresh_ident(&mut self, name: &str) -> String {
         let id = self.fresh;
@@ -743,11 +764,62 @@ impl Emitter<'_> {
                 };
                 self.call(name, args)
             }
+            // AR.17.2 — a literal is MINTED by the evaluator from the fingerprint-proven def,
+            // never compiled: its body stays interpreted AST, which is what makes nested
+            // literals, echo and `$`-reads inside it cost nothing.
+            ExprKind::FunctionLiteral { .. } => self.function_literal(e, None),
             other => Err(format!("construct outside the v0 subset: {other:?}")
                 .chars()
                 .take(120)
                 .collect()),
         }
+    }
+
+    /// AR.17.2 — a function-literal expression becomes `fx.mint_fn(def, path, self_name,
+    /// captures)`. The PATH is child indices from the def's body root under the parser's
+    /// canonical `expr_children` ordering — the fingerprint proves it addresses the same node in
+    /// the program's loaded definition. The CAPTURES are the literal subtree's free names that
+    /// are emitter locals, in VALUE and CALL position both — a call-position miss is a silent
+    /// `undef` where the interpreted twin resolves a param-held function through rung 1 (the
+    /// f_* battery's whole shape). Names that are no local resolve at invoke through the island
+    /// base or dispatch, identically in both tiers, so they need no capture — and no bake.
+    /// `binder` mirrors `name_closure`: the let-binder's name when the literal is a binding
+    /// RHS, so the 11 letrec self-recursions re-inject.
+    fn function_literal(&mut self, e: &Expr, binder: Option<&str>) -> Result<String, String> {
+        if self.in_module {
+            // ModuleCtx carries no mint capability (and no armed module contains a literal
+            // today) — the module-body first-class band is its own box, not a silent gap.
+            return Err("a function literal in a module body".into());
+        }
+        let (Some(def), Some(root)) = (self.def_name, self.def_root) else {
+            return Err("a function literal outside a compiled def body".into());
+        };
+        // The path space is the BODY: a literal in the def's own parameter defaults sits
+        // outside it and declines (zero occurrences in BOSL2 — defensive, not load-bearing).
+        let path =
+            fab_lang::find_expr_path(root, e).ok_or("a function literal in a parameter default")?;
+        let mut free = std::collections::BTreeSet::new();
+        free_reads(e, &mut Vec::new(), &mut free);
+        let caps: Vec<String> = free
+            .iter()
+            .filter_map(|n| {
+                self.locals
+                    .iter()
+                    .rev()
+                    .find(|(s, _)| s == n)
+                    .map(|(_, ident)| format!("({n:?}, {ident}.clone())"))
+            })
+            .collect();
+        let self_name = binder.map_or_else(|| "None".to_string(), |b| format!("Some({b:?})"));
+        let path_s = path
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!(
+            "fx.mint_fn({def:?}, &[{path_s}], {self_name}, &[{}])?",
+            caps.join(", ")
+        ))
     }
 
     /// Expression `let`: sequential bindings, each seeing the ones before it, gone after the
@@ -768,9 +840,22 @@ impl Emitter<'_> {
                 return Err(format!("duplicate let binding `{bn}`"));
             }
             seen.push(bn);
-            let val = self.expr(&b.value)?;
+            // A literal RHS gets the binder as `self_name` (`name_closure`'s stamp — letrec
+            // self-recursion rides it) and marks the ident as definitely-a-Function, which
+            // collapses the AN.10 conditional at its call sites. The RHS is emitted BEFORE the
+            // binding lands in `locals`, so a self-reference inside the literal is NOT a
+            // capture — exactly the interpreter's capture-at-bind order.
+            let literal_rhs = matches!(b.value.kind, ExprKind::FunctionLiteral { .. });
+            let val = if literal_rhs {
+                self.function_literal(&b.value, Some(bn))?
+            } else {
+                self.expr(&b.value)?
+            };
             let ident = self.fresh_ident(bn);
             let _ = write!(block, "let {ident} = {val}; ");
+            if literal_rhs {
+                self.fn_locals.push(ident.clone());
+            }
             self.locals.push((bn.to_string(), ident));
         }
         let body_s = self.expr(body);
@@ -849,6 +934,13 @@ impl Emitter<'_> {
                     None => "None".to_string(),
                 };
                 pairs.push(format!("({n}, {v})"));
+            }
+            // AR.17.2 — a binding whose RHS was a LITERAL is a `Function` by construction, so
+            // the rung-1 conditional collapses to an unconditional invoke. This is what
+            // un-declines the letrec workers (`a = function(…) … a(…)`): their names are no
+            // builtin or sibling, so the general shape's static else-half does not exist.
+            if self.fn_locals.iter().any(|f| f == ident) {
+                return Ok(format!("fx.call_value(&{ident}, &[{}])?", pairs.join(", ")));
             }
             let static_call = self.static_call(name, args)?;
             // Both branches evaluate their OWN argument emissions; exactly one branch runs, so
@@ -951,8 +1043,9 @@ impl Emitter<'_> {
         // never fire, and an explicit undef would silently override a real default — AN.3's bug in
         // compiled form. See `Sibling` for why inlining the default here is position-independent.
         let last_filled = slots.iter().rposition(Option::is_some);
+        let sib_ident = rust_fn_ident(name)?;
         let Some(last) = last_filled else {
-            return Ok(format!("{name}(fx, &[])?"));
+            return Ok(format!("{sib_ident}(fx, &[])?"));
         };
         let mut vals: Vec<String> = Vec::with_capacity(last + 1);
         for (i, slot) in slots.into_iter().enumerate().take(last + 1) {
@@ -971,7 +1064,7 @@ impl Emitter<'_> {
                 },
             }
         }
-        Ok(format!("{name}(fx, &[{}])?", vals.join(", ")))
+        Ok(format!("{sib_ident}(fx, &[{}])?", vals.join(", ")))
     }
 
     /// AR.20.4 — one STATEMENT as Rust that pushes any geometry it makes into `parts`.
@@ -1689,6 +1782,9 @@ fn sibling_of(subject: &Subject<'_>) -> Result<Sibling, String> {
         fresh: 0,
         in_module: false,
         registered_defs: Vec::new(),
+        def_name: None,
+        def_root: None,
+        fn_locals: Vec::new(),
     };
     let defaults = params
         .iter()
@@ -2408,6 +2504,14 @@ pub const GENERATED_ENTRIES: &[&str] = &[
     // is the computed callee: a table of function values indexed then applied.
     "_fab_poc_callshadow",
     "_fab_poc_curried2",
+    // AR.17.2 — the mint POCs: every literal position the census measured, through the real
+    // emitter (path, captures, self_name, the fn-locals collapse). `_fab_poc_mint_id` precedes
+    // `_fab_poc_mint_arg`, whose body calls it as a sibling.
+    "_fab_poc_mint_ret",
+    "_fab_poc_mint_letrec",
+    "_fab_poc_mint_id",
+    "_fab_poc_mint_arg",
+    "_fab_poc_mint_list",
     // AR.17 stage A — the migration-closed batch: every HAND native whose emitted code resolves
     // its sibling calls inside this list (measured by `hand_native_closed_batch`, not argued).
     // What stays hand traces almost entirely to `is_vector`, whose only decline is the AN.10
@@ -2561,6 +2665,122 @@ fn walk_stmt(s: &Stmt, scope: &mut Vec<String>, out: &mut Analysis) {
     }
 }
 
+/// AR.17.2 capture analysis — the free names of a literal subtree under the literal's OWN scope
+/// discipline: value-position idents AND call-position callee names, non-`$`, not bound within.
+/// Call-position names matter because the minted body resolves them through dispatch rung 1's
+/// scope walk (the f_* battery calls param-held function values); [`walk`]'s `record_call`
+/// deliberately ignores scope for GUARD over-approximation, which is the wrong direction here —
+/// a missed capture is a silent `undef` divergence — so this walk is scope-EXACT, copying
+/// [`walk`]'s binding rules verbatim.
+fn free_reads<'e>(
+    e: &'e Expr,
+    scope: &mut Vec<&'e str>,
+    out: &mut std::collections::BTreeSet<&'e str>,
+) {
+    fn read<'e>(name: &'e str, scope: &[&'e str], out: &mut std::collections::BTreeSet<&'e str>) {
+        if !name.starts_with('$') && !scope.contains(&name) {
+            out.insert(name);
+        }
+    }
+    match &e.kind {
+        ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undef => {}
+        ExprKind::Ident(name) => read(name, scope, out),
+        ExprKind::Unary { operand, .. } => free_reads(operand, scope, out),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            free_reads(lhs, scope, out);
+            free_reads(rhs, scope, out);
+        }
+        ExprKind::Ternary { cond, then, els } => {
+            free_reads(cond, scope, out);
+            free_reads(then, scope, out);
+            free_reads(els, scope, out);
+        }
+        ExprKind::Index { base, index } => {
+            free_reads(base, scope, out);
+            free_reads(index, scope, out);
+        }
+        ExprKind::Member { base, .. } => free_reads(base, scope, out),
+        ExprKind::Call { callee, args } => {
+            if let ExprKind::Ident(name) = &callee.kind {
+                read(name, scope, out);
+            } else {
+                free_reads(callee, scope, out);
+            }
+            for a in args {
+                free_reads(&a.value, scope, out);
+            }
+        }
+        ExprKind::Vector(items) => {
+            for i in items {
+                free_reads(i, scope, out);
+            }
+        }
+        ExprKind::Range { start, step, end } => {
+            free_reads(start, scope, out);
+            if let Some(s) = step {
+                free_reads(s, scope, out);
+            }
+            free_reads(end, scope, out);
+        }
+        ExprKind::FunctionLiteral { params, body } => {
+            let mark = scope.len();
+            scope.extend(params.iter().map(|p| &*p.name));
+            for p in params {
+                if let Some(d) = &p.default {
+                    free_reads(d, scope, out);
+                }
+            }
+            free_reads(body, scope, out);
+            scope.truncate(mark);
+        }
+        ExprKind::Let { bindings, body } | ExprKind::LcFor { bindings, body } => {
+            let mark = scope.len();
+            for b in bindings {
+                free_reads(&b.value, scope, out);
+                if let Some(n) = &b.name {
+                    scope.push(n);
+                }
+            }
+            free_reads(body, scope, out);
+            scope.truncate(mark);
+        }
+        ExprKind::Assert { args, body } | ExprKind::Echo { args, body } => {
+            for a in args {
+                free_reads(&a.value, scope, out);
+            }
+            if let Some(b) = body {
+                free_reads(b, scope, out);
+            }
+        }
+        ExprKind::LcForC {
+            init,
+            cond,
+            update,
+            body,
+        } => {
+            // Update BINDS before cond/body walk — the `walk` LcForC rule verbatim.
+            let mark = scope.len();
+            for b in init.iter().chain(update) {
+                free_reads(&b.value, scope, out);
+                if let Some(n) = &b.name {
+                    scope.push(n);
+                }
+            }
+            free_reads(cond, scope, out);
+            free_reads(body, scope, out);
+            scope.truncate(mark);
+        }
+        ExprKind::LcEach(inner) => free_reads(inner, scope, out),
+        ExprKind::LcIf { cond, then, els } => {
+            free_reads(cond, scope, out);
+            free_reads(then, scope, out);
+            if let Some(e2) = els {
+                free_reads(e2, scope, out);
+            }
+        }
+    }
+}
+
 fn walk(e: &Expr, scope: &mut Vec<String>, out: &mut Analysis) {
     match &e.kind {
         ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undef => {}
@@ -2619,9 +2839,39 @@ fn walk(e: &Expr, scope: &mut Vec<String>, out: &mut Analysis) {
             walk(body, scope, out);
             scope.truncate(mark);
         }
-        // `let` and comprehension-`for` share binder semantics exactly: sequential bindings, body
-        // in the extended scope, binders gone after.
-        ExprKind::Let { bindings, body } | ExprKind::LcFor { bindings, body } => {
+        // `let` and comprehension-`for` share binder semantics (sequential bindings, body in
+        // the extended scope, binders gone after) — but `let` adds one rule the comprehension
+        // form does not (AR.17.2): a binding whose RHS is a function LITERAL is scope-resolved
+        // EVERYWHERE inside this let — its own body via `name_closure`'s self-reinjection, the
+        // let body via dispatch rung 1 — never through `ctx.functions`, so it must not become a
+        // dep/const (the letrec workers' names name nothing else, and a dep that must EXIST
+        // would veto arming). `record_call` is deliberately scope-blind, so the binder's
+        // records from THIS subtree are removed after the walk; a record that predates the
+        // binder's push (an earlier sibling binding's forward reference, which really can reach
+        // a like-named global) survives via the snapshot — the guard-safe direction.
+        ExprKind::Let { bindings, body } => {
+            let mark = scope.len();
+            let mut letrec: Vec<(String, bool)> = Vec::new();
+            for b in bindings {
+                let literal_rhs = matches!(b.value.kind, ExprKind::FunctionLiteral { .. });
+                if literal_rhs && let Some(n) = &b.name {
+                    letrec.push((n.to_string(), out.deps.contains(&**n)));
+                    scope.push(n.to_string());
+                }
+                walk(&b.value, scope, out);
+                if !literal_rhs && let Some(n) = &b.name {
+                    scope.push(n.to_string());
+                }
+            }
+            walk(body, scope, out);
+            for (n, had) in letrec {
+                if !had {
+                    out.deps.remove(&n);
+                }
+            }
+            scope.truncate(mark);
+        }
+        ExprKind::LcFor { bindings, body } => {
             let mark = scope.len();
             let _ = walk_bindings(bindings, scope, out);
             walk(body, scope, out);

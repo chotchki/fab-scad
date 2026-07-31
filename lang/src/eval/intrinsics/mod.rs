@@ -798,6 +798,56 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &[],
         func: generated::_fab_poc_curried2,
     },
+    // AR.17.2 mint POCs — the census's literal POSITIONS, one each, plus every mint mechanism:
+    // a returned literal with a capture (ret), the letrec worker via the binder stamp (letrec —
+    // note deps stays EMPTY: `fac` resolves through self-reinjection, never `ctx.functions`),
+    // a literal as a sibling-call argument with a computed callee on the result (id/arg), and
+    // two literals in one vector proving DISTINCT paths (list).
+    Entry {
+        name: "_fab_poc_mint_ret",
+        reference: "function _fab_poc_mint_ret(k) = function(x) x + k;",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::_fab_poc_mint_ret,
+    },
+    Entry {
+        name: "_fab_poc_mint_letrec",
+        reference: "function _fab_poc_mint_letrec(n) = let(fac = function(x) x <= 1 ? 1 : x * fac(x - 1)) fac(n);",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::_fab_poc_mint_letrec,
+    },
+    Entry {
+        name: "_fab_poc_mint_id",
+        reference: "function _fab_poc_mint_id(f) = f;",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::_fab_poc_mint_id,
+    },
+    Entry {
+        name: "_fab_poc_mint_arg",
+        reference: "function _fab_poc_mint_arg(v) = _fab_poc_mint_id(function(x) x + v)(10);",
+        consts: &[],
+        consts_v: &[],
+        deps: &["_fab_poc_mint_id"],
+        builtins: &[],
+        func: generated::_fab_poc_mint_arg,
+    },
+    Entry {
+        name: "_fab_poc_mint_list",
+        reference: "function _fab_poc_mint_list(a) = [function(x) x + a, function(x) x - a];",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::_fab_poc_mint_list,
+    },
     // AR.17 stage D — the two CLEAN missing-callee entries (verbatim from utility.scad /
     // vnf.scad), added because select's whole cone stood behind `is_range` and apply/_vnf_centroid
     // behind `is_vnf`. The other two blockers cascade (constrain needs flatten+list_to_matrix,

@@ -80,6 +80,11 @@ function _fab_poc_sib(a, b=7, c=1) = [a, b, c];
 function _fab_poc_hole(x) = _fab_poc_sib(x, c=3);
 function _fab_poc_callshadow(last, x) = last(x);
 function _fab_poc_curried2(fs, i, x) = fs[i](x);
+function _fab_poc_mint_ret(k) = function(x) x + k;
+function _fab_poc_mint_letrec(n) = let(fac = function(x) x <= 1 ? 1 : x * fac(x - 1)) fac(n);
+function _fab_poc_mint_id(f) = f;
+function _fab_poc_mint_arg(v) = _fab_poc_mint_id(function(x) x + v)(10);
+function _fab_poc_mint_list(a) = [function(x) x + a, function(x) x - a];
 function _is_liststr(s) = is_list(s) || is_str(s);
 function point3d(p, fill=0) = assert(is_list(p)) [for (i=[0:2]) (p[i]==undef)? fill : p[i]];
 function _list_pattern(list) =
@@ -375,6 +380,11 @@ pub(super) static SURFACE: &[rt::Decl] = &[
     rt::Decl { name: "_fab_poc_curried2", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "fs", domain: rt::Domain::List, required: true }, rt::Param { name: "i", domain: rt::Domain::Num, required: true }, rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_hole", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_isup", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "v", domain: rt::Domain::Num, required: true }] },
+    rt::Decl { name: "_fab_poc_mint_arg", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "v", domain: rt::Domain::Num, required: true }] },
+    rt::Decl { name: "_fab_poc_mint_id", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "f", domain: rt::Domain::Num, required: true }] },
+    rt::Decl { name: "_fab_poc_mint_letrec", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "n", domain: rt::Domain::Num, required: true }] },
+    rt::Decl { name: "_fab_poc_mint_list", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "a", domain: rt::Domain::Num, required: true }] },
+    rt::Decl { name: "_fab_poc_mint_ret", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "k", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_near0", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_outer", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_sib", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "a", domain: rt::Domain::Num, required: true }, rt::Param { name: "b", domain: rt::Domain::Num, required: false }, rt::Param { name: "c", domain: rt::Domain::Num, required: false }] },
@@ -726,6 +736,76 @@ pub(super) fn _fab_poc_curried2(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::R
     let p_i = args.get(1).cloned().unwrap_or(rt::Value::Undef);
     let p_x = args.get(2).cloned().unwrap_or(rt::Value::Undef);
     let out = fx.call_value(&rt::index(p_fs.clone(), &p_i.clone()), &[(None, p_x.clone())])?;
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_mint_ret` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_mint_ret(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_mint_ret", args);
+    };
+    let p_k = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = fx.mint_fn("_fab_poc_mint_ret", &[], None, &[("k", p_k.clone())])?;
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_mint_letrec` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_mint_letrec(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_mint_letrec", args);
+    };
+    let p_n = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = { let l0_fac = fx.mint_fn("_fab_poc_mint_letrec", &[0], Some("fac"), &[])?; fx.call_value(&l0_fac, &[(None, p_n.clone())])? };
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_mint_id` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_mint_id(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_mint_id", args);
+    };
+    let p_f = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = p_f.clone();
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_mint_arg` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_mint_arg(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_mint_arg", args);
+    };
+    let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = fx.call_value(&_fab_poc_mint_id(fx, &[fx.mint_fn("_fab_poc_mint_arg", &[0, 1], None, &[("v", p_v.clone())])?])?, &[(None, rt::Value::Num(f64::from_bits(0x4024000000000000_u64)))])?;
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_mint_list` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_mint_list(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_mint_list", args);
+    };
+    let p_a = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = rt::build_vector(vec![fx.mint_fn("_fab_poc_mint_list", &[0], None, &[("a", p_a.clone())])?, fx.mint_fn("_fab_poc_mint_list", &[1], None, &[("a", p_a.clone())])?]);
     Ok(out)
 }
 

@@ -4925,6 +4925,81 @@ fn first_class_functions_run_through_the_flipped_abi() {
     }
 }
 
+/// AR.17.2 — minted literals end-to-end at SOURCE level, every census position through the real
+/// emitter: returned (a), let-bound letrec (c), call-argument with a computed callee on the
+/// result (d), list elements with DISTINCT paths (e, g). The console is the witness — including
+/// `str()` of a minted value (g), which pins `repr` against the interpreter's own rendering, and
+/// the AH.2.7 identity pins (h, i): two mints are two identities, an alias is the same one.
+///
+/// The wiring asserts run through `resolve` (the fingerprint gate) AND `build_intrinsics` would
+/// still guard-decline silently — the stage-C lesson — so the values are pinned too: a
+/// guard-declined native makes the tiers trivially agree, but `a = 7` catching a wrong answer
+/// requires the answer, not the agreement.
+#[test]
+fn minted_literals_run_through_the_native_tier() {
+    use crate::parser::{StmtKind, parse};
+    let names = [
+        "_fab_poc_mint_ret",
+        "_fab_poc_mint_letrec",
+        "_fab_poc_mint_id",
+        "_fab_poc_mint_arg",
+        "_fab_poc_mint_list",
+    ];
+    let mut refs = String::new();
+    for name in names {
+        let r = reference_of(name).expect("registered");
+        let prog = parse(r).expect("parses");
+        let Some(StmtKind::FunctionDef { params, body, .. }) = prog.stmts.first().map(|s| &s.kind)
+        else {
+            panic!("expected a function def");
+        };
+        assert!(
+            resolve(name, params, body).is_some(),
+            "{name} must wire before agreement means anything"
+        );
+        refs.push_str(r);
+        refs.push('\n');
+    }
+    let src = format!(
+        "{refs}\
+         echo(a=_fab_poc_mint_ret(3)(4));\n\
+         f = _fab_poc_mint_ret(10);\n\
+         echo(b=f(5));\n\
+         echo(c=_fab_poc_mint_letrec(5));\n\
+         echo(d=_fab_poc_mint_arg(2));\n\
+         echo(e=_fab_poc_mint_list(5)[0](1));\n\
+         echo(g=str(_fab_poc_mint_list(5)[1]));\n\
+         p = _fab_poc_mint_ret(1);\n\
+         q = _fab_poc_mint_ret(1);\n\
+         r = p;\n\
+         echo(h=p == q, i=p == r);"
+    );
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (_, msgs) =
+            crate::evaluate_geometry_with_base_config(&src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        format!("{msgs:?}")
+    };
+    let on = run(true);
+    let off = run(false);
+    assert_eq!(on, off, "minted-literal shapes diverged across tiers");
+    for want in [
+        "a = 7",
+        "b = 15",
+        "c = 120",
+        "d = 12",
+        "e = 6",
+        "function(x) (x - a)",
+        "h = false, i = true",
+    ] {
+        assert!(on.contains(want), "missing `{want}` in {on}");
+    }
+}
+
 #[test]
 fn a_sibling_call_with_a_hole_takes_the_callees_default() {
     let reference = reference_of("_fab_poc_hole").expect("registered");

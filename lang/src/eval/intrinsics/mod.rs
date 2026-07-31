@@ -872,6 +872,66 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &["is_list", "len", "is_num", "norm", "abs", "is_undef"],
         func: generated::is_vnf,
     },
+    // ── AR.17.2.3, the first MINT slice (fnliterals.scad verbatim) ───────────────────────────
+    // The census's real shapes: the currying factories (nested literals, zero-param literals,
+    // partial-application branches), `reduce` (the letrec worker — note deps EMPTY: `a` rides
+    // self-reinjection and `func` is a captured parameter, both scope-resolved in both tiers),
+    // and `f_gt` (a literal as a sibling-call argument, computed callee on the result — the
+    // 71-strong f_* battery's exact shape).
+    Entry {
+        name: "reduce",
+        reference: "function reduce(func, list, init=0) =\n    assert(is_function(func))\n    assert(is_list(list))\n    let(\n        l = len(list),\n        a = function (x,i) i<l? a(func(x,list[i]), i+1) : x\n    ) a(init,0);",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &["is_function", "is_list", "len"],
+        func: generated::reduce,
+    },
+    Entry {
+        name: "f_1arg",
+        reference: "function f_1arg(target_func) =\n    function(a)\n        a==undef? function(x) target_func(x) :\n        function() target_func(a);",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::f_1arg,
+    },
+    Entry {
+        name: "f_2arg",
+        reference: "function f_2arg(target_func) =\n    function(a,b)\n        a==undef && b==undef? function(x,y) target_func(x,y) :\n        a==undef? function(x) target_func(x,b) :\n        b==undef? function(x) target_func(a,x) :\n        function() target_func(a,b);",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::f_2arg,
+    },
+    Entry {
+        name: "f_2arg_simple",
+        reference: "function f_2arg_simple(target_func) =\n    function(a,b)\n        a==undef && b==undef? function(x,y) target_func(x,y) :\n        b==undef? function(x) target_func(x,a) :\n        function() target_func(a,b);",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::f_2arg_simple,
+    },
+    Entry {
+        name: "f_3arg",
+        reference: "function f_3arg(target_func) =\n    function(a,b,c)\n        a==undef && b==undef && c==undef? function(x,y,z) target_func(x,y,z) :\n        a==undef && b==undef? function(x,y) target_func(x,y,c) :\n        a==undef && c==undef? function(x,y) target_func(x,b,y) :\n        b==undef && c==undef? function(x,y) target_func(a,x,y) :\n        a==undef? function(x) target_func(x,b,c) :\n        b==undef? function(x) target_func(a,x,c) :\n        c==undef? function(x) target_func(a,b,x) :\n        function() target_func(a,b,c);",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::f_3arg,
+    },
+    Entry {
+        name: "f_gt",
+        reference: "function f_gt(a,b) = f_2arg_simple(function (a,b) a>b)(a,b);",
+        consts: &[],
+        consts_v: &[],
+        deps: &["f_2arg_simple"],
+        builtins: &[],
+        func: generated::f_gt,
+    },
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
     // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four
     // (every BOSL2 path/vector assert funnels through it), `num_defined`/`force_list` are its cheap leaf

@@ -25,7 +25,16 @@ fn committed_bosl2_pin_matches_every_intrinsic() {
         eprintln!("skipping: libs/BOSL2 not checked out (git submodule update --init libs/BOSL2)");
         return;
     }
-    let rows = fab_lang::intrinsic_matrix("include <std.scad>\n", &bosl2, &[]).expect("audit runs");
+    // Every ROOT the registry draws entries from — std's closure, plus the opt-in roots
+    // (AR.17.2.3 armed fnliterals, which std deliberately does not include). An entry from a
+    // root not listed here audits as Missing, which is this test failing correctly: the pin
+    // must cover what the registry claims.
+    let rows = fab_lang::intrinsic_matrix(
+        "include <std.scad>\ninclude <fnliterals.scad>\n",
+        &bosl2,
+        &[],
+    )
+    .expect("audit runs");
     assert!(!rows.is_empty(), "registry can't be empty");
     let off: Vec<_> = rows
         .iter()

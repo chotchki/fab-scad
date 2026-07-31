@@ -5000,6 +5000,74 @@ fn minted_literals_run_through_the_native_tier() {
     }
 }
 
+/// AR.17.2.3 — the first REAL mint slice at source level: fnliterals' currying factories
+/// (nested literals, partial-application branches, a zero-param literal), `reduce`'s letrec
+/// worker riding a captured parameter, and `f_gt`'s literal-as-argument + computed-callee
+/// shape — the 71-strong f_* battery's exact form — all through their verbatim registry
+/// references. Values pinned per the stage-C lesson: agreement alone survives a guard-decline.
+#[test]
+fn the_fnliterals_mint_slice_runs_native() {
+    use crate::parser::{StmtKind, parse};
+    let names = [
+        "reduce",
+        "f_1arg",
+        "f_2arg",
+        "f_2arg_simple",
+        "f_3arg",
+        "f_gt",
+    ];
+    let mut refs = String::new();
+    for name in names {
+        let r = reference_of(name).expect("registered");
+        let prog = parse(r).expect("parses");
+        let Some(StmtKind::FunctionDef { params, body, .. }) = prog.stmts.first().map(|s| &s.kind)
+        else {
+            panic!("expected a function def");
+        };
+        assert!(
+            resolve(name, params, body).is_some(),
+            "{name} must wire before agreement means anything"
+        );
+        refs.push_str(r);
+        refs.push('\n');
+    }
+    let src = format!(
+        "{refs}\
+         echo(a=reduce(function(x,y) x + y, [1, 2, 3, 4]));\n\
+         echo(b=f_gt(5, 2)(), c=f_gt(2, 5)());\n\
+         echo(f=str(f_gt(1, 2)));\n\
+         fc = f_3arg(function(x,y,z) x * 100 + y * 10 + z);\n\
+         g = fc(1, undef, 3);\n\
+         echo(d=g(5));\n\
+         h = f_1arg(function(x) x * 3)(undef);\n\
+         echo(e=h(7));"
+    );
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (_, msgs) =
+            crate::evaluate_geometry_with_base_config(&src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        format!("{msgs:?}")
+    };
+    let on = run(true);
+    let off = run(false);
+    assert_eq!(on, off, "the fnliterals mint slice diverged across tiers");
+    for want in [
+        "a = 10",
+        "b = true, c = false",
+        "d = 153",
+        "e = 21",
+        // upstream's factories return partially-applied THUNKS — `f_gt(5,2)` is a zero-arg
+        // closure, applied above; this pins the thunk's repr (a nested minted literal) too.
+        "function() target_func(a, b)",
+    ] {
+        assert!(on.contains(want), "missing `{want}` in {on}");
+    }
+}
+
 #[test]
 fn a_sibling_call_with_a_hole_takes_the_callees_default() {
     let reference = reference_of("_fab_poc_hole").expect("registered");

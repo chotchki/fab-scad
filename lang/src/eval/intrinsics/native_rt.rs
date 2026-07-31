@@ -57,6 +57,23 @@ impl Drop for DepthGuard {
     }
 }
 
+/// Does this value CARRY a closure, at any depth? A `Value::Function`'s `closure_id` indexes the
+/// evaluator it was minted in — it cannot cross into the fallback's throwaway ctx (inbound) or
+/// out of it (outbound) without silently resolving against the WRONG closure table. Lists and
+/// objects can hold closures; every other variant cannot. Explicit work stack, house doctrine.
+fn carries_closure(v: &Value) -> bool {
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Function { .. } => return true,
+            Value::List(items) => stack.extend(items.iter()),
+            Value::Object(map) => stack.extend(map.iter().map(|(_, v)| v)),
+            _ => {}
+        }
+    }
+    false
+}
+
 /// The decline path: interpret `name` from `sources` (parsed once per thread PER ISLAND) with
 /// intrinsics DISABLED — one machine, explicit stack, no interior dispatch bouncing back to a
 /// declining native. `sources` is `&'static str` BY CONTRACT, not convenience: the cache keys on
@@ -67,8 +84,19 @@ impl Drop for DepthGuard {
 /// # Errors
 /// Whatever interpreting `name` raises — an `assert` in the reference propagates exactly as it
 /// would from the native, which is the point of the fallback. Also errors if `sources` fails to
-/// parse, which the caller's own codegen already ruled out.
+/// parse, which the caller's own codegen already ruled out — and, LOUDLY, when a closure would
+/// cross the boundary in either direction (see below; AR.24 owns the real fix).
 pub fn run_interpreted(sources: &'static str, name: &str, args: &[Value]) -> crate::Result<Value> {
+    // AR.17.2 seam, refused LOUDLY in both directions: a closure crossing the fallback boundary
+    // would carry a `closure_id` into a foreign table — inbound (`reduce`'s `func` at depth) the
+    // throwaway ctx would invoke the wrong entry, outbound (`f_1arg`'s returned literal) the real
+    // ctx would. Loud beats silently-wrong; the real fix — routing depth-declines through `fx`
+    // so the reference interprets in the LIVE evaluator — is AR.24.
+    if args.iter().any(carries_closure) {
+        return Err(crate::Error::Unimplemented(
+            "a depth-declined native was handed a closure — it cannot cross into the fallback evaluator (AR.24)",
+        ));
+    }
     let key = (sources.as_ptr() as usize, sources.len());
     let program = FALLBACK.with(|cell| {
         let mut cache = cell.borrow_mut();
@@ -81,7 +109,15 @@ pub fn run_interpreted(sources: &'static str, name: &str, args: &[Value]) -> cra
         }
     });
     match program {
-        Some(p) => crate::eval::interpret_fn_pure(&p, name, args),
+        Some(p) => {
+            let out = crate::eval::interpret_fn_pure(&p, name, args)?;
+            if carries_closure(&out) {
+                return Err(crate::Error::Unimplemented(
+                    "a depth-declined native produced a closure — it cannot cross out of the fallback evaluator (AR.24)",
+                ));
+            }
+            Ok(out)
+        }
         None => Err(super::bosl_assert(
             "generated fallback sources failed to parse",
         )),
@@ -111,6 +147,38 @@ mod tests {
         drop(again);
         drop(held);
         assert!(DepthGuard::enter().is_some(), "all levels returned");
+    }
+
+    /// AR.17.2 — closures REFUSE the fallback boundary in BOTH directions, loudly: a
+    /// `closure_id` is only meaningful in the evaluator that minted it, so inbound (a closure
+    /// argument at depth) the throwaway ctx would invoke the wrong table entry and outbound (a
+    /// literal-returning native like `f_1arg`) the real ctx would. Silent corruption either
+    /// way; the refusal is the interim seam until AR.24 routes declines through `fx`.
+    #[test]
+    fn closures_refuse_the_fallback_boundary() {
+        use crate::eval::value::Value;
+        let f = Value::Function {
+            closure_id: 0,
+            env: crate::eval::scope::Scope::new(),
+            self_name: None,
+            repr: "function() 1".into(),
+            group: None,
+            bound_this: None,
+        };
+        // inbound: a closure argument, bare and nested in a list.
+        for arg in [f.clone(), Value::list(vec![Value::Num(1.0), f.clone()])] {
+            let out = super::run_interpreted("function t(x) = 1;", "t", &[arg]);
+            assert!(out.is_err(), "a closure argument must refuse the boundary");
+        }
+        // outbound: the interpreted reference RETURNS a literal.
+        let out = super::run_interpreted("function t() = function(x) x;", "t", &[]);
+        assert!(out.is_err(), "a returned closure must refuse the boundary");
+        // and a plain value still flows.
+        let out = super::run_interpreted("function u() = 41 + 1;", "u", &[]);
+        assert_eq!(
+            out.expect("closure-free fallback still answers"),
+            Value::Num(42.0)
+        );
     }
 
     /// Two distinct islands on ONE thread each interpret their OWN program — the cache keys on

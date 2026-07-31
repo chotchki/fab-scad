@@ -2512,6 +2512,15 @@ pub const GENERATED_ENTRIES: &[&str] = &[
     "_fab_poc_mint_id",
     "_fab_poc_mint_arg",
     "_fab_poc_mint_list",
+    // AR.17.2.3 — the first REAL mint slice: fnliterals' currying factories, the reduce letrec
+    // worker, and f_gt (literal-as-argument + computed callee — the f_* battery's shape).
+    // `f_2arg_simple` precedes `f_gt`, whose body calls it as a sibling.
+    "reduce",
+    "f_1arg",
+    "f_2arg",
+    "f_2arg_simple",
+    "f_3arg",
+    "f_gt",
     // AR.17 stage A — the migration-closed batch: every HAND native whose emitted code resolves
     // its sibling calls inside this list (measured by `hand_native_closed_batch`, not argued).
     // What stays hand traces almost entirely to `is_vector`, whose only decline is the AN.10
@@ -2836,7 +2845,22 @@ fn walk(e: &Expr, scope: &mut Vec<String>, out: &mut Analysis) {
                     walk(d, scope, out);
                 }
             }
-            walk(body, scope, out);
+            // AR.17.2: a literal's body dispatches at INVOKE against the captured env, so a
+            // call to a SCOPE-BOUND name (a capture, or the literal's own param) resolves
+            // through rung 1 in both tiers — it is not a `ctx.functions` dep, and recording it
+            // as one would demand a function the program need not define (`reduce`'s `func` is
+            // a parameter; an existence check on "func" vetoes the whole entry). Free call
+            // names — and every builtin — still record: the guard-safe over-approximation
+            // stays for everything the scope cannot prove.
+            let mut inner = Analysis::default();
+            walk(body, scope, &mut inner);
+            out.consts.extend(inner.consts);
+            out.builtins.extend(inner.builtins);
+            for d in inner.deps {
+                if !scope.contains(&d) {
+                    out.deps.insert(d);
+                }
+            }
             scope.truncate(mark);
         }
         // `let` and comprehension-`for` share binder semantics (sequential bindings, body in
@@ -3234,10 +3258,15 @@ mod tests {
         ///
         /// 1105 at AR.17 stage C: computed callees (`f(a)(b)`, `fns[i](x)`) and AN.10
         /// local-binding calls emit through `FnCtx` — invoking a VALUE is the one capability the
-        /// flip bought. The big remaining band is function LITERALS (107, mostly re-attributed
-        /// from behind the computed-callee declines), which need closure MINTING — the
-        /// def_body-for-expressions design, deliberately not improvised.
-        const FLOOR: usize = 1105;
+        /// flip bought.
+        ///
+        /// 1206 at AR.17.2: function LITERALS emit as `fx.mint_fn` calls — the evaluator
+        /// constructs the closure from a path-addressed node of the fingerprint-proven def, so
+        /// the whole 107-strong literal band collapsed in one move (fnliterals.scad essentially
+        /// whole). The tail is now free reads (36), echo-in-function (28), C-style
+        /// comprehensions (11), `rands` (8), `$`-args in sibling calls (~15), and the
+        /// param-held-callee shape (12) whose conditional emission has no static else-half.
+        const FLOOR: usize = 1206;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

@@ -674,10 +674,15 @@ impl Emitter<'_, '_> {
                 Ok(format!("rt::member({}, {field:?})", self.expr(base)?))
             }
             ExprKind::Let { bindings, body } => self.let_expr(bindings, body),
-            // Expression `assert`: the control-flow contract (Entry doc) — raise where the
-            // interpreter raises; the diagnostic string is a locator, not output, and the message
-            // args are NOT evaluated (matches the hand natives; upstream only evaluates them on
-            // failure, and no registry reference carries a side-effectful message).
+            // Expression `assert`: raise where the interpreter raises, with the INTERPRETER'S
+            // OWN verdict (AR.17.2 skeptic finding — `bosl_assert("generated")` was a fatal
+            // `Eval` with the text lost, where the twin raises the soft-caught `Assert` carrying
+            // the pretty-printed condition; outcome, geometry and console all diverged, `posmod`
+            // included since band 3). The condition source is baked from OUR parse — fingerprint
+            // identity makes it byte-equal to the twin's `print_expr`. A MESSAGE arg evaluates
+            // in the failure branch only: the twin evaluates it eagerly-with-rollback even on a
+            // pass, but the value is discarded and no registry reference carries a side-effectful
+            // message, so the observable behavior is identical where anything arms.
             ExprKind::Assert { args, body } => {
                 let Some(cond) = args.first() else {
                     return Err("assert with no condition".into());
@@ -691,11 +696,17 @@ impl Emitter<'_, '_> {
                     None => "rt::Value::Undef".to_string(),
                 };
                 // A fired assert DECLINES in a module body (the interpreted re-run carries the
-                // real message + non-fatality); in a function native it stays the fatal verdict.
+                // real message + non-fatality); in a function native it raises the twin verdict.
                 let raise = if self.in_module {
-                    "rt::assert_decline()"
+                    "rt::assert_decline()".to_string()
                 } else {
-                    "rt::bosl_assert(\"generated\")"
+                    let msg = match args.get(1) {
+                        None => "None".to_string(),
+                        Some(m) if m.name.is_none() => format!("Some(&{})", self.expr(&m.value)?),
+                        Some(_) => return Err("named assert message".into()),
+                    };
+                    let cond_src = fab_lang::print_expr(&cond.value);
+                    format!("rt::assert_failed({msg}, {cond_src:?})")
                 };
                 Ok(format!(
                     "{{ if !({c}).is_truthy() {{ return Err({raise}); }} {b} }}"
@@ -798,6 +809,21 @@ impl Emitter<'_, '_> {
         // outside it and declines (zero occurrences in BOSL2 — defensive, not load-bearing).
         let path =
             fab_lang::find_expr_path(root, e).ok_or("a function literal in a parameter default")?;
+        // A `$`-read in THIS literal's param defaults evaluates against the minted env's base
+        // chain — severed from the creation site's `$`-context, which the twin's whole-scope
+        // capture reaches (skeptic finding: q = 42 interpreted vs 0 minted). Body `$`-reads
+        // ride the INVOKE site's chain identically in both tiers, and nested literals are
+        // minted by the interpreter itself — only the top literal's own defaults are the hole.
+        // Zero occurrences in BOSL2; decline loudly rather than arm wrong.
+        if let ExprKind::FunctionLiteral { params, .. } = &e.kind {
+            for p in params {
+                if let Some(d) = &p.default
+                    && subtree_reads_dollar(d)
+                {
+                    return Err("a `$`-read in a function-literal parameter default".into());
+                }
+            }
+        }
         let mut free = std::collections::BTreeSet::new();
         free_reads(e, &mut Vec::new(), &mut free);
         let caps: Vec<String> = free
@@ -1699,9 +1725,21 @@ impl Emitter<'_, '_> {
                         return Err(format!("duplicate let binding `{bn}`"));
                     }
                     seen.push(bn);
-                    let val = self.expr(&b.value)?;
+                    // The SAME binder threading as `let_expr` (skeptic finding: this arm went
+                    // through bare `expr`, so an element-position letrec minted with NO
+                    // self_name and no fn-locals mark — a binder colliding with a builtin
+                    // recursed into `rt::bi::*` instead of itself, silently).
+                    let literal_rhs = matches!(b.value.kind, ExprKind::FunctionLiteral { .. });
+                    let val = if literal_rhs {
+                        self.function_literal(&b.value, Some(bn))?
+                    } else {
+                        self.expr(&b.value)?
+                    };
                     let ident = self.fresh_ident(bn);
                     let _ = write!(out, "let {ident} = {val}; ");
+                    if literal_rhs {
+                        self.fn_locals.push(ident.clone());
+                    }
                     self.locals.push((bn.to_string(), ident));
                 }
                 let body_s = self.element(body, acc);
@@ -2674,6 +2712,22 @@ fn walk_stmt(s: &Stmt, scope: &mut Vec<String>, out: &mut Analysis) {
     }
 }
 
+/// Does any node of this subtree READ a `$`-name (value or call position)? The mint-decline
+/// probe for literal param defaults — see `function_literal`.
+fn subtree_reads_dollar(e: &Expr) -> bool {
+    let mut stack = vec![e];
+    while let Some(e) = stack.pop() {
+        // `expr_children` includes call CALLEES, so the Ident arm covers both positions.
+        if let ExprKind::Ident(n) = &e.kind
+            && n.starts_with('$')
+        {
+            return true;
+        }
+        stack.extend(fab_lang::expr_children(e));
+    }
+    false
+}
+
 /// AR.17.2 capture analysis — the free names of a literal subtree under the literal's OWN scope
 /// discipline: value-position idents AND call-position callee names, non-`$`, not bound within.
 /// Call-position names matter because the minted body resolves them through dispatch rung 1's
@@ -2732,13 +2786,18 @@ fn free_reads<'e>(
             free_reads(end, scope, out);
         }
         ExprKind::FunctionLiteral { params, body } => {
+            // Defaults evaluate in the closure's BASE (bind_values phase 1), where the
+            // literal's own params are NOT visible — walk them BEFORE the params enter scope
+            // (skeptic finding: a default reading a name that collides with a param counted as
+            // bound-within, so the enclosing binding went uncaptured and the mint answered
+            // undef where the twin answered the captured value).
             let mark = scope.len();
-            scope.extend(params.iter().map(|p| &*p.name));
             for p in params {
                 if let Some(d) = &p.default {
                     free_reads(d, scope, out);
                 }
             }
+            scope.extend(params.iter().map(|p| &*p.name));
             free_reads(body, scope, out);
             scope.truncate(mark);
         }
@@ -2838,13 +2897,16 @@ fn walk(e: &Expr, scope: &mut Vec<String>, out: &mut Analysis) {
             walk(end, scope, out);
         }
         ExprKind::FunctionLiteral { params, body } => {
+            // Defaults BEFORE params enter scope — they evaluate in the closure's BASE where
+            // the literal's own params are not visible (same rule as `free_reads`; the old
+            // order under-approximated consts for a default shadowed by a sibling param).
             let mark = scope.len();
-            scope.extend(params.iter().map(|p: &Parameter| p.name.to_string()));
             for p in params {
                 if let Some(d) = &p.default {
                     walk(d, scope, out);
                 }
             }
+            scope.extend(params.iter().map(|p: &Parameter| p.name.to_string()));
             // AR.17.2: a literal's body dispatches at INVOKE against the captured env, so a
             // call to a SCOPE-BOUND name (a capture, or the literal's own param) resolves
             // through rung 1 in both tiers — it is not a `ctx.functions` dep, and recording it
@@ -3634,6 +3696,64 @@ mod tests {
         assert!(
             natives(&from_library).contains("pub(super) fn is_nan"),
             "the comparison would hold on two empty strings"
+        );
+    }
+
+    /// AR.17.2 skeptic regressions, emit-level — the three capture/self_name holes the
+    /// adversarial pass found by inspecting emitted text, pinned here the same way.
+    #[test]
+    fn skeptic_literal_holes_stay_closed() {
+        // (1) An ELEMENT-position letrec gets its binder as self_name and the fn-locals
+        // collapse — the old arm went through bare `expr`, so a binder colliding with a
+        // builtin (`norm`) recursed into `rt::bi::norm` instead of itself, silently.
+        let code = super::generate_native(
+            "function _sk6(n) = [for (i = [0 : n]) let(norm = function(k) k <= 0 ? 0 : norm(k - 1)) norm(i)];",
+            &[],
+            &[],
+        )
+        .expect("generates");
+        assert!(
+            code.contains("Some(\"norm\")"),
+            "element-let binder must ride self_name:\n{code}"
+        );
+        assert!(
+            !code.contains("rt::bi::norm"),
+            "the letrec call must collapse to call_value, not fall to the builtin:\n{code}"
+        );
+
+        // (2) A literal-param DEFAULT evaluates in the closure's BASE — a default reading a
+        // name that collides with a sibling param must still CAPTURE the enclosing binding.
+        let code = super::generate_native("function _sk5(y) = function(y, x = y) x;", &[], &[])
+            .expect("generates");
+        assert!(
+            code.contains("(\"y\", p_y.clone())"),
+            "the shadowed default read must capture the enclosing param:\n{code}"
+        );
+
+        // (3) A `$`-read in a literal's param default has no faithful minted env — decline.
+        let err = super::generate_native("function _sk8() = function(x = $fn) x;", &[], &[])
+            .expect_err("must decline");
+        assert!(err.contains("parameter default"), "got: {err}");
+    }
+
+    /// AR.17.2 skeptic regression — a fired expression assert emits the INTERPRETER'S verdict:
+    /// `rt::assert_failed` with the pretty-printed condition baked and the message arg
+    /// evaluated in the failure branch, never the old fatal `bosl_assert("generated")`.
+    #[test]
+    fn a_fired_assert_emits_the_twin_verdict() {
+        let code = super::generate_native(
+            "function _ska(x) = assert(is_num(x), \"boom\") x;",
+            &[],
+            &[],
+        )
+        .expect("generates");
+        assert!(
+            code.contains("rt::assert_failed(Some(") && code.contains("\"is_num(x)\""),
+            "missing the twin verdict in:\n{code}"
+        );
+        assert!(
+            !code.contains("bosl_assert"),
+            "the placeholder verdict must be gone:\n{code}"
         );
     }
 

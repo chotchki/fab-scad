@@ -5122,6 +5122,73 @@ fn depth_declines_reinterpret_in_the_live_evaluator() {
     }
 }
 
+/// AR.17.2 skeptic regression — a FIRED assert inside a wired native matches the interpreted
+/// verdict exactly: the render COMPLETES (Ok), geometry built before the assert exports, and
+/// the console carries `Error("assertion failed …")` with the REAL condition text (and the
+/// evaluated message, posmod's shape). The old `bosl_assert("generated")` was a fatal `Eval`
+/// that killed the render with the text lost — outcome, geometry and console all diverged,
+/// and the class predated the mint band (posmod, armed since band 3).
+#[test]
+fn a_fired_assert_in_a_native_matches_the_interpreted_verdict() {
+    use crate::parser::{StmtKind, parse};
+    let assemble = |names: &[&str]| -> String {
+        let mut refs = String::new();
+        for name in names {
+            let r = reference_of(name).expect("registered");
+            let prog = parse(r).expect("parses");
+            let Some(StmtKind::FunctionDef { params, body, .. }) =
+                prog.stmts.first().map(|s| &s.kind)
+            else {
+                panic!("expected a function def");
+            };
+            assert!(
+                resolve(name, params, body).is_some(),
+                "{name} must wire before agreement means anything"
+            );
+            refs.push_str(r);
+            refs.push('\n');
+        }
+        refs
+    };
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("the render must COMPLETE — a fired assert is soft-caught");
+        format!("{geo:?} {msgs:?}")
+    };
+
+    // The message-less shape (reduce's is_function guard), with geometry BEFORE the assert.
+    let src = format!(
+        "{}cube(1);\necho(z=reduce(5, [1, 2, 3]));",
+        assemble(&["reduce"])
+    );
+    let on = run(&src, true);
+    let off = run(&src, false);
+    assert_eq!(on, off, "the fired-assert verdict diverged across tiers");
+    assert!(
+        on.contains("assertion failed [assert(is_function(func))]"),
+        "missing the real assert text in {on}"
+    );
+
+    // The MESSAGE-carrying shape (posmod's finite guard) — the evaluated message is part of
+    // the answer. Its cone: approx bakes _EPSILON, so the program must bind it to the bake.
+    let src = format!(
+        "_EPSILON = 1e-9;\n{}echo(p=posmod(1, 0));",
+        assemble(&["is_nan", "is_finite", "approx", "posmod"])
+    );
+    let on = run(&src, true);
+    let off = run(&src, false);
+    assert_eq!(on, off, "the message-carrying assert diverged across tiers");
+    assert!(
+        on.contains("The divisor cannot be zero."),
+        "missing the evaluated message in {on}"
+    );
+}
+
 #[test]
 fn a_sibling_call_with_a_hole_takes_the_callees_default() {
     let reference = reference_of("_fab_poc_hole").expect("registered");

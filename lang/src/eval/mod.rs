@@ -4325,14 +4325,10 @@ fn assert_verdict<'a>(
     if passed {
         return Ok(());
     }
-    let locator = format!(" [assert({cond_src})]");
     // Error::Assert (NOT Eval): OpenSCAD prints the assert ERROR but still exports the geometry built before
     // it, so the top-level geometry driver catches this to warn + halt + keep the partial (L.5.8).
-    Err(crate::Error::Assert(match message {
-        Some(Value::Str(s)) => format!("assertion failed: {s}{locator}"),
-        Some(other) => format!("assertion failed: {}{locator}", fmt::format_value(&other)),
-        None => format!("assertion failed{locator}"),
-    }))
+    // ONE constructor with the native tier (AR.17.2) — text parity is part of the differential answer.
+    Err(intrinsics::assert_failed(message.as_ref(), &cond_src))
 }
 
 /// Collect user function definitions into the [`Ctx`] store (their own namespace). A pre-pass over the

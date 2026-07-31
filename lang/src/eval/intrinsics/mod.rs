@@ -2037,10 +2037,33 @@ fn v_is_list(v: &Value) -> bool {
 }
 
 /// A raised BOSL2 `assert(…)` — the message is a diagnostic LOCATOR (fast==slow matches "both raised", not
-/// text), same contract as [`select_assert`].
+/// text), same contract as [`select_assert`]. HAND-native only since AR.17.2: generated code
+/// raises [`assert_failed`], the interpreter's own verdict.
 #[must_use]
 pub fn bosl_assert(msg: &str) -> crate::Error {
     crate::Error::Eval(format!("assert failed: {msg}"))
+}
+
+/// The assert-failure ERROR, ONE constructor for both tiers (the skeptic pass's confirmed
+/// divergence: generated natives raised a fatal `Eval("assert failed: generated")` where the
+/// interpreter raises the soft-caught `Error::Assert` with the real text — outcome, exported
+/// geometry and console all differed, and the class PREDATED the mint band via `posmod`).
+/// `cond_src` is the parser's canonical pretty-print of the condition, which the emitter bakes
+/// from ITS parse — fingerprint identity makes it byte-equal to what the interpreter would
+/// print. `Error::Assert` stays UNSTAMPED through every seam (the W.3.37/AR.20.1 rule), so the
+/// top-level driver soft-catches it: console ERROR, partial geometry kept, program halts —
+/// exactly the interpreted twin.
+#[must_use]
+pub fn assert_failed(message: Option<&Value>, cond_src: &str) -> crate::Error {
+    let locator = format!(" [assert({cond_src})]");
+    crate::Error::Assert(match message {
+        Some(Value::Str(s)) => format!("assertion failed: {s}{locator}"),
+        Some(other) => format!(
+            "assertion failed: {}{locator}",
+            super::fmt::format_value(other)
+        ),
+        None => format!("assertion failed{locator}"),
+    })
 }
 
 /// A FIRED assert in a compiled MODULE body — a DECLINE, not a verdict (AR.14.4.3). The

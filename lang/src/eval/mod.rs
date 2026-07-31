@@ -3248,7 +3248,6 @@ fn needs_post_hoist(entry: &intrinsics::Entry) -> bool {
 
 fn guard_veto<'a>(
     entry: &intrinsics::Entry,
-    params: &[Parameter],
     functions: &BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
 ) -> Option<String> {
     for &dep in entry.deps {
@@ -3258,20 +3257,16 @@ fn guard_veto<'a>(
         if intrinsics::anchor_fp(dep) != Some(intrinsics::fingerprint(p, b)) {
             return Some(format!("dep `{dep}` drifted from its pinned reference"));
         }
-        // AN.10: the function's OWN PARAMETER shares a name with a dep the native calls. Per AD.1 a
-        // local holding a FUNCTION VALUE wins in call position, so a caller passing one redirects that
-        // inner call — while the native, which resolved the dep statically, keeps calling the real
-        // function. BOSL2's `is_vector(v, length, zero, all_nonzero=false, …)` is exactly this: it
-        // declares `all_nonzero` AND calls `all_nonzero(v)`, so `is_vector([1,2], all_nonzero =
-        // function(x) false)` answered `true` where upstream says `false`. Same rationale as the
-        // builtin-shadow veto below — a name the native froze at build time can move at runtime — and
-        // it can't be caught later: the intrinsic ABI has no runtime defer, the args are already
-        // evaluated onto the stack by the time a value-type check could see them.
-        if params.iter().any(|p| &*p.name == dep) {
-            return Some(format!(
-                "parameter `{dep}` shadows the like-named function this intrinsic calls"
-            ));
-        }
+        // NO param-shadow veto here anymore, and the absence is load-bearing (AR.17.2). The old
+        // AN.10 arm vetoed a dep sharing a PARAMETER's name (`is_vector` declares `all_nonzero`
+        // AND calls it — a caller-passed closure redirects the interpreted call while a static
+        // native call would not). Stage C's emission superseded it: a call site whose name is
+        // shadowed by a local emits the rung-1 rule INLINE (`Function` value invokes through
+        // `fx.call_value`, anything else falls to the static sibling — AD.1/p8's exact rule), so
+        // the redirect happens in the native too. The veto outlived the hazard and quietly
+        // guard-declined every such entry — `_fab_poc_callshadow` and the is_vector cone ran
+        // INTERPRETED while their differentials "passed" by comparing the interpreter to itself;
+        // `intrinsics_wire_through_a_param_shadow` pins the wiring so the hole cannot reopen.
     }
     for &b in entry.builtins {
         if functions.contains_key(b) {
@@ -3334,7 +3329,7 @@ fn build_intrinsics<'a>(
         if needs_post_hoist(entry) {
             continue; // const-guarded, directly or through a dep: arms in `arm_guarded_intrinsics`
         }
-        match guard_veto(entry, params, functions) {
+        match guard_veto(entry, functions) {
             None => {
                 out.insert(name, entry.func);
             }
@@ -3372,7 +3367,7 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
         if !needs_post_hoist(entry) {
             continue; // genuinely unguarded: already wired (or vetoed) at build_intrinsics
         }
-        if let Some(why) = guard_veto(entry, params, &ctx.functions) {
+        if let Some(why) = guard_veto(entry, &ctx.functions) {
             if explain {
                 eprintln!("+ [intrinsic GUARD-DECLINED] {name} — {why} → INTERPRETED");
             }
@@ -4658,6 +4653,25 @@ mod tests {
         assert!(
             !wired(&format!("function len(x) = 99;\n{last}"), "last"),
             "a user fn shadowing `len` must veto (the interpreted body would call it)"
+        );
+    }
+
+    /// AR.17.2 — a dep sharing a PARAMETER's name WIRES. The old AN.10 veto guard-declined this
+    /// shape long after stage C's rung-1 conditional emission made it safe: the native checks the
+    /// local at runtime and redirects a closure argument through `call_value`, exactly like the
+    /// interpreter. The hole it left was invisible — `_fab_poc_callshadow`'s differential passed
+    /// with the native never running (interpreter compared to itself) — so this pins WIRING at
+    /// `build_intrinsics`, the level the differential cannot see.
+    #[test]
+    fn intrinsics_wire_through_a_param_shadow() {
+        use super::intrinsics::reference_of;
+        let last = reference_of("last").unwrap();
+        let shadow = reference_of("_fab_poc_callshadow").unwrap();
+        let program = parse(&format!("{last}\n{shadow}")).unwrap();
+        let ctx = build_ctx(&program, crate::Config::default());
+        assert!(
+            ctx.intrinsics.contains_key("_fab_poc_callshadow"),
+            "param `last` shadowing dep `last` must WIRE — the emitted conditional handles it"
         );
     }
 

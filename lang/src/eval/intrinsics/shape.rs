@@ -13,21 +13,6 @@ pub(super) fn list_pattern_of(v: &Value) -> Value {
     }
 }
 
-/// BOSL2 `same_shape(a,b) = is_def(b) && _list_pattern(a) == b*0` — do `a` and `b` have the same nesting
-/// skeleton? `b*0` and the `==` route through `apply_binary` (`0*"str"` is undef, list `==` is elementwise),
-/// and a falsy `is_def(b)` short-circuits to `false` exactly like the interpreter's `&&`.
-pub(super) fn same_shape(args: &[Value]) -> crate::Result<Value> {
-    if matches!(args.get(1), None | Some(Value::Undef)) {
-        return Ok(Value::Bool(false)); // is_def(b) is false → && yields false
-    }
-    let a = args.first().cloned().unwrap_or(Value::Undef);
-    let b = args.get(1).cloned().unwrap_or(Value::Undef);
-    let pattern = list_pattern_of(&a);
-    let b0 = ops::apply_binary(BinOp::Mul, b, Value::Num(0.0));
-    let eq = ops::apply_binary(BinOp::Eq, pattern, b0);
-    Ok(Value::Bool(eq.is_truthy()))
-}
-
 /// BOSL2 `is_consistent(list, pattern)` — is every element of `list` shaped like `pattern` (default: like
 /// `list[0]`)? The reference compares each entry of `0*list` against the pattern with `!=`; both the zeroing
 /// and the compare route through `apply_binary`, iteration through `iter_values_raw` — so a heterogeneous list

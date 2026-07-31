@@ -1,5 +1,5 @@
 use super::shape::is_vector;
-use super::{bosl_assert, v_is_list};
+use super::v_is_list;
 use crate::eval::value::Value;
 use crate::eval::{build_vector, builtins, ops};
 use crate::parser::BinOp;
@@ -64,26 +64,6 @@ pub(super) fn point3d(args: &[Value]) -> crate::Result<Value> {
     }
     let fill = args.get(1).cloned().unwrap_or(Value::Num(0.0));
     let coords = (0..3)
-        .map(|i| {
-            let pi = ops::index(p.clone(), &Value::Num(f64::from(i)));
-            if ops::apply_binary(BinOp::Eq, pi.clone(), Value::Undef).is_truthy() {
-                fill.clone()
-            } else {
-                pi
-            }
-        })
-        .collect();
-    Ok(build_vector(coords))
-}
-
-/// BOSL2 `point2d(p, fill=0)` — force a point to 2 coords; [`point3d`]'s exact shape, one slot shorter.
-pub(super) fn point2d(args: &[Value]) -> crate::Result<Value> {
-    let p = args.first().cloned().unwrap_or(Value::Undef);
-    if !v_is_list(&p) {
-        return Err(bosl_assert("point2d: p must be a list"));
-    }
-    let fill = args.get(1).cloned().unwrap_or(Value::Num(0.0));
-    let coords = (0..2)
         .map(|i| {
             let pi = ops::index(p.clone(), &Value::Num(f64::from(i)));
             if ops::apply_binary(BinOp::Eq, pi.clone(), Value::Undef).is_truthy() {

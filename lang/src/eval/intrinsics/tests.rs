@@ -538,7 +538,7 @@ fn fast_equals_slow_shape_band() {
             let args = [a.clone(), b.clone()];
             assert!(
                 same_result(
-                    &super::same_shape(&args),
+                    &super::same_shape(&crate::surface::NoClosures, &args),
                     &interpret_with_deps(ss_ref, &ss_deps, &args)
                 ),
                 "same_shape diverged on ({a:?}, {b:?})"
@@ -1342,7 +1342,7 @@ fn fast_equals_slow_aggregate_band() {
     for args in &va_cases {
         assert!(
             same_result(
-                &super::vector_angle(&crate::surface::NoClosures, args),
+                &super::generated::vector_angle(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(va_ref, &va_deps, &consts, args)
             ),
             "vector_angle diverged on {args:?}"
@@ -2113,7 +2113,7 @@ fn fast_equals_slow_o9_tree1() {
         }
         assert!(
             same_result(
-                &super::point2d(&args),
+                &super::point2d(&crate::surface::NoClosures, &args),
                 &interpret_with_deps_consts(p2d_ref, &[], &consts, &args)
             ),
             "point2d diverged on ({p:?}, {fill:?})"
@@ -2207,7 +2207,7 @@ fn fast_equals_slow_o9_tree1() {
     for args in &rft_cases {
         assert!(
             same_result(
-                &super::affine3d_rot_from_to(&crate::surface::NoClosures, args),
+                &super::generated::affine3d_rot_from_to(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(rft_ref, &rft_deps, &consts, args)
             ),
             "affine3d_rot_from_to diverged on {args:?}"
@@ -5118,6 +5118,126 @@ fn depth_declines_reinterpret_in_the_live_evaluator() {
     let off = run(false);
     assert_eq!(on, off, "the depth boundary diverged across tiers");
     for want in ["w = 20", "x = 40", "y = 42"] {
+        assert!(on.contains(want), "missing `{want}` in {on}");
+    }
+}
+
+/// AR.25 — the hand-native cone runs GENERATED, end to end. Wiring pinned at `build_ctx` level
+/// (`ctx.intrinsics` membership — the level a guard-decline is visible at, which output
+/// differentials structurally cannot see: a declined native makes the tiers trivially agree),
+/// then a tier differential with values pinned. `determinant` is the first SELF-recursive
+/// generated native (the 5x5 pin forces the recursion into the 4x4 dispatch); `constrain`'s
+/// matrix branch exercises `flatten` + `list_to_matrix` + `default`; `vector_angle` and
+/// `affine3d_rot_from_to` are the MIGRATIONS — their hand fns are deleted, so these calls run
+/// the generated cone or nothing.
+#[test]
+fn the_hand_native_cone_runs_generated() {
+    use crate::parser::parse;
+    let names = [
+        "is_nan",
+        "is_finite",
+        "all_nonzero",
+        "_list_pattern",
+        "is_consistent",
+        "same_shape",
+        "is_def",
+        "is_vector",
+        "is_matrix",
+        "_sum",
+        "sum",
+        "default",
+        "flatten",
+        "list_to_matrix",
+        "det2",
+        "det3",
+        "det4",
+        "determinant",
+        "constrain",
+        "vector_angle",
+        // affine3d_rot_from_to's tail: unit/point3d/point2d/approx/idx/posmod + the affine seeds.
+        "unit",
+        "point3d",
+        "point2d",
+        "approx",
+        "idx",
+        "posmod",
+        "affine3d_identity",
+        "ident",
+        "affine3d_zrot",
+        "v_theta",
+        "vector_axis",
+        "v_abs",
+        "affine3d_rot_from_to",
+    ];
+    let mut refs = String::from(
+        "_EPSILON = 1e-9;\nPI = 3.141592653589793;\nUP = [0, 0, 1];\nRIGHT = [1, 0, 0];\n",
+    );
+    for name in names {
+        refs.push_str(reference_of(name).expect("registered"));
+        refs.push('\n');
+    }
+    let program = parse(&refs).expect("the cone parses");
+    // Wiring at the level FAB_EXPLAIN reports, POST-hoist arming included (the const-guarded
+    // entries — all_nonzero, is_vector — only arm after the globals publish): FnOracle::new is
+    // the whole arming path in one testable unit.
+    {
+        use crate::parser::StmtKind as SK;
+        let functions: Vec<(&str, &[crate::Parameter], &crate::Expr)> = program
+            .stmts
+            .iter()
+            .filter_map(|s| match &s.kind {
+                SK::FunctionDef { name, params, body } => {
+                    Some((name.as_str(), params.as_slice(), body))
+                }
+                _ => None,
+            })
+            .collect();
+        let globals: Vec<(&str, &crate::Expr)> = program
+            .stmts
+            .iter()
+            .filter_map(|s| match &s.kind {
+                SK::Assignment { name, value } => Some((&**name, value)),
+                _ => None,
+            })
+            .collect();
+        let oracle = crate::eval::FnOracle::new(&functions, &globals).expect("oracle builds");
+        for name in names {
+            assert!(
+                oracle.ctx.intrinsics.contains_key(name),
+                "`{name}` must WIRE (not guard-decline) for the differential to mean anything"
+            );
+        }
+    }
+    let src = format!(
+        "{refs}\
+         echo(dt=determinant([[6,4,-2,9],[1,-2,8,3],[1,5,7,6],[4,2,5,1]]));\n\
+         echo(d5=determinant([[1,2,0,0,0],[2,1,2,0,0],[0,2,1,2,0],[0,0,2,1,2],[0,0,0,2,1]]));\n\
+         echo(cn=constrain([5,-2,9], 0, 4));\n\
+         echo(cm=constrain([[5,-2],[9,1]], 0, 4));\n\
+         echo(va=vector_angle([1,0,0], [0,1,0]));\n\
+         echo(rt=affine3d_rot_from_to([1,0,0], [0,0,1])[0]);"
+    );
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (_, msgs) =
+            crate::evaluate_geometry_with_base_config(&src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        format!("{msgs:?}")
+    };
+    let on = run(true);
+    let off = run(false);
+    assert_eq!(on, off, "the cone diverged across tiers");
+    for want in [
+        "dt = 2267", // linalg.scad's own doc example
+        "d5 = 33",   // 5x5 — the self-recursion into the det4 dispatch (oracle-computed)
+        "cn = [4, 0, 4]",
+        "cm = [[4, 0], [4, 1]]", // the matrix branch: flatten + list_to_matrix + default
+        "va = 90",
+        "rt = [0, 0, -1, 0]",
+    ] {
         assert!(on.contains(want), "missing `{want}` in {on}");
     }
 }

@@ -118,6 +118,98 @@ function f_3arg(target_func) =
         c==undef? function(x) target_func(a,b,x) :
         function() target_func(a,b,c);
 function f_gt(a,b) = f_2arg_simple(function (a,b) a>b)(a,b);
+function flatten(l) =
+    !is_list(l)? l :
+    [for (a=l) if (is_list(a)) (each a) else a];
+function list_to_matrix(v, cnt, dflt=undef) =
+    [for (i = [0:cnt:len(v)-1]) [for (j = [0:1:cnt-1]) default(v[i+j], dflt)]];
+function det2(M) = 
+    assert(is_def(M) && M*0==[[0,0],[0,0]], "Expected square matrix (2x2)")
+    cross(M[0],M[1]);
+function det3(M) =
+    assert(is_def(M) && M*0==[[0,0,0],[0,0,0],[0,0,0]], "Expected square matrix (3x3).")
+    M[0][0] * (M[1][1]*M[2][2]-M[2][1]*M[1][2]) -
+    M[1][0] * (M[0][1]*M[2][2]-M[2][1]*M[0][2]) +
+    M[2][0] * (M[0][1]*M[1][2]-M[1][1]*M[0][2]);
+function det4(M) =
+    assert(is_def(M) && M*0==[[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]], "Expected square matrix (4x4).")
+    M[0][0]*M[1][1]*M[2][2]*M[3][3] + M[0][0]*M[1][2]*M[2][3]*M[3][1] + M[0][0]*M[1][3]*M[2][1]*M[3][2]
+    + M[0][1]*M[1][0]*M[2][3]*M[3][2] + M[0][1]*M[1][2]*M[2][0]*M[3][3] + M[0][1]*M[1][3]*M[2][2]*M[3][0]
+    + M[0][2]*M[1][0]*M[2][1]*M[3][3] + M[0][2]*M[1][1]*M[2][3]*M[3][0] + M[0][2]*M[1][3]*M[2][0]*M[3][1]
+    + M[0][3]*M[1][0]*M[2][2]*M[3][1] + M[0][3]*M[1][1]*M[2][0]*M[3][2] + M[0][3]*M[1][2]*M[2][1]*M[3][0]
+    - M[0][0]*M[1][1]*M[2][3]*M[3][2] - M[0][0]*M[1][2]*M[2][1]*M[3][3] - M[0][0]*M[1][3]*M[2][2]*M[3][1]
+    - M[0][1]*M[1][0]*M[2][2]*M[3][3] - M[0][1]*M[1][2]*M[2][3]*M[3][0] - M[0][1]*M[1][3]*M[2][0]*M[3][2]
+    - M[0][2]*M[1][0]*M[2][3]*M[3][1] - M[0][2]*M[1][1]*M[2][0]*M[3][3] - M[0][2]*M[1][3]*M[2][1]*M[3][0]
+    - M[0][3]*M[1][0]*M[2][1]*M[3][2] - M[0][3]*M[1][1]*M[2][2]*M[3][0] - M[0][3]*M[1][2]*M[2][0]*M[3][1];
+function determinant(M) =
+    assert(is_list(M), "Input must be a square matrix." )  
+    len(M)==1? M[0][0] :
+    len(M)==2? det2(M) :
+    len(M)==3? det3(M) :
+    len(M)==4? det4(M) :
+    assert(is_matrix(M, square=true), "Input must be a square matrix." )    
+    sum(
+        [for (col=[0:1:len(M)-1])
+            ((col%2==0)? 1 : -1) *
+                M[col][0] *
+                determinant(
+                    [for (r=[1:1:len(M)-1])
+                        [for (c=[0:1:len(M)-1])
+                            if (c!=col) M[c][r]
+                        ]
+                    ]
+                )
+        ]
+    );
+function constrain(v, minval, maxval) =
+    is_num(v) ? max(minval, min(v, maxval))
+    : is_vector(v) ? [for(f=v) max(minval, min(f, maxval))]
+    : is_matrix(v) ? let( // for a matrix, this should be more efficient than indexing
+        mflat = flatten(v),
+        clamped = [ for(f=mflat) max(minval, min(f, maxval)) ] 
+    ) list_to_matrix(clamped, len(v[0]), 0)
+    : is_list(v) ? [ for(vec=v) [ for(f=vec) max(minval, min(f, maxval)) ] ]
+    : assert(false, "\nIn constrain(), v must be a number, 1D vector, rectangular matrix, or list of vectors.");
+function vector_angle(v1,v2,v3) =
+    assert( ( is_undef(v3) && ( is_undef(v2) || same_shape(v1,v2) ) )
+            || is_consistent([v1,v2,v3]) ,
+            "\nBad arguments.")
+    assert( is_vector(v1) || is_consistent(v1), "\nBad arguments.")
+    let( vecs = ! is_undef(v3) ? [v1-v2,v3-v2] :
+                ! is_undef(v2) ? [v1,v2] :
+                len(v1) == 3   ? [v1[0]-v1[1], v1[2]-v1[1]]
+                               : v1
+    )
+    assert(is_vector(vecs[0],2) || is_vector(vecs[0],3), "\nBad arguments.")
+    let(
+        norm0 = norm(vecs[0]),
+        norm1 = norm(vecs[1])
+    )
+    assert(norm0>0 && norm1>0, "\nZero length vector.")
+    // NOTE: constrain() corrects crazy FP rounding errors that exceed acos()'s domain.
+    acos(constrain((vecs[0]*vecs[1])/(norm0*norm1), -1, 1));
+function affine3d_rot_from_to(from, to) =
+    assert(is_vector(from))
+    assert(is_vector(to))
+    assert(len(from)==len(to))
+    let(
+        from = unit(point3d(from)),
+        to = unit(point3d(to))
+    ) approx(from,to)? affine3d_identity() :
+    from.z==0 && to.z==0 ?  affine3d_zrot(v_theta(point2d(to)) - v_theta(point2d(from)))
+    :
+    let(
+        u = vector_axis(from,to),
+        ang = vector_angle(from,to),
+        c = cos(ang),
+        c2 = 1-c,
+        s = sin(ang)
+    ) [
+        [u.x*u.x*c2+c    , u.x*u.y*c2-u.z*s, u.x*u.z*c2+u.y*s, 0],
+        [u.y*u.x*c2+u.z*s, u.y*u.y*c2+c    , u.y*u.z*c2-u.x*s, 0],
+        [u.z*u.x*c2-u.y*s, u.z*u.y*c2+u.x*s, u.z*u.z*c2+c    , 0],
+        [               0,                0,                0, 1]
+    ];
 function _is_liststr(s) = is_list(s) || is_str(s);
 function point3d(p, fill=0) = assert(is_list(p)) [for (i=[0:2]) (p[i]==undef)? fill : p[i]];
 function _list_pattern(list) =
@@ -444,12 +536,18 @@ pub(super) static SURFACE: &[rt::Decl] = &[
     rt::Decl { name: "all_nonzero", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "x", domain: rt::Domain::VecN, required: true }, rt::Param { name: "eps", domain: rt::Domain::Num, required: false }] },
     rt::Decl { name: "apply", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "transform", domain: rt::Domain::List, required: true }, rt::Param { name: "points", domain: rt::Domain::VecN, required: true }] },
     rt::Decl { name: "approx", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "a", domain: rt::Domain::List, required: true }, rt::Param { name: "b", domain: rt::Domain::List, required: true }, rt::Param { name: "eps", domain: rt::Domain::Num, required: false }] },
+    rt::Decl { name: "constrain", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "v", domain: rt::Domain::VecN, required: true }, rt::Param { name: "minval", domain: rt::Domain::Num, required: true }, rt::Param { name: "maxval", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "default", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "v", domain: rt::Domain::Num, required: true }, rt::Param { name: "dflt", domain: rt::Domain::Num, required: false }] },
+    rt::Decl { name: "det2", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "M", domain: rt::Domain::List, required: true }] },
+    rt::Decl { name: "det3", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "M", domain: rt::Domain::List, required: true }] },
+    rt::Decl { name: "det4", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "M", domain: rt::Domain::List, required: true }] },
+    rt::Decl { name: "determinant", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "M", domain: rt::Domain::VecN, required: true }] },
     rt::Decl { name: "f_1arg", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "target_func", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "f_2arg", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "target_func", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "f_2arg_simple", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "target_func", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "f_3arg", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "target_func", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "f_gt", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "a", domain: rt::Domain::Num, required: true }, rt::Param { name: "b", domain: rt::Domain::Num, required: true }] },
+    rt::Decl { name: "flatten", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "l", domain: rt::Domain::List, required: true }] },
     rt::Decl { name: "force_list", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "value", domain: rt::Domain::List, required: true }, rt::Param { name: "n", domain: rt::Domain::Num, required: false }, rt::Param { name: "fill", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "ident", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "n", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "idx", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "list", domain: rt::Domain::List, required: true }, rt::Param { name: "s", domain: rt::Domain::Num, required: false }, rt::Param { name: "e", domain: rt::Domain::Num, required: false }, rt::Param { name: "step", domain: rt::Domain::Num, required: false }] },
@@ -466,6 +564,7 @@ pub(super) static SURFACE: &[rt::Decl] = &[
     rt::Decl { name: "is_vector", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "v", domain: rt::Domain::VecN, required: true }, rt::Param { name: "length", domain: rt::Domain::Num, required: true }, rt::Param { name: "zero", domain: rt::Domain::Num, required: true }, rt::Param { name: "all_nonzero", domain: rt::Domain::Num, required: false }, rt::Param { name: "eps", domain: rt::Domain::Num, required: false }] },
     rt::Decl { name: "is_vnf", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "x", domain: rt::Domain::List, required: true }] },
     rt::Decl { name: "last", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "list", domain: rt::Domain::List, required: true }] },
+    rt::Decl { name: "list_to_matrix", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "v", domain: rt::Domain::List, required: true }, rt::Param { name: "cnt", domain: rt::Domain::Num, required: true }, rt::Param { name: "dflt", domain: rt::Domain::Num, required: false }] },
     rt::Decl { name: "num_defined", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "v", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "point2d", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "p", domain: rt::Domain::List, required: true }, rt::Param { name: "fill", domain: rt::Domain::Num, required: false }] },
     rt::Decl { name: "point3d", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "p", domain: rt::Domain::List, required: true }, rt::Param { name: "fill", domain: rt::Domain::Num, required: false }] },
@@ -932,6 +1031,149 @@ pub(super) fn f_gt(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Val
     let p_a = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_b = args.get(1).cloned().unwrap_or(rt::Value::Undef);
     let out = fx.call_value(&f_2arg_simple(fx, &[fx.mint_fn("f_gt", &[0, 1], None, &[])?])?, &[(None, p_a.clone()), (None, p_b.clone())])?;
+    Ok(out)
+}
+
+/// Generated native for `flatten` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn flatten(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return fx.reinterpret("flatten", FALLBACK_SOURCES, args);
+    };
+    let p_l = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = if rt::apply_unary(rt::UnOp::Not, rt::bi::is_list(&[p_l.clone()])).is_truthy() { p_l.clone() } else { { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_a in rt::iter_values_native(&p_l.clone()) { if (rt::bi::is_list(&[l1_a.clone()])).is_truthy() { for l2_each in rt::iter_values_native(&l1_a.clone()) { l0_acc.push(l2_each); }  } else { l0_acc.push(l1_a.clone());
+         } } rt::build_vector(l0_acc) } };
+    Ok(out)
+}
+
+/// Generated native for `list_to_matrix` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn list_to_matrix(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return fx.reinterpret("list_to_matrix", FALLBACK_SOURCES, args);
+    };
+    let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_cnt = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_dflt = args.get(2).cloned().unwrap_or(rt::Value::Undef);
+    let out = { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &p_cnt.clone(), &rt::apply_binary(rt::BinOp::Sub, rt::bi::len(&[p_v.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l0_acc.push({ let mut l2_acc: Vec<rt::Value> = Vec::new(); for l3_j in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, p_cnt.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l2_acc.push(default(fx, &[rt::index(p_v.clone(), &rt::apply_binary(rt::BinOp::Add, l1_i.clone(), l3_j.clone())), p_dflt.clone()])?);
+        } rt::build_vector(l2_acc) });
+        } rt::build_vector(l0_acc) };
+    Ok(out)
+}
+
+/// Generated native for `det2` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn det2(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return fx.reinterpret("det2", FALLBACK_SOURCES, args);
+    };
+    let p_M = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = { if !(rt::Value::Bool(is_def(fx, &[p_M.clone()])?.is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::apply_binary(rt::BinOp::Mul, p_M.clone(), rt::Value::Num(f64::from_bits(0x0_u64))), rt::build_vector(vec![rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))])])).is_truthy())).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("Expected square matrix (2x2)")), "(is_def(M) && ((M * 0) == [[0, 0], [0, 0]]))")); } rt::bi::cross(&[rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))]) };
+    Ok(out)
+}
+
+/// Generated native for `det3` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn det3(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return fx.reinterpret("det3", FALLBACK_SOURCES, args);
+    };
+    let p_M = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = { if !(rt::Value::Bool(is_def(fx, &[p_M.clone()])?.is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::apply_binary(rt::BinOp::Mul, p_M.clone(), rt::Value::Num(f64::from_bits(0x0_u64))), rt::build_vector(vec![rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))])])).is_truthy())).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("Expected square matrix (3x3).")), "(is_def(M) && ((M * 0) == [[0, 0, 0], [0, 0, 0], [0, 0, 0]]))")); } rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))))), rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))))), rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))))) };
+    Ok(out)
+}
+
+/// Generated native for `det4` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn det4(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return fx.reinterpret("det4", FALLBACK_SOURCES, args);
+    };
+    let p_M = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = { if !(rt::Value::Bool(is_def(fx, &[p_M.clone()])?.is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::apply_binary(rt::BinOp::Mul, p_M.clone(), rt::Value::Num(f64::from_bits(0x0_u64))), rt::build_vector(vec![rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))])])).is_truthy())).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("Expected square matrix (4x4).")), "(is_def(M) && ((M * 0) == [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]))")); } rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))))), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))), rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) };
+    Ok(out)
+}
+
+/// Generated native for `determinant` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn determinant(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return fx.reinterpret("determinant", FALLBACK_SOURCES, args);
+    };
+    let p_M = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = { if !(rt::bi::is_list(&[p_M.clone()])).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("Input must be a square matrix.")), "is_list(M)")); } if rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_M.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy() { rt::index(rt::index(p_M.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))) } else { if rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_M.clone()]), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy() { det2(fx, &[p_M.clone()])? } else { if rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_M.clone()]), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))).is_truthy() { det3(fx, &[p_M.clone()])? } else { if rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_M.clone()]), rt::Value::Num(f64::from_bits(0x4010000000000000_u64))).is_truthy() { det4(fx, &[p_M.clone()])? } else { { if !(is_matrix(fx, &[p_M.clone(), rt::Value::Undef, rt::Value::Undef, rt::Value::Bool(true)])?).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("Input must be a square matrix.")), "is_matrix(M, square = true)")); } sum(fx, &[{ let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_col in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, rt::bi::len(&[p_M.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l0_acc.push(rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, if rt::apply_binary(rt::BinOp::Eq, rt::apply_binary(rt::BinOp::Mod, l1_col.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() { rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)) } else { rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) }, rt::index(rt::index(p_M.clone(), &l1_col.clone()), &rt::Value::Num(f64::from_bits(0x0_u64)))), determinant(fx, &[{ let mut l2_acc: Vec<rt::Value> = Vec::new(); for l3_r in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, rt::bi::len(&[p_M.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l2_acc.push({ let mut l4_acc: Vec<rt::Value> = Vec::new(); for l5_c in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, rt::bi::len(&[p_M.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { if (rt::apply_binary(rt::BinOp::Ne, l5_c.clone(), l1_col.clone())).is_truthy() { l4_acc.push(rt::index(rt::index(p_M.clone(), &l5_c.clone()), &l3_r.clone()));
+         } } rt::build_vector(l4_acc) });
+        } rt::build_vector(l2_acc) }])?));
+        } rt::build_vector(l0_acc) }])? } } } } } };
+    Ok(out)
+}
+
+/// Generated native for `constrain` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn constrain(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return fx.reinterpret("constrain", FALLBACK_SOURCES, args);
+    };
+    let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_minval = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_maxval = args.get(2).cloned().unwrap_or(rt::Value::Undef);
+    let out = if rt::bi::is_num(&[p_v.clone()]).is_truthy() { rt::bi::max(&[p_minval.clone(), rt::bi::min(&[p_v.clone(), p_maxval.clone()])]) } else { if is_vector(fx, &[p_v.clone()])?.is_truthy() { { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_f in rt::iter_values_native(&p_v.clone()) { l0_acc.push(rt::bi::max(&[p_minval.clone(), rt::bi::min(&[l1_f.clone(), p_maxval.clone()])]));
+        } rt::build_vector(l0_acc) } } else { if is_matrix(fx, &[p_v.clone()])?.is_truthy() { { let l2_mflat = flatten(fx, &[p_v.clone()])?; let l5_clamped = { let mut l3_acc: Vec<rt::Value> = Vec::new(); for l4_f in rt::iter_values_native(&l2_mflat.clone()) { l3_acc.push(rt::bi::max(&[p_minval.clone(), rt::bi::min(&[l4_f.clone(), p_maxval.clone()])]));
+        } rt::build_vector(l3_acc) }; list_to_matrix(fx, &[l5_clamped.clone(), rt::bi::len(&[rt::index(p_v.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))]), rt::Value::Num(f64::from_bits(0x0_u64))])? } } else { if rt::bi::is_list(&[p_v.clone()]).is_truthy() { { let mut l6_acc: Vec<rt::Value> = Vec::new(); for l7_vec in rt::iter_values_native(&p_v.clone()) { l6_acc.push({ let mut l8_acc: Vec<rt::Value> = Vec::new(); for l9_f in rt::iter_values_native(&l7_vec.clone()) { l8_acc.push(rt::bi::max(&[p_minval.clone(), rt::bi::min(&[l9_f.clone(), p_maxval.clone()])]));
+        } rt::build_vector(l8_acc) });
+        } rt::build_vector(l6_acc) } } else { { if !(rt::Value::Bool(false)).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("\nIn constrain(), v must be a number, 1D vector, rectangular matrix, or list of vectors.")), "false")); } rt::Value::Undef } } } } };
+    Ok(out)
+}
+
+/// Generated native for `vector_angle` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn vector_angle(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return fx.reinterpret("vector_angle", FALLBACK_SOURCES, args);
+    };
+    let p_v1 = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_v2 = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_v3 = args.get(2).cloned().unwrap_or(rt::Value::Undef);
+    let out = { if !(rt::Value::Bool(rt::Value::Bool(rt::bi::is_undef(&[p_v3.clone()]).is_truthy() && rt::Value::Bool(rt::bi::is_undef(&[p_v2.clone()]).is_truthy() || same_shape(fx, &[p_v1.clone(), p_v2.clone()])?.is_truthy()).is_truthy()).is_truthy() || is_consistent(fx, &[rt::build_vector(vec![p_v1.clone(), p_v2.clone(), p_v3.clone()])])?.is_truthy())).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("\nBad arguments.")), "((is_undef(v3) && (is_undef(v2) || same_shape(v1, v2))) || is_consistent([v1, v2, v3]))")); } { if !(rt::Value::Bool(is_vector(fx, &[p_v1.clone()])?.is_truthy() || is_consistent(fx, &[p_v1.clone()])?.is_truthy())).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("\nBad arguments.")), "(is_vector(v1) || is_consistent(v1))")); } { let l0_vecs = if rt::apply_unary(rt::UnOp::Not, rt::bi::is_undef(&[p_v3.clone()])).is_truthy() { rt::build_vector(vec![rt::apply_binary(rt::BinOp::Sub, p_v1.clone(), p_v2.clone()), rt::apply_binary(rt::BinOp::Sub, p_v3.clone(), p_v2.clone())]) } else { if rt::apply_unary(rt::UnOp::Not, rt::bi::is_undef(&[p_v2.clone()])).is_truthy() { rt::build_vector(vec![p_v1.clone(), p_v2.clone()]) } else { if rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_v1.clone()]), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))).is_truthy() { rt::build_vector(vec![rt::apply_binary(rt::BinOp::Sub, rt::index(p_v1.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(p_v1.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::apply_binary(rt::BinOp::Sub, rt::index(p_v1.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::index(p_v1.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))]) } else { p_v1.clone() } } }; { if !(rt::Value::Bool(is_vector(fx, &[rt::index(l0_vecs.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))])?.is_truthy() || is_vector(fx, &[rt::index(l0_vecs.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))])?.is_truthy())).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("\nBad arguments.")), "(is_vector(vecs[0], 2) || is_vector(vecs[0], 3))")); } { let l1_norm0 = rt::bi::norm(&[rt::index(l0_vecs.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))]); let l2_norm1 = rt::bi::norm(&[rt::index(l0_vecs.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))]); { if !(rt::Value::Bool(rt::apply_binary(rt::BinOp::Gt, l1_norm0.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() && rt::apply_binary(rt::BinOp::Gt, l2_norm1.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy())).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("\nZero length vector.")), "((norm0 > 0) && (norm1 > 0))")); } rt::bi::acos(&[constrain(fx, &[rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Mul, rt::index(l0_vecs.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(l0_vecs.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::apply_binary(rt::BinOp::Mul, l1_norm0.clone(), l2_norm1.clone())), rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))])?]) } } } } } };
+    Ok(out)
+}
+
+/// Generated native for `affine3d_rot_from_to` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn affine3d_rot_from_to(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return fx.reinterpret("affine3d_rot_from_to", FALLBACK_SOURCES, args);
+    };
+    let p_from = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_to = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let out = { if !(is_vector(fx, &[p_from.clone()])?).is_truthy() { return Err(rt::assert_failed(None, "is_vector(from)")); } { if !(is_vector(fx, &[p_to.clone()])?).is_truthy() { return Err(rt::assert_failed(None, "is_vector(to)")); } { if !(rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_from.clone()]), rt::bi::len(&[p_to.clone()]))).is_truthy() { return Err(rt::assert_failed(None, "(len(from) == len(to))")); } { let l0_from = unit(fx, &[point3d(fx, &[p_from.clone()])?])?; let l1_to = unit(fx, &[point3d(fx, &[p_to.clone()])?])?; if approx(fx, &[l0_from.clone(), l1_to.clone()])?.is_truthy() { affine3d_identity(fx, &[])? } else { if rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, rt::member(l0_from.clone(), "z"), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::member(l1_to.clone(), "z"), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() { affine3d_zrot(fx, &[rt::apply_binary(rt::BinOp::Sub, v_theta(fx, &[point2d(fx, &[l1_to.clone()])?])?, v_theta(fx, &[point2d(fx, &[l0_from.clone()])?])?)])? } else { { let l2_u = vector_axis(fx, &[l0_from.clone(), l1_to.clone()])?; let l3_ang = vector_angle(fx, &[l0_from.clone(), l1_to.clone()])?; let l4_c = rt::bi::cos(&[l3_ang.clone()]); let l5_c2 = rt::apply_binary(rt::BinOp::Sub, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), l4_c.clone()); let l6_s = rt::bi::sin(&[l3_ang.clone()]); rt::build_vector(vec![rt::build_vector(vec![rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "x"), rt::member(l2_u.clone(), "x")), l5_c2.clone()), l4_c.clone()), rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "x"), rt::member(l2_u.clone(), "y")), l5_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "z"), l6_s.clone())), rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "x"), rt::member(l2_u.clone(), "z")), l5_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "y"), l6_s.clone())), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "y"), rt::member(l2_u.clone(), "x")), l5_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "z"), l6_s.clone())), rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "y"), rt::member(l2_u.clone(), "y")), l5_c2.clone()), l4_c.clone()), rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "y"), rt::member(l2_u.clone(), "z")), l5_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "x"), l6_s.clone())), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "z"), rt::member(l2_u.clone(), "x")), l5_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "y"), l6_s.clone())), rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "z"), rt::member(l2_u.clone(), "y")), l5_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "x"), l6_s.clone())), rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l2_u.clone(), "z"), rt::member(l2_u.clone(), "z")), l5_c2.clone()), l4_c.clone()), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))])]) } } } } } } };
     Ok(out)
 }
 

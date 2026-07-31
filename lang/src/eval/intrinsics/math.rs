@@ -1,4 +1,4 @@
-use super::shape::{is_consistent, is_matrix};
+use super::shape::is_consistent;
 use super::{bosl_assert, is_vector_core, no_progress, non_terminating, v_is_finite};
 use crate::eval::value::Value;
 use crate::eval::{build_vector, builtins, iter_values_raw, ops};
@@ -60,48 +60,5 @@ pub(super) fn sum_tail(args: &[Value]) -> crate::Result<Value> {
             return Err(non_terminating("_sum"));
         }
         i = next_i;
-    }
-}
-
-/// The reachable slice of BOSL2 `constrain` for [`vector_angle`]'s clamp: a non-NaN number clamps through
-/// the real `min`/`max` builtins; a vector clamps elementwise; everything the asserts let through that ISN'T
-/// one of those (undef, NaN — `is_num(NaN)` is false) falls to the reference's `assert(false)`. The matrix
-/// branch (`flatten`/`list_to_matrix`) is unreachable from `vector_angle`'s asserted shapes — LOUD error, not
-/// a silent wrong answer, if that proof ever breaks.
-pub(super) fn constrain_clamp(
-    fx: &dyn crate::surface::FnCtx,
-    v: &Value,
-    minval: f64,
-    maxval: f64,
-) -> crate::Result<Value> {
-    let clamp1 = |f: &Value| {
-        builtins::apply(
-            "max",
-            &[
-                Value::Num(minval),
-                builtins::apply("min", &[f.clone(), Value::Num(maxval)]),
-            ],
-        )
-    };
-    match v {
-        Value::Num(n) if !n.is_nan() => Ok(clamp1(v)),
-        _ if is_vector_core(v) => {
-            let out: Vec<Value> = iter_values_raw(v).iter().map(clamp1).collect();
-            Ok(build_vector(out))
-        }
-        _ if is_matrix(fx, std::slice::from_ref(v))?.is_truthy() => Err(crate::Error::Eval(
-            "constrain: matrix input unreachable from vector_angle (intrinsic guard)".to_string(),
-        )),
-        Value::List(_) | Value::NumList(_) => {
-            let out: Vec<Value> = iter_values_raw(v)
-                .iter()
-                .map(|vec| {
-                    let row: Vec<Value> = iter_values_raw(vec).iter().map(clamp1).collect();
-                    build_vector(row)
-                })
-                .collect();
-            Ok(build_vector(out))
-        }
-        _ => Err(bosl_assert("constrain: invalid input")),
     }
 }

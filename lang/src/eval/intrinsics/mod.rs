@@ -60,15 +60,21 @@ pub(super) use fingerprint::fingerprint;
 // paths valid from the tests submodule.
 #[cfg(test)]
 use affine::{
-    affine3d_identity, affine3d_rot_by_axis, affine3d_rot_from_to, affine3d_translate, apply,
-    apply_transform, ident, is_2d_transform, rot,
+    affine3d_identity, affine3d_rot_by_axis, affine3d_translate, apply, apply_transform, ident,
+    is_2d_transform, rot,
 };
+// AR.25 — the vector_angle/rot_from_to cone's hand natives are DELETED; direct-call tests now
+// exercise the generated versions under the old names (the tests cover what ships).
 #[cfg(test)]
 use generated::{_fab_poc_isup as poc_isup, _fab_poc_near0 as poc_near0, _fab_poc_sq as poc_sq};
 #[cfg(test)]
 use generated::{approx, idx, posmod};
+#[cfg(test)]
+use generated::{point2d, v_abs, v_theta, vector_axis};
 // AR.17 stage A — these hand natives are DELETED; their direct-call unit tests now exercise the
 // generated versions under the old names, which is strictly better: the tests cover what ships.
+#[cfg(test)]
+use generated::same_shape;
 #[cfg(test)]
 use generated::{
     _get_ear as get_ear, _none_inside as none_inside, _point_dist as point_dist,
@@ -81,15 +87,13 @@ use generated::{
     num_defined,
 };
 #[cfg(test)]
-use geometry::point2d;
-#[cfg(test)]
 use lists::{force_list, in_list};
 #[cfg(test)]
 use math::{sum, sum_tail};
 #[cfg(test)]
-use shape::{all_nonzero, is_consistent, is_matrix, is_path, is_vector, same_shape};
+use shape::{all_nonzero, is_consistent, is_matrix, is_path, is_vector};
 #[cfg(test)]
-use vectors::{bt_search, unit, v_abs, v_theta, vector_angle, vector_axis};
+use vectors::{bt_search, unit};
 
 /// A native implementation of a specific user function. Receives the call's POSITIONAL argument
 /// VALUES (already evaluated, in source order) and returns the result — the same `Value` the interpreted body
@@ -607,15 +611,6 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &["len"],
         func: generated::last,
     },
-    Entry {
-        name: "default",
-        reference: "function default(v,dflt=undef) = is_undef(v)? dflt : v;",
-        consts: &[],
-        consts_v: &[],
-        deps: &[],
-        builtins: &["is_undef"],
-        func: generated::default,
-    },
     // `_is_liststr` (2.2%) — a pure leaf (calls only the `is_str` intrinsic + the `is_list` builtin), from
     // strings.scad. `point3d` (1.8%) from coords.scad — the first intrinsic with an inline `assert` (raises on
     // a non-list, exercising the fallible ABI) that also BUILDS a value.
@@ -931,6 +926,112 @@ pub(super) static REGISTRY: &[Entry] = &[
         deps: &["f_2arg_simple"],
         builtins: &[],
         func: generated::f_gt,
+    },
+    // ── AR.25, the hand-native cone (utility/lists/math/linalg.scad verbatim) ────────────────
+    // `constrain` unblocks vector_angle + affine3d_rot_from_to (whose AR.5a-audited dep lists
+    // named it with NO anchor — `anchor_fp` returned None, None never equals Some, so both
+    // were SILENTLY GUARD-DECLINED at every eval since the lists grew); the det family is
+    // determinant's dispatch fan and apply's future anchor. `determinant` is the first
+    // SELF-RECURSIVE generated native (its sibling table includes itself).
+    Entry {
+        name: "default",
+        reference: "function default(v,dflt=undef) = is_undef(v)? dflt : v;",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &["is_undef"],
+        func: generated::default,
+    },
+    Entry {
+        name: "flatten",
+        reference: "function flatten(l) =\n    !is_list(l)? l :\n    [for (a=l) if (is_list(a)) (each a) else a];",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &["is_list"],
+        func: generated::flatten,
+    },
+    Entry {
+        name: "list_to_matrix",
+        reference: "function list_to_matrix(v, cnt, dflt=undef) =\n    [for (i = [0:cnt:len(v)-1]) [for (j = [0:1:cnt-1]) default(v[i+j], dflt)]];",
+        consts: &[],
+        consts_v: &[],
+        deps: &["default"],
+        builtins: &["len", "is_undef"],
+        func: generated::list_to_matrix,
+    },
+    Entry {
+        name: "det2",
+        reference: "function det2(M) = \n    assert(is_def(M) && M*0==[[0,0],[0,0]], \"Expected square matrix (2x2)\")\n    cross(M[0],M[1]);",
+        consts: &[],
+        consts_v: &[],
+        deps: &["is_def"],
+        builtins: &["is_undef", "cross"],
+        func: generated::det2,
+    },
+    Entry {
+        name: "det3",
+        reference: "function det3(M) =\n    assert(is_def(M) && M*0==[[0,0,0],[0,0,0],[0,0,0]], \"Expected square matrix (3x3).\")\n    M[0][0] * (M[1][1]*M[2][2]-M[2][1]*M[1][2]) -\n    M[1][0] * (M[0][1]*M[2][2]-M[2][1]*M[0][2]) +\n    M[2][0] * (M[0][1]*M[1][2]-M[1][1]*M[0][2]);",
+        consts: &[],
+        consts_v: &[],
+        deps: &["is_def"],
+        builtins: &["is_undef"],
+        func: generated::det3,
+    },
+    Entry {
+        name: "det4",
+        reference: "function det4(M) =\n    assert(is_def(M) && M*0==[[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]], \"Expected square matrix (4x4).\")\n    M[0][0]*M[1][1]*M[2][2]*M[3][3] + M[0][0]*M[1][2]*M[2][3]*M[3][1] + M[0][0]*M[1][3]*M[2][1]*M[3][2]\n    + M[0][1]*M[1][0]*M[2][3]*M[3][2] + M[0][1]*M[1][2]*M[2][0]*M[3][3] + M[0][1]*M[1][3]*M[2][2]*M[3][0]\n    + M[0][2]*M[1][0]*M[2][1]*M[3][3] + M[0][2]*M[1][1]*M[2][3]*M[3][0] + M[0][2]*M[1][3]*M[2][0]*M[3][1]\n    + M[0][3]*M[1][0]*M[2][2]*M[3][1] + M[0][3]*M[1][1]*M[2][0]*M[3][2] + M[0][3]*M[1][2]*M[2][1]*M[3][0]\n    - M[0][0]*M[1][1]*M[2][3]*M[3][2] - M[0][0]*M[1][2]*M[2][1]*M[3][3] - M[0][0]*M[1][3]*M[2][2]*M[3][1]\n    - M[0][1]*M[1][0]*M[2][2]*M[3][3] - M[0][1]*M[1][2]*M[2][3]*M[3][0] - M[0][1]*M[1][3]*M[2][0]*M[3][2]\n    - M[0][2]*M[1][0]*M[2][3]*M[3][1] - M[0][2]*M[1][1]*M[2][0]*M[3][3] - M[0][2]*M[1][3]*M[2][1]*M[3][0]\n    - M[0][3]*M[1][0]*M[2][1]*M[3][2] - M[0][3]*M[1][1]*M[2][2]*M[3][0] - M[0][3]*M[1][2]*M[2][0]*M[3][1];",
+        consts: &[],
+        consts_v: &[],
+        deps: &["is_def"],
+        builtins: &["is_undef"],
+        func: generated::det4,
+    },
+    Entry {
+        name: "determinant",
+        reference: "function determinant(M) =\n    assert(is_list(M), \"Input must be a square matrix.\" )  \n    len(M)==1? M[0][0] :\n    len(M)==2? det2(M) :\n    len(M)==3? det3(M) :\n    len(M)==4? det4(M) :\n    assert(is_matrix(M, square=true), \"Input must be a square matrix.\" )    \n    sum(\n        [for (col=[0:1:len(M)-1])\n            ((col%2==0)? 1 : -1) *\n                M[col][0] *\n                determinant(\n                    [for (r=[1:1:len(M)-1])\n                        [for (c=[0:1:len(M)-1])\n                            if (c!=col) M[c][r]\n                        ]\n                    ]\n                )\n        ]\n    );",
+        consts: &[],
+        consts_v: &[],
+        // The is_vector cone (+ det2's is_def and sum's _sum) rides in transitively — the
+        // derived audit folds a dep's closure into the caller's guard set.
+        deps: &[
+            "det2",
+            "det3",
+            "det4",
+            "is_matrix",
+            "sum",
+            "_sum",
+            "is_def",
+            "is_vector",
+            "is_consistent",
+            "_list_pattern",
+            "is_finite",
+            "is_nan",
+            "all_nonzero",
+        ],
+        builtins: &["is_list", "len", "is_undef", "cross", "is_num", "abs", "norm"],
+        func: generated::determinant,
+    },
+    Entry {
+        name: "constrain",
+        reference: "function constrain(v, minval, maxval) =\n    is_num(v) ? max(minval, min(v, maxval))\n    : is_vector(v) ? [for(f=v) max(minval, min(f, maxval))]\n    : is_matrix(v) ? let( // for a matrix, this should be more efficient than indexing\n        mflat = flatten(v),\n        clamped = [ for(f=mflat) max(minval, min(f, maxval)) ] \n    ) list_to_matrix(clamped, len(v[0]), 0)\n    : is_list(v) ? [ for(vec=v) [ for(f=vec) max(minval, min(f, maxval)) ] ]\n    : assert(false, \"\\nIn constrain(), v must be a number, 1D vector, rectangular matrix, or list of vectors.\");",
+        consts: &[],
+        consts_v: &[],
+        // The is_vector cone + list_to_matrix's `default` ride in transitively.
+        deps: &[
+            "is_vector",
+            "is_matrix",
+            "flatten",
+            "list_to_matrix",
+            "default",
+            "is_consistent",
+            "_list_pattern",
+            "is_finite",
+            "is_nan",
+            "all_nonzero",
+        ],
+        builtins: &["is_num", "max", "min", "is_list", "len", "abs", "is_undef", "norm"],
+        func: generated::constrain,
     },
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
     // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four
@@ -1317,7 +1418,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &[
             "is_undef", "is_list", "is_num", "len", "norm", "acos", "min", "max",
         ],
-        func: vectors::vector_angle,
+        func: generated::vector_angle,
     },
     // ── O.7, band 5 batch 1 (regions/geometry/vnf/comparisons.scad) ─────────────────────────────────────
     // The post-O.6 residual's small-body big-timers: _point_dist is 4.9s in shoe_holder alone (offset()'s
@@ -1728,7 +1829,7 @@ pub(super) static REGISTRY: &[Entry] = &[
             "is_list", "len", "is_undef", "is_num", "norm", "abs", "cross", "atan2", "sin",
             "cos", "acos", "min", "max", "is_bool", "is_string",
         ],
-        func: affine::affine3d_rot_from_to,
+        func: generated::affine3d_rot_from_to,
     },
     // ── O.9 tree 2a (transforms.scad) ────────────────────────────────────────────────────────────────────
     // `apply` — the public transform-application dispatcher over the already-native `_apply`. Its vnf lane's

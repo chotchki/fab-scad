@@ -1,7 +1,7 @@
 use super::generated::approx;
-use super::geometry::{point2d, point3d};
+use super::geometry::point3d;
 use super::shape::is_matrix;
-use super::vectors::{unit, v_theta, vector_angle, vector_axis};
+use super::vectors::unit;
 use super::{bosl_assert, is_vector_core, v_is_finite};
 use crate::eval::value::{self, Value};
 use crate::eval::{build_range, build_vector, builtins, iter_values_raw, ops};
@@ -193,47 +193,6 @@ pub(super) fn affine3d_yrot(args: &[Value]) -> crate::Result<Value> {
 /// BOSL2 `affine3d_identity() = ident(4)` — through the real [`ident`].
 pub(super) fn affine3d_identity(_args: &[Value]) -> crate::Result<Value> {
     ident(&[Value::Num(4.0)])
-}
-
-/// BOSL2 `affine3d_rot_from_to(from, to)` — the rotation matrix taking `from` to `to`: identity when
-/// already aligned ([`approx`] on the unit vectors), a z-rotation when both are planar (`v_theta` deltas),
-/// else Rodrigues from [`vector_axis`]/[`vector_angle`] with the reference's exact cell arithmetic
-/// (left-associated products, `.x/.y/.z` through the real member op, `sin`/`cos` through the builtins).
-pub(super) fn affine3d_rot_from_to(
-    fx: &dyn crate::surface::FnCtx,
-    args: &[Value],
-) -> crate::Result<Value> {
-    let from = args.first().cloned().unwrap_or(Value::Undef);
-    let to = args.get(1).cloned().unwrap_or(Value::Undef);
-    if !is_vector_core(&from) || !is_vector_core(&to) {
-        return Err(bosl_assert("affine3d_rot_from_to: invalid vector"));
-    }
-    let lf = builtins::apply("len", std::slice::from_ref(&from));
-    let lt = builtins::apply("len", std::slice::from_ref(&to));
-    if !ops::apply_binary(BinOp::Eq, lf, lt).is_truthy() {
-        return Err(bosl_assert("affine3d_rot_from_to: length mismatch"));
-    }
-    let from = unit(fx, &[point3d(std::slice::from_ref(&from))?])?;
-    let to = unit(fx, &[point3d(std::slice::from_ref(&to))?])?;
-    if approx(fx, &[from.clone(), to.clone()])?.is_truthy() {
-        return affine3d_identity(&[]);
-    }
-    let z0 = |v: &Value| {
-        ops::apply_binary(BinOp::Eq, ops::member(v.clone(), "z"), Value::Num(0.0)).is_truthy()
-    };
-    if z0(&from) && z0(&to) {
-        let theta = |v: &Value| -> crate::Result<Value> {
-            v_theta(fx, &[point2d(std::slice::from_ref(v))?])
-        };
-        let dt = ops::apply_binary(BinOp::Sub, theta(&to)?, theta(&from)?);
-        return affine3d_zrot(std::slice::from_ref(&dt));
-    }
-    let u = vector_axis(fx, &[from.clone(), to.clone()])?;
-    let ang = vector_angle(fx, &[from, to])?;
-    let c = builtins::apply("cos", std::slice::from_ref(&ang));
-    let c2 = ops::apply_binary(BinOp::Sub, Value::Num(1.0), c.clone());
-    let s = builtins::apply("sin", std::slice::from_ref(&ang));
-    Ok(rodrigues_rows(&u, &c, &c2, &s))
 }
 
 /// The `apply`-reachable slice of BOSL2 `determinant`: the closed-form 1–4 lanes (each with its own
@@ -664,7 +623,7 @@ pub(super) fn rot(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Resu
         let from3 = point3d(std::slice::from_ref(&from))?;
         let to3 = point3d(std::slice::from_ref(&to))?;
         mul(
-            affine3d_rot_from_to(fx, &[from3.clone(), to3])?,
+            super::generated::affine3d_rot_from_to(fx, &[from3.clone(), to3])?,
             affine3d_rot_by_axis(fx, &[from3, a])?,
         )
     } else if !matches!(v, Value::Undef) {

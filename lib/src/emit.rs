@@ -2559,6 +2559,20 @@ pub const GENERATED_ENTRIES: &[&str] = &[
     "f_2arg_simple",
     "f_3arg",
     "f_gt",
+    // AR.25 — the hand-native cone. `determinant` is the first SELF-recursive generated
+    // native; `constrain` closes the anchor hole that silently guard-declined vector_angle
+    // and affine3d_rot_from_to (whose migrations follow their cone here). `apply`/`rot` stay
+    // hand-listed with their blockers: apply's callees (reverse, vnf_reverse_faces, str_join)
+    // cascade into library-scale generation, rot is the `_NO_ARG` bootstrap bake.
+    "flatten",
+    "list_to_matrix",
+    "det2",
+    "det3",
+    "det4",
+    "determinant",
+    "constrain",
+    "vector_angle",
+    "affine3d_rot_from_to",
     // AR.17 stage A — the migration-closed batch: every HAND native whose emitted code resolves
     // its sibling calls inside this list (measured by `hand_native_closed_batch`, not argued).
     // What stays hand traces almost entirely to `is_vector`, whose only decline is the AN.10
@@ -2589,10 +2603,9 @@ pub const GENERATED_ENTRIES: &[&str] = &[
     "affine3d_translate",
     // AR.17 stage C — the rung-1 conditional un-declined is_vector (the AN.10 poster child:
     // param `all_nonzero` shadowing the like-named function now emits the interpreter's own
-    // rule inline), and its dependency cone rides. Still hand: select/_none_inside/_point_dist/
-    // _get_ear (need an `is_range` entry), vector_angle/affine3d_rot_from_to (`constrain`),
-    // apply/_vnf_centroid (`is_vnf`), _region_region_intersections (`list_wrap`), rot (the
-    // `_NO_ARG` sentinel no bootstrap bake can express).
+    // rule inline), and its dependency cone rides. Still hand after AR.25's cone:
+    // apply (its callees reverse/vnf_reverse_faces/str_join cascade — library-scale
+    // generation's job) and rot (the `_NO_ARG` sentinel no bootstrap bake can express).
     "is_vector",
     "all_nonzero",
     "is_matrix",

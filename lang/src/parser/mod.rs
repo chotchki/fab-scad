@@ -18,7 +18,7 @@ mod stmt;
 
 pub use ast::{
     Arg, BinOp, Expr, ExprKind, Modifiers, ModuleInstantiation, Parameter, Program, Span, Stmt,
-    StmtKind, UnOp,
+    StmtKind, UnOp, expr_child, expr_children, find_expr_path,
 };
 pub use print::{print, print_expr};
 

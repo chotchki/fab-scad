@@ -946,6 +946,76 @@ impl crate::surface::FnCtx for NativeFnCtx<'_, '_> {
     ) -> crate::Result<Value> {
         invoke_function_value(self.ctx, &self.caller, callee, args)
     }
+
+    fn mint_fn(
+        &self,
+        def: &str,
+        path: &[usize],
+        self_name: Option<&str>,
+        captures: &[(&'static str, Value)],
+    ) -> crate::Result<Value> {
+        mint_function_literal(self.ctx, def, path, self_name, captures)
+    }
+}
+
+/// AR.17.2 — MINT a `Value::Function` from the literal at `path` inside the fingerprint-proven
+/// definition of `def`. The def-body-for-expressions move: emitted code cannot carry `'a` AST
+/// refs, so the native names the definition (its OWN scad name, baked — siblings share one `fx`,
+/// so threading a def at dispatch would hand a sibling the CALLER's body) and the runtime digs
+/// the literal out of `ctx.functions`, which still holds the exact `(params, body)` the arming
+/// fingerprint proved — the intrinsic table is a side table, never an eviction. Soundness for
+/// sibling-reached mints is the guard chain: every reachable dep is fingerprint-pinned at arm
+/// time, so the looked-up body is the one the emitter compiled paths against.
+///
+/// Mirrors the interpreter's own literal arm exactly: a FRESH closure-table push per mint (two
+/// mints compare UNEQUAL, and the memo caches' closure-growth impurity signal fires — a
+/// register-once mint would let an enclosing call cache and replay one identity), env = a fresh
+/// child of the def's island base with the emitter-named captures bound, `repr` from
+/// `function_value_repr` so `str()`/echo match the oracle byte-for-byte.
+///
+/// # Errors
+/// A missing definition, a path off the body, or a non-literal target — all structurally
+/// impossible while the fingerprint gate holds, so each is a LOUD fab bug, not a decline.
+pub(super) fn mint_function_literal(
+    ctx: &super::Ctx<'_>,
+    def: &str,
+    path: &[usize],
+    self_name: Option<&str>,
+    captures: &[(&'static str, Value)],
+) -> crate::Result<Value> {
+    let Some(&((_, body), home)) = ctx.functions.get(def) else {
+        return Err(crate::Error::Unimplemented(
+            "mint: the named definition is not loaded — a fab bug, the arming gate should have held",
+        ));
+    };
+    let mut node = body;
+    for &i in path {
+        node = crate::parser::expr_child(node, i).ok_or(crate::Error::Unimplemented(
+            "mint: the path walks off the proven definition — a fab bug, not a model error",
+        ))?;
+    }
+    let crate::parser::ExprKind::FunctionLiteral { params, body } = &node.kind else {
+        return Err(crate::Error::Unimplemented(
+            "mint: the path addresses a non-literal — a fab bug, not a model error",
+        ));
+    };
+    let closure_id = {
+        let mut closures = ctx.closures.borrow_mut();
+        closures.push((params.as_slice(), body.as_ref()));
+        closures.len() - 1
+    };
+    let mut env = ctx.island_globals.borrow()[home].clone().child();
+    for (name, value) in captures {
+        env.bind(*name, value.clone());
+    }
+    Ok(Value::Function {
+        closure_id,
+        env,
+        self_name: self_name.map(std::rc::Rc::from),
+        repr: crate::parser::print::function_value_repr(params, body).into(),
+        group: None, // a minted literal has no letrec siblings — self rides `self_name`
+        bound_this: None, // binding happens at member EXTRACTION (AF.5), same as the eval arm
+    })
 }
 
 /// RAII decrement for [`Ctx::live_calls`] — the balance an interpreted `Task::Apply` gets from

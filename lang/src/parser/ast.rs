@@ -476,3 +476,106 @@ impl Drop for Expr {
 fn take_kind(mut e: Expr) -> ExprKind {
     core::mem::take(&mut e.kind)
 }
+
+/// AR.17.2 — the CANONICAL child enumeration for expression PATH-ADDRESSING, in source order.
+/// The transpiler computes a child-index path to a `FunctionLiteral` against its parse of the
+/// reference; the evaluator resolves the same path against the user's fingerprint-proven
+/// definition. Fingerprint equality guarantees node-for-node structural identity (spans aside),
+/// so a path transfers iff BOTH sides enumerate children identically — which is why this is the
+/// ONE definition, public, and exhaustive: a new variant must decide its ordering here or
+/// nothing compiles.
+#[must_use]
+pub fn expr_children(e: &Expr) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    match &e.kind {
+        ExprKind::Num(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Undef
+        | ExprKind::Ident(_) => {}
+        ExprKind::Unary { operand, .. } => out.push(&**operand),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            out.push(&**lhs);
+            out.push(&**rhs);
+        }
+        ExprKind::Ternary { cond, then, els } => {
+            out.push(&**cond);
+            out.push(&**then);
+            out.push(&**els);
+        }
+        ExprKind::Index { base, index } => {
+            out.push(&**base);
+            out.push(&**index);
+        }
+        ExprKind::Member { base, .. } => out.push(&**base),
+        ExprKind::Call { callee, args } => {
+            out.push(&**callee);
+            out.extend(args.iter().map(|a| &a.value));
+        }
+        ExprKind::Vector(elems) => out.extend(elems.iter()),
+        ExprKind::Range { start, step, end } => {
+            out.push(&**start);
+            if let Some(step) = step {
+                out.push(&**step);
+            }
+            out.push(&**end);
+        }
+        ExprKind::FunctionLiteral { params, body } => {
+            out.extend(params.iter().filter_map(|p| p.default.as_ref()));
+            out.push(&**body);
+        }
+        ExprKind::Let { bindings, body } | ExprKind::LcFor { bindings, body } => {
+            out.extend(bindings.iter().map(|a| &a.value));
+            out.push(&**body);
+        }
+        ExprKind::Assert { args, body } | ExprKind::Echo { args, body } => {
+            out.extend(args.iter().map(|a| &a.value));
+            if let Some(body) = body {
+                out.push(&**body);
+            }
+        }
+        ExprKind::LcForC {
+            init,
+            cond,
+            update,
+            body,
+        } => {
+            out.extend(init.iter().map(|a| &a.value));
+            out.push(&**cond);
+            out.extend(update.iter().map(|a| &a.value));
+            out.push(&**body);
+        }
+        ExprKind::LcEach(inner) => out.push(&**inner),
+        ExprKind::LcIf { cond, then, els } => {
+            out.push(&**cond);
+            out.push(&**then);
+            if let Some(els) = els {
+                out.push(&**els);
+            }
+        }
+    }
+    out
+}
+
+/// The `i`th child under [`expr_children`]'s ordering.
+#[must_use]
+pub fn expr_child(e: &Expr, i: usize) -> Option<&Expr> {
+    expr_children(e).into_iter().nth(i)
+}
+
+/// The child-index path from `root` to `target` — by node IDENTITY (`ptr::eq`), not equality,
+/// because two syntactically equal literals in one body are DIFFERENT mint targets. Depth-first
+/// in [`expr_children`] order; recursion is bounded by the parser's own nesting cap.
+#[must_use]
+pub fn find_expr_path(root: &Expr, target: &Expr) -> Option<Vec<usize>> {
+    if core::ptr::eq(root, target) {
+        return Some(Vec::new());
+    }
+    for (i, child) in expr_children(root).into_iter().enumerate() {
+        if let Some(mut path) = find_expr_path(child, target) {
+            path.insert(0, i);
+            return Some(path);
+        }
+    }
+    None
+}

@@ -4426,6 +4426,202 @@ mod tests {
         assert!(tagged_functions(&Vec::new()).is_empty());
     }
 
+    /// AR.17.2 mint, direct: a path-addressed literal in a loaded definition becomes a value
+    /// that invokes like the interpreter's own — including through structure (vector, ternary).
+    #[test]
+    fn mint_resolves_a_path_and_invokes() {
+        let program = parse(
+            "function mk(k) = function(x) x + k;\n\
+             function pick(a) = [1, function(x) x * a, 2];\n\
+             function branch(a) = a > 0 ? function(x) x - 1 : function(x) x + 1;",
+        )
+        .unwrap();
+        let ctx = build_ctx(&program, crate::Config::default());
+        let caller = ctx.island_globals.borrow()[0].clone();
+        let call = |v: &Value, n: f64| {
+            super::module_rt::invoke_function_value(&ctx, &caller, v, &[(None, Value::Num(n))])
+                .unwrap()
+        };
+
+        // body root IS the literal — the empty path.
+        let v = super::module_rt::mint_function_literal(
+            &ctx,
+            "mk",
+            &[],
+            None,
+            &[("k", Value::Num(3.0))],
+        )
+        .unwrap();
+        assert_eq!(call(&v, 4.0), Value::Num(7.0));
+
+        // vector element 1 → path [1] (child 0 is the `1` literal).
+        let v = super::module_rt::mint_function_literal(
+            &ctx,
+            "pick",
+            &[1],
+            None,
+            &[("a", Value::Num(5.0))],
+        )
+        .unwrap();
+        assert_eq!(call(&v, 4.0), Value::Num(20.0));
+
+        // ternary branches → paths [1] (then) and [2] (else).
+        let then =
+            super::module_rt::mint_function_literal(&ctx, "branch", &[1], None, &[]).unwrap();
+        let els = super::module_rt::mint_function_literal(&ctx, "branch", &[2], None, &[]).unwrap();
+        assert_eq!(call(&then, 4.0), Value::Num(3.0));
+        assert_eq!(call(&els, 4.0), Value::Num(5.0));
+    }
+
+    /// The mint mirrors the interpreter's own literal evaluation: identical `repr` (str()/echo
+    /// are part of the differential answer), identical invoke result, and the IDENTITY pin —
+    /// every mint is a fresh closure, so two mints compare UNEQUAL, exactly like re-evaluating
+    /// a literal (AH.2.7), and the closure table GROWS per mint (the memo caches' impurity
+    /// signal — a register-once mint would let an enclosing call cache one identity and replay
+    /// it).
+    #[test]
+    fn mint_mirrors_the_interpreter_twin() {
+        let program = parse("function mk(k) = function(x) x + k;").unwrap();
+        let ctx = build_ctx(&program, crate::Config::default());
+        let caller = ctx.island_globals.borrow()[0].clone();
+
+        // the interpreted twin: evaluate the SAME literal node with `k` bound in scope.
+        let StmtKind::FunctionDef { body, .. } = &program.stmts[0].kind else {
+            panic!("first stmt is the def");
+        };
+        let mut env = caller.child();
+        env.bind("k", Value::Num(3.0));
+        let twin = eval_with_ctx(body, &env, &ctx).unwrap();
+
+        let before = ctx.closures.borrow().len();
+        let minted = super::module_rt::mint_function_literal(
+            &ctx,
+            "mk",
+            &[],
+            None,
+            &[("k", Value::Num(3.0))],
+        )
+        .unwrap();
+        let minted2 = super::module_rt::mint_function_literal(
+            &ctx,
+            "mk",
+            &[],
+            None,
+            &[("k", Value::Num(3.0))],
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.closures.borrow().len(),
+            before + 2,
+            "fresh entry per mint"
+        );
+        assert_ne!(minted, minted2, "two mints are two identities");
+        assert_ne!(
+            minted, twin,
+            "a mint is not the interpreted evaluation either"
+        );
+
+        let (Value::Function { repr: a, .. }, Value::Function { repr: b, .. }) = (&twin, &minted)
+        else {
+            panic!("both are function values");
+        };
+        assert_eq!(a, b, "repr must match the interpreter's or str() diverges");
+
+        for v in [&twin, &minted, &minted2] {
+            let out = super::module_rt::invoke_function_value(
+                &ctx,
+                &caller,
+                v,
+                &[(None, Value::Num(4.0))],
+            )
+            .unwrap();
+            assert_eq!(out, Value::Num(7.0));
+        }
+    }
+
+    /// `self_name` mirrors `name_closure`'s binding-site stamp: a letrec literal (`a = function…`
+    /// recursing through `a`) minted with its binder name self-reinjects at invoke. The census
+    /// says all 11 BOSL2 letrec literals are exactly this shape.
+    #[test]
+    fn mint_self_name_carries_letrec_recursion() {
+        let program = parse("function mk() = function(n) n <= 1 ? 1 : n * fac(n - 1);").unwrap();
+        let ctx = build_ctx(&program, crate::Config::default());
+        let caller = ctx.island_globals.borrow()[0].clone();
+        let v = super::module_rt::mint_function_literal(&ctx, "mk", &[], Some("fac"), &[]).unwrap();
+        let out =
+            super::module_rt::invoke_function_value(&ctx, &caller, &v, &[(None, Value::Num(5.0))])
+                .unwrap();
+        assert_eq!(out, Value::Num(120.0));
+    }
+
+    /// CALL-position captures: the f_* battery's literals call a name (`f(x)`) that is the
+    /// enclosing def's PARAM holding a function value. The interpreted twin resolves it through
+    /// dispatch rung 1's scope walk, so the minted env must bind it — a value-read-only capture
+    /// rule would silently undef 71 of the 107.
+    #[test]
+    fn mint_captures_cover_call_position_names() {
+        let program = parse(
+            "function inner() = function(x) x + 1;\n\
+             function outer(f) = function(x) f(x) * 10;",
+        )
+        .unwrap();
+        let ctx = build_ctx(&program, crate::Config::default());
+        let caller = ctx.island_globals.borrow()[0].clone();
+        let f = super::module_rt::mint_function_literal(&ctx, "inner", &[], None, &[]).unwrap();
+        let v =
+            super::module_rt::mint_function_literal(&ctx, "outer", &[], None, &[("f", f)]).unwrap();
+        let out =
+            super::module_rt::invoke_function_value(&ctx, &caller, &v, &[(None, Value::Num(4.0))])
+                .unwrap();
+        assert_eq!(out, Value::Num(50.0));
+    }
+
+    /// Mint failures are LOUD fab bugs, never silent undef: a missing def, a path off the body,
+    /// a path landing on a non-literal — all structurally impossible while the fingerprint gate
+    /// holds, so each must surface.
+    #[test]
+    fn mint_failures_are_loud() {
+        let program = parse("function g(x) = x + 1;").unwrap();
+        let ctx = build_ctx(&program, crate::Config::default());
+        for (def, path) in [("nope", &[][..]), ("g", &[7][..]), ("g", &[][..])] {
+            assert!(
+                super::module_rt::mint_function_literal(&ctx, def, path, None, &[]).is_err(),
+                "mint({def}, {path:?}) must refuse loudly"
+            );
+        }
+    }
+
+    /// The emitter-side path helper round-trips through the resolver's walk: `find_expr_path`
+    /// against a node found by identity resolves back to that node via `expr_child` — the two
+    /// sides of the AR.17.2 contract share `expr_children`, so this is the drift guard.
+    #[test]
+    fn expr_paths_round_trip() {
+        // find the literal by walking; then the path must resolve back to the SAME node.
+        fn find_literal(e: &crate::Expr) -> Option<&crate::Expr> {
+            if matches!(e.kind, crate::ExprKind::FunctionLiteral { .. }) {
+                return Some(e);
+            }
+            crate::expr_children(e).into_iter().find_map(find_literal)
+        }
+        let program = parse(
+            "function w(a) = let(t = a * 2) a > 0 ? [for (i = [0:a]) i, function(x) x + t] : undef;",
+        )
+        .unwrap();
+        let StmtKind::FunctionDef { body, .. } = &program.stmts[0].kind else {
+            panic!("first stmt is the def");
+        };
+        let lit = find_literal(body).expect("the source has a literal");
+        let path = crate::find_expr_path(body, lit).expect("the literal is under the body");
+        let mut node = body;
+        for &i in &path {
+            node = crate::expr_child(node, i).expect("the path resolves");
+        }
+        assert!(
+            core::ptr::eq(node, lit),
+            "round-trip lands on the same node"
+        );
+    }
+
     /// O.5.2 mechanism, direct: [`super::guard_veto`] via [`super::build_intrinsics`] — a fingerprint-matched
     /// entry still declines when a DEP drifted/is absent (the interpreted reference would route through the
     /// changed dep; the native bakes the pinned one) or when a user fn SHADOWS a builtin the reference leans

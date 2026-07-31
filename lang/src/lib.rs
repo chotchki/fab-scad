@@ -92,7 +92,7 @@ pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
 pub use parser::{
     Arg, BinOp, Expr, ExprKind, Modifiers, ModuleInstantiation, Parameter, Program, Span, Stmt,
-    StmtKind, UnOp, parse, print, print_expr,
+    StmtKind, UnOp, expr_child, expr_children, find_expr_path, parse, print, print_expr,
 };
 
 /// Tier-equality for doctrine #36 (`interp` == `intrinsics` == `JIT`, and cross-platform): two `f64`

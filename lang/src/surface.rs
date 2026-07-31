@@ -290,6 +290,29 @@ pub trait FnCtx {
         callee: &Value,
         args: &[(Option<&'static str>, Value)],
     ) -> crate::Result<Value>;
+
+    /// MINT a function value from the literal at `path` inside the fingerprint-proven definition
+    /// of `def` (AR.17.2) — the creation half of the closure capability, `call_value`'s twin. The
+    /// path is child indices under `parser::ast::expr_children`'s ordering, computed by the
+    /// emitter against its parse of the reference; fingerprint equality makes it resolve to the
+    /// structurally identical node in the program's own loaded definition. `captures` are the
+    /// emitter-named free locals bound into a fresh child of the definition's island base —
+    /// value AND call-position names, because the invoked body resolves both through the scope.
+    /// `self_name` mirrors `name_closure`: the binder name when the literal is a binding's RHS,
+    /// so self-recursion re-injects. Minting registers a FRESH closure-table entry per call —
+    /// identity semantics (two mints compare unequal) and the memo caches' impurity signal both
+    /// ride that, exactly as the interpreter's own literal evaluation does.
+    ///
+    /// # Errors
+    /// A decline (`Unimplemented`) where no evaluator exists ([`NoClosures`]); a path that
+    /// misses the proven definition is a fab BUG surfaced loudly, never a silent `undef`.
+    fn mint_fn(
+        &self,
+        def: &str,
+        path: &[usize],
+        self_name: Option<&str>,
+        captures: &[(&'static str, Value)],
+    ) -> crate::Result<Value>;
 }
 
 /// The [`FnCtx`] for call sites with NO evaluator — benches, oracles, value-level batteries. It
@@ -305,6 +328,18 @@ impl FnCtx for NoClosures {
     ) -> crate::Result<Value> {
         Err(crate::Error::Unimplemented(
             "a closure invocation with no evaluator — re-interpreting",
+        ))
+    }
+
+    fn mint_fn(
+        &self,
+        _def: &str,
+        _path: &[usize],
+        _self_name: Option<&str>,
+        _captures: &[(&'static str, Value)],
+    ) -> crate::Result<Value> {
+        Err(crate::Error::Unimplemented(
+            "a closure mint with no evaluator — re-interpreting",
         ))
     }
 }

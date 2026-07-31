@@ -956,6 +956,71 @@ impl crate::surface::FnCtx for NativeFnCtx<'_, '_> {
     ) -> crate::Result<Value> {
         mint_function_literal(self.ctx, def, path, self_name, captures)
     }
+
+    fn reinterpret(
+        &self,
+        name: &str,
+        _fallback_sources: &'static str,
+        args: &[Value],
+    ) -> crate::Result<Value> {
+        reinterpret_named(self.ctx, &self.caller, name, args)
+    }
+}
+
+/// RAII on [`Ctx::suppress_intrinsics`] — held across a re-interpretation so the subtree stays
+/// on one machine's explicit stack. A count (re-interpretations nest); `Drop` balances early
+/// returns.
+struct SuppressIntrinsics<'c, 'a>(&'c super::Ctx<'a>);
+
+impl<'c, 'a> SuppressIntrinsics<'c, 'a> {
+    fn enter(ctx: &'c super::Ctx<'a>) -> Self {
+        ctx.suppress_intrinsics
+            .set(ctx.suppress_intrinsics.get() + 1);
+        Self(ctx)
+    }
+}
+
+impl Drop for SuppressIntrinsics<'_, '_> {
+    fn drop(&mut self) {
+        let c = self.0.suppress_intrinsics.get();
+        self.0.suppress_intrinsics.set(c.saturating_sub(1));
+    }
+}
+
+/// AR.24 — the depth-decline fallback in the LIVE evaluator. The named, fingerprint-proven
+/// definition interprets with the intrinsic rung SUPPRESSED, so the whole subtree runs on one
+/// machine's explicit stack — per-level native re-entry would grow the Rust stack per recursion
+/// level, the exact class the interpreter designed out. Live ctx is the point: closures mint
+/// into the REAL table (the throwaway-boundary refusal is unreachable from this path), echoes
+/// land on the real console, and the memo caches see the interpreted twin's purity signals.
+/// Binding mirrors the flat-ABI rule everywhere else: positional slots, an unfilled slot's
+/// default in the lexical BASE, defaultless → undef; the call frame is `bind_values`'s —
+/// lexically the home island's global, dynamically the caller.
+pub(super) fn reinterpret_named(
+    ctx: &super::Ctx<'_>,
+    caller: &Scope,
+    name: &str,
+    args: &[Value],
+) -> crate::Result<Value> {
+    let Some(&((params, body), home)) = ctx.functions.get(name) else {
+        return Err(crate::Error::Unimplemented(
+            "reinterpret: the named definition is not loaded — a fab bug, the arming gate should have held",
+        ));
+    };
+    // The interpreted twin's own recursion verdict, NAME-FUL — this is a named call.
+    let depth = ctx.live_calls.get() + 1;
+    if depth > super::MAX_CALL_DEPTH {
+        return Err(crate::Error::Eval(format!(
+            "Recursion detected calling function '{name}'"
+        )));
+    }
+    ctx.live_calls.set(depth);
+    let _live = LiveCallTicket(ctx);
+    let _quiet = SuppressIntrinsics::enter(ctx);
+    let base = ctx.island_globals.borrow()[home].clone();
+    let slots: Vec<Option<Value>> = (0..params.len()).map(|i| args.get(i).cloned()).collect();
+    let call = bind_values(params, &slots, &[], caller, &base, ctx)?;
+    super::eval_with_ctx(body, &call, ctx)
 }
 
 /// AR.17.2 — MINT a `Value::Function` from the literal at `path` inside the fingerprint-proven

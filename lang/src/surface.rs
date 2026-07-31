@@ -313,6 +313,23 @@ pub trait FnCtx {
         self_name: Option<&str>,
         captures: &[(&'static str, Value)],
     ) -> crate::Result<Value>;
+
+    /// Re-interpret the NAMED, fingerprint-proven definition — the depth-decline fallback
+    /// (AR.24). In the live evaluator the reference interprets with the intrinsic rung
+    /// suppressed (one machine, explicit stack — per-level native re-entry would grow the Rust
+    /// stack), closures mint into the REAL table, echoes land on the real console, and the memo
+    /// caches see the interpreted twin's exact purity signals. With no evaluator
+    /// ([`NoClosures`]) the batch's own `fallback_sources` interpret in a throwaway oracle
+    /// instead — value-only; closures refuse that boundary loudly.
+    ///
+    /// # Errors
+    /// Whatever the body raises — an assert propagates exactly as it would from the native.
+    fn reinterpret(
+        &self,
+        name: &str,
+        fallback_sources: &'static str,
+        args: &[Value],
+    ) -> crate::Result<Value>;
 }
 
 /// The [`FnCtx`] for call sites with NO evaluator — benches, oracles, value-level batteries. It
@@ -341,6 +358,15 @@ impl FnCtx for NoClosures {
         Err(crate::Error::Unimplemented(
             "a closure mint with no evaluator — re-interpreting",
         ))
+    }
+
+    fn reinterpret(
+        &self,
+        name: &str,
+        fallback_sources: &'static str,
+        args: &[Value],
+    ) -> crate::Result<Value> {
+        crate::rt::run_interpreted(fallback_sources, name, args)
     }
 }
 

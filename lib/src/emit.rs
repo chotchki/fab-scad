@@ -488,11 +488,11 @@ pub fn generate_native(
         "/// Generated native for `{name}` — semantics route through the interpreter's own value\n\
          /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.\n\
          pub(super) fn {fn_ident}(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {{\n\
-         \x20   let _ = fx; // AR.17: the closure capability — unused until a body reaches one\n\
-         \x20   // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,\n\
-         \x20   // same proven semantics; recursion cannot ride the Rust stack unbounded.\n\
+         \x20   // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets\n\
+         \x20   // the proven reference on one machine's explicit stack (ctx-less callers get the\n\
+         \x20   // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.\n\
          \x20   let Some(_depth) = rt::DepthGuard::enter() else {{\n\
-         \x20       return rt::run_interpreted(FALLBACK_SOURCES, \"{name}\", args);\n\
+         \x20       return fx.reinterpret(\"{name}\", FALLBACK_SOURCES, args);\n\
          \x20   }};\n"
     );
     for (i, p) in params.iter().enumerate() {

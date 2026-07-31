@@ -5031,16 +5031,18 @@ fn the_fnliterals_mint_slice_runs_native() {
         refs.push_str(r);
         refs.push('\n');
     }
+    // Every factory call sits in STATEMENT position — the skeptic pass proved top-level
+    // assignment RHS evaluates at HOIST time, which never dispatches intrinsics, so an
+    // assignment-shaped test exercises the interpreter twice and calls it agreement.
     let src = format!(
         "{refs}\
          echo(a=reduce(function(x,y) x + y, [1, 2, 3, 4]));\n\
          echo(b=f_gt(5, 2)(), c=f_gt(2, 5)());\n\
          echo(f=str(f_gt(1, 2)));\n\
-         fc = f_3arg(function(x,y,z) x * 100 + y * 10 + z);\n\
-         g = fc(1, undef, 3);\n\
-         echo(d=g(5));\n\
-         h = f_1arg(function(x) x * 3)(undef);\n\
-         echo(e=h(7));"
+         echo(d=(f_3arg(function(x,y,z) x * 100 + y * 10 + z)(1, undef, 3))(5));\n\
+         echo(e=(f_1arg(function(x) x * 3)(undef))(7));\n\
+         echo(g=(f_2arg(function(x,y) x - y)(undef, 4))(10));\n\
+         echo(h=(f_2arg_simple(function(x,y) x * y)(3, undef))(6));"
     );
     let run = |intrinsics: bool| {
         let config = crate::Config {
@@ -5060,10 +5062,62 @@ fn the_fnliterals_mint_slice_runs_native() {
         "b = true, c = false",
         "d = 153",
         "e = 21",
+        "g = 6",
+        "h = 18",
         // upstream's factories return partially-applied THUNKS — `f_gt(5,2)` is a zero-arg
         // closure, applied above; this pins the thunk's repr (a nested minted literal) too.
         "function() target_func(a, b)",
     ] {
+        assert!(on.contains(want), "missing `{want}` in {on}");
+    }
+}
+
+/// AR.24 — past the depth budget a native re-interprets its proven reference in the LIVE
+/// evaluator: one machine, explicit stack, closures minting into the REAL table. The ladder is
+/// the skeptic pass's BOSL2-idiomatic shape (recursive fold: native reduce → `call_value` →
+/// nested machine → native …), which under the OLD throwaway fallback refused loudly the moment
+/// a closure crossed the boundary — `deep`'s factory return (y) is exactly the previously
+/// refused shape. `w` stays under the budget (both tiers native-capable), `x` crosses it.
+#[test]
+fn depth_declines_reinterpret_in_the_live_evaluator() {
+    use crate::parser::{StmtKind, parse};
+    let mut refs = String::new();
+    for name in ["reduce", "f_1arg"] {
+        let r = reference_of(name).expect("registered");
+        let prog = parse(r).expect("parses");
+        let Some(StmtKind::FunctionDef { params, body, .. }) = prog.stmts.first().map(|s| &s.kind)
+        else {
+            panic!("expected a function def");
+        };
+        assert!(
+            resolve(name, params, body).is_some(),
+            "{name} must wire before agreement means anything"
+        );
+        refs.push_str(r);
+        refs.push('\n');
+    }
+    let src = format!(
+        "{refs}\
+         function nest(n) = reduce(function(a,b) n <= 1 ? a + b : b + nest(n-1), [1], 0);\n\
+         deep = function(n) n <= 0 ? f_1arg(function(x) x * 2) : reduce(function(a,b) deep(n-1), [1], 0);\n\
+         echo(w=nest(20));\n\
+         echo(x=nest(40));\n\
+         echo(y=(deep(40)(undef))(21));"
+    );
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (_, msgs) =
+            crate::evaluate_geometry_with_base_config(&src, std::path::Path::new("."), &[], config)
+                .expect("renders — the depth decline must ANSWER, not refuse");
+        format!("{msgs:?}")
+    };
+    let on = run(true);
+    let off = run(false);
+    assert_eq!(on, off, "the depth boundary diverged across tiers");
+    for want in ["w = 20", "x = 40", "y = 42"] {
         assert!(on.contains(want), "missing `{want}` in {on}");
     }
 }

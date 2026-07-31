@@ -13,10 +13,14 @@ use std::rc::Rc;
 
 use crate::eval::value::Value;
 
-/// The native tier's recursion allowance — kin to the parser's `MAX_DEPTH = 64` doctrine. Frames
-/// here are HEAVY (locals + accumulator `Vec`s per level), so the budget is deliberately small;
-/// everything past it runs on the interpreter's explicit stack.
-pub(super) const MAX_NATIVE_DEPTH: u32 = 64;
+/// The native tier's recursion allowance. Frames here are HEAVY, and the AR.17.2 mint band made
+/// the worst case heavier still: a native→`call_value`→nested-machine→native LADDER (the
+/// BOSL2-idiomatic recursive fold) measured ~130 KiB of DEBUG stack per level — the skeptic pass
+/// reproduced a SIGABRT stack overflow at 64 levels on the 8 MiB default before the guard could
+/// decline. 32 bounds the debug worst case near 4 MiB with margin; everything past it runs on
+/// the interpreter's explicit stack (AR.24: the LIVE evaluator, one machine), so the budget is
+/// a speed knob, never an answer.
+pub(super) const MAX_NATIVE_DEPTH: u32 = 32;
 
 /// One parsed island per distinct `FALLBACK_SOURCES` identity — keyed by the `&'static str`'s
 /// (ptr, len), `None` for an island whose parse failed (cached so it doesn't re-parse per decline).

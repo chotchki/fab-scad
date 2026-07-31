@@ -477,6 +477,13 @@ pub(super) struct Ctx<'a> {
     /// checked against [`MAX_CALL_DEPTH`]. JIT hits and cache hits never enter (their result lands
     /// immediately), so the count is exactly the interpreted call depth. A `Cell`, same as the others.
     live_calls: std::cell::Cell<u32>,
+    /// AR.24 — nonzero while a depth-declined native RE-INTERPRETS its reference in this live
+    /// evaluator: `dispatch_call`'s intrinsic rung is suppressed so the whole subtree runs on ONE
+    /// machine's explicit stack. Without it, each recursion level would bounce through a native
+    /// entry (whose depth budget is already spent) back into a fresh nested machine — Rust-stack
+    /// growth per level, the exact class the interpreter designed out. A count, not a bool:
+    /// re-interpretations nest.
+    suppress_intrinsics: std::cell::Cell<u32>,
     /// The desktop numeric-JIT hook (P.1.2), or `None` (wasm, or a program with nothing compiled). Built
     /// ONCE at setup by the caller-supplied [`NumericJitFactory`] and OWNED here — the registry CLONES the
     /// AST it needs (P.1.6 rung B on-demand recompile), so a `Box<dyn NumericJit>` still needs no `'a`. When
@@ -1072,6 +1079,7 @@ impl<'a> FnOracle<'a> {
             impure_reads: std::cell::Cell::new(0),
             eval_steps: std::cell::Cell::new(0),
             live_calls: std::cell::Cell::new(0),
+            suppress_intrinsics: std::cell::Cell::new(0),
             jit: None, // the oracle IS the interpreter baseline — never route it through the JIT
         };
         // Publish the constants into island 0's global (whole-scope, last-wins, first-occurrence order), so a
@@ -2308,7 +2316,11 @@ fn dispatch_call<'a>(
             // call (v1 ABI: the native fn takes a flat positional slice, so a named-arg call falls through
             // to the interpreter below rather than needing post-eval rebinding). The fingerprint match that
             // authorized this intrinsic happened once at `build_intrinsics`; here it's a name lookup.
-            if let Some(&func) = ctx.intrinsics.get(name.as_str()) {
+            // AR.24: suppressed while a depth-declined native re-interprets — the subtree must stay
+            // on this machine's explicit stack (see `Ctx::suppress_intrinsics`).
+            if ctx.suppress_intrinsics.get() == 0
+                && let Some(&func) = ctx.intrinsics.get(name.as_str())
+            {
                 if args.iter().all(|a| a.name.is_none()) {
                     fnprofile::record_intrinsic(name.as_str()); // dev probe: the already-native side of the worklist
                     // EXTRA positional args (beyond arity) are dropped UNEVALUATED, like `push_call`'s
@@ -3045,6 +3057,7 @@ fn resolve_source(
         impure_reads: std::cell::Cell::new(0),
         eval_steps: std::cell::Cell::new(0),
         live_calls: std::cell::Cell::new(0),
+        suppress_intrinsics: std::cell::Cell::new(0),
     };
     // Hoist the ROOT (island 0) FIRST, THEN the `use`-island constant scopes. ORDER is load-bearing: the
     // root's include-flattened functions (all of BOSL2's) are tagged home=0, so a `use`-island constant that
@@ -4378,6 +4391,7 @@ fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
         impure_reads: std::cell::Cell::new(0),
         eval_steps: std::cell::Cell::new(0),
         live_calls: std::cell::Cell::new(0),
+        suppress_intrinsics: std::cell::Cell::new(0),
         jit: None, // the raw-AST path (no loader) is interpreter-only; the JIT rides the loader entry
     }
 }

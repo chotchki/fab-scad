@@ -485,11 +485,11 @@ pub(super) static SURFACE: &[rt::Decl] = &[
 /// Generated native for `_fab_poc_sq` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_sq(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_sq", args);
+        return fx.reinterpret("_fab_poc_sq", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::apply_binary(rt::BinOp::Mul, p_x.clone(), p_x.clone());
@@ -499,11 +499,11 @@ pub(super) fn _fab_poc_sq(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<
 /// Generated native for `_fab_poc_near0` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_near0(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_near0", args);
+        return fx.reinterpret("_fab_poc_near0", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::apply_binary(rt::BinOp::Lt, rt::bi::abs(&[p_x.clone()]), rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
@@ -513,11 +513,11 @@ pub(super) fn _fab_poc_near0(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resu
 /// Generated native for `_fab_poc_outer` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_outer(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_outer", args);
+        return fx.reinterpret("_fab_poc_outer", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = _fab_poc_near0(fx, &[p_x.clone()])?;
@@ -527,11 +527,11 @@ pub(super) fn _fab_poc_outer(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resu
 /// Generated native for `_fab_poc_isup` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_isup(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_isup", args);
+        return fx.reinterpret("_fab_poc_isup", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::apply_binary(rt::BinOp::Eq, p_v.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]));
@@ -541,11 +541,11 @@ pub(super) fn _fab_poc_isup(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resul
 /// Generated native for `is_nan` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn is_nan(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "is_nan", args);
+        return fx.reinterpret("is_nan", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::apply_binary(rt::BinOp::Ne, p_x.clone(), p_x.clone());
@@ -555,11 +555,11 @@ pub(super) fn is_nan(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `is_finite` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn is_finite(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "is_finite", args);
+        return fx.reinterpret("is_finite", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::Value::Bool(rt::bi::is_num(&[p_x.clone()]).is_truthy() && rt::apply_unary(rt::UnOp::Not, is_nan(fx, &[rt::apply_binary(rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x0_u64)), p_x.clone())])?).is_truthy());
@@ -569,11 +569,11 @@ pub(super) fn is_finite(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt
 /// Generated native for `_fab_poc_band2` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_band2(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_band2", args);
+        return fx.reinterpret("_fab_poc_band2", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_i = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
@@ -584,11 +584,11 @@ pub(super) fn _fab_poc_band2(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resu
 /// Generated native for `is_def` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn is_def(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "is_def", args);
+        return fx.reinterpret("is_def", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::apply_unary(rt::UnOp::Not, rt::bi::is_undef(&[p_x.clone()]));
@@ -598,11 +598,11 @@ pub(super) fn is_def(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `is_str` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn is_str(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "is_str", args);
+        return fx.reinterpret("is_str", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::bi::is_string(&[p_x.clone()]);
@@ -612,11 +612,11 @@ pub(super) fn is_str(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `default` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn default(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "default", args);
+        return fx.reinterpret("default", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_dflt = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -627,11 +627,11 @@ pub(super) fn default(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::
 /// Generated native for `last` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn last(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "last", args);
+        return fx.reinterpret("last", FALLBACK_SOURCES, args);
     };
     let p_list = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::index(p_list.clone(), &rt::apply_binary(rt::BinOp::Sub, rt::bi::len(&[p_list.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
@@ -641,11 +641,11 @@ pub(super) fn last(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Val
 /// Generated native for `_fab_poc_band3` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_band3(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_band3", args);
+        return fx.reinterpret("_fab_poc_band3", FALLBACK_SOURCES, args);
     };
     let p_n = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &p_n.clone())) { { let l2_d = rt::apply_binary(rt::BinOp::Mul, l1_i.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))); if (rt::apply_binary(rt::BinOp::Gt, l2_d.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { l0_acc.push(l2_d.clone());
@@ -656,11 +656,11 @@ pub(super) fn _fab_poc_band3(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resu
 /// Generated native for `approx` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn approx(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "approx", args);
+        return fx.reinterpret("approx", FALLBACK_SOURCES, args);
     };
     let p_a = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_b = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -673,11 +673,11 @@ pub(super) fn approx(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `posmod` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn posmod(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "posmod", args);
+        return fx.reinterpret("posmod", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_m = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -688,11 +688,11 @@ pub(super) fn posmod(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `idx` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn idx(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "idx", args);
+        return fx.reinterpret("idx", FALLBACK_SOURCES, args);
     };
     let p_list = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_s = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
@@ -705,11 +705,11 @@ pub(super) fn idx(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Valu
 /// Generated native for `_fab_poc_band4` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_band4(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_band4", args);
+        return fx.reinterpret("_fab_poc_band4", FALLBACK_SOURCES, args);
     };
     let p_s = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_tag = args.get(1).cloned().unwrap_or_else(|| rt::Value::string("q\"b\\c\nd"));
@@ -720,11 +720,11 @@ pub(super) fn _fab_poc_band4(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resu
 /// Generated native for `_fab_poc_sib` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_sib(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_sib", args);
+        return fx.reinterpret("_fab_poc_sib", FALLBACK_SOURCES, args);
     };
     let p_a = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_b = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x401c000000000000_u64)));
@@ -736,11 +736,11 @@ pub(super) fn _fab_poc_sib(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result
 /// Generated native for `_fab_poc_hole` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_hole(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_hole", args);
+        return fx.reinterpret("_fab_poc_hole", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = _fab_poc_sib(fx, &[p_x.clone(), rt::Value::Num(f64::from_bits(0x401c000000000000_u64)), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))])?;
@@ -750,11 +750,11 @@ pub(super) fn _fab_poc_hole(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resul
 /// Generated native for `_fab_poc_callshadow` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_callshadow(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_callshadow", args);
+        return fx.reinterpret("_fab_poc_callshadow", FALLBACK_SOURCES, args);
     };
     let p_last = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_x = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -765,11 +765,11 @@ pub(super) fn _fab_poc_callshadow(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt:
 /// Generated native for `_fab_poc_curried2` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_curried2(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_curried2", args);
+        return fx.reinterpret("_fab_poc_curried2", FALLBACK_SOURCES, args);
     };
     let p_fs = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_i = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -781,11 +781,11 @@ pub(super) fn _fab_poc_curried2(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::R
 /// Generated native for `_fab_poc_mint_ret` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_mint_ret(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_mint_ret", args);
+        return fx.reinterpret("_fab_poc_mint_ret", FALLBACK_SOURCES, args);
     };
     let p_k = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = fx.mint_fn("_fab_poc_mint_ret", &[], None, &[("k", p_k.clone())])?;
@@ -795,11 +795,11 @@ pub(super) fn _fab_poc_mint_ret(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::R
 /// Generated native for `_fab_poc_mint_letrec` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_mint_letrec(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_mint_letrec", args);
+        return fx.reinterpret("_fab_poc_mint_letrec", FALLBACK_SOURCES, args);
     };
     let p_n = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = { let l0_fac = fx.mint_fn("_fab_poc_mint_letrec", &[0], Some("fac"), &[])?; fx.call_value(&l0_fac, &[(None, p_n.clone())])? };
@@ -809,11 +809,11 @@ pub(super) fn _fab_poc_mint_letrec(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt
 /// Generated native for `_fab_poc_mint_id` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_mint_id(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_mint_id", args);
+        return fx.reinterpret("_fab_poc_mint_id", FALLBACK_SOURCES, args);
     };
     let p_f = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = p_f.clone();
@@ -823,11 +823,11 @@ pub(super) fn _fab_poc_mint_id(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Re
 /// Generated native for `_fab_poc_mint_arg` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_mint_arg(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_mint_arg", args);
+        return fx.reinterpret("_fab_poc_mint_arg", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = fx.call_value(&_fab_poc_mint_id(fx, &[fx.mint_fn("_fab_poc_mint_arg", &[0, 1], None, &[("v", p_v.clone())])?])?, &[(None, rt::Value::Num(f64::from_bits(0x4024000000000000_u64)))])?;
@@ -837,11 +837,11 @@ pub(super) fn _fab_poc_mint_arg(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::R
 /// Generated native for `_fab_poc_mint_list` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _fab_poc_mint_list(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_mint_list", args);
+        return fx.reinterpret("_fab_poc_mint_list", FALLBACK_SOURCES, args);
     };
     let p_a = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::build_vector(vec![fx.mint_fn("_fab_poc_mint_list", &[0], None, &[("a", p_a.clone())])?, fx.mint_fn("_fab_poc_mint_list", &[1], None, &[("a", p_a.clone())])?]);
@@ -851,11 +851,11 @@ pub(super) fn _fab_poc_mint_list(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::
 /// Generated native for `reduce` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn reduce(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "reduce", args);
+        return fx.reinterpret("reduce", FALLBACK_SOURCES, args);
     };
     let p_func = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_list = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -867,11 +867,11 @@ pub(super) fn reduce(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `f_1arg` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn f_1arg(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "f_1arg", args);
+        return fx.reinterpret("f_1arg", FALLBACK_SOURCES, args);
     };
     let p_target_func = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = fx.mint_fn("f_1arg", &[], None, &[("target_func", p_target_func.clone())])?;
@@ -881,11 +881,11 @@ pub(super) fn f_1arg(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `f_2arg` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn f_2arg(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "f_2arg", args);
+        return fx.reinterpret("f_2arg", FALLBACK_SOURCES, args);
     };
     let p_target_func = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = fx.mint_fn("f_2arg", &[], None, &[("target_func", p_target_func.clone())])?;
@@ -895,11 +895,11 @@ pub(super) fn f_2arg(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `f_2arg_simple` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn f_2arg_simple(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "f_2arg_simple", args);
+        return fx.reinterpret("f_2arg_simple", FALLBACK_SOURCES, args);
     };
     let p_target_func = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = fx.mint_fn("f_2arg_simple", &[], None, &[("target_func", p_target_func.clone())])?;
@@ -909,11 +909,11 @@ pub(super) fn f_2arg_simple(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resul
 /// Generated native for `f_3arg` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn f_3arg(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "f_3arg", args);
+        return fx.reinterpret("f_3arg", FALLBACK_SOURCES, args);
     };
     let p_target_func = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = fx.mint_fn("f_3arg", &[], None, &[("target_func", p_target_func.clone())])?;
@@ -923,11 +923,11 @@ pub(super) fn f_3arg(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `f_gt` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn f_gt(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "f_gt", args);
+        return fx.reinterpret("f_gt", FALLBACK_SOURCES, args);
     };
     let p_a = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_b = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -938,11 +938,11 @@ pub(super) fn f_gt(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Val
 /// Generated native for `_is_liststr` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _is_liststr(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_is_liststr", args);
+        return fx.reinterpret("_is_liststr", FALLBACK_SOURCES, args);
     };
     let p_s = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::Value::Bool(rt::bi::is_list(&[p_s.clone()]).is_truthy() || is_str(fx, &[p_s.clone()])?.is_truthy());
@@ -952,11 +952,11 @@ pub(super) fn _is_liststr(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<
 /// Generated native for `point3d` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn point3d(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "point3d", args);
+        return fx.reinterpret("point3d", FALLBACK_SOURCES, args);
     };
     let p_p = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_fill = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
@@ -968,11 +968,11 @@ pub(super) fn point3d(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::
 /// Generated native for `_list_pattern` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _list_pattern(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_list_pattern", args);
+        return fx.reinterpret("_list_pattern", FALLBACK_SOURCES, args);
     };
     let p_list = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = if rt::bi::is_list(&[p_list.clone()]).is_truthy() { { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_entry in rt::iter_values_native(&p_list.clone()) { l0_acc.push(if rt::bi::is_list(&[l1_entry.clone()]).is_truthy() { _list_pattern(fx, &[l1_entry.clone()])? } else { rt::Value::Num(f64::from_bits(0x0_u64)) });
@@ -983,11 +983,11 @@ pub(super) fn _list_pattern(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resul
 /// Generated native for `same_shape` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn same_shape(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "same_shape", args);
+        return fx.reinterpret("same_shape", FALLBACK_SOURCES, args);
     };
     let p_a = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_b = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -998,11 +998,11 @@ pub(super) fn same_shape(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<r
 /// Generated native for `is_consistent` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn is_consistent(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "is_consistent", args);
+        return fx.reinterpret("is_consistent", FALLBACK_SOURCES, args);
     };
     let p_list = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_pattern = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1014,11 +1014,11 @@ pub(super) fn is_consistent(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resul
 /// Generated native for `num_defined` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn num_defined(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "num_defined", args);
+        return fx.reinterpret("num_defined", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::bi::len(&[{ let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_vi in rt::iter_values_native(&p_v.clone()) { if (rt::apply_unary(rt::UnOp::Not, rt::bi::is_undef(&[l1_vi.clone()]))).is_truthy() { l0_acc.push(rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
@@ -1029,11 +1029,11 @@ pub(super) fn num_defined(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<
 /// Generated native for `force_list` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn force_list(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "force_list", args);
+        return fx.reinterpret("force_list", FALLBACK_SOURCES, args);
     };
     let p_value = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_n = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
@@ -1048,11 +1048,11 @@ pub(super) fn force_list(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<r
 /// Generated native for `_tri_class` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _tri_class(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_tri_class", args);
+        return fx.reinterpret("_tri_class", FALLBACK_SOURCES, args);
     };
     let p_tri = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_eps = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
@@ -1063,11 +1063,11 @@ pub(super) fn _tri_class(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<r
 /// Generated native for `_is_at_left` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _is_at_left(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_is_at_left", args);
+        return fx.reinterpret("_is_at_left", FALLBACK_SOURCES, args);
     };
     let p_pt = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_line = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1079,11 +1079,11 @@ pub(super) fn _is_at_left(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<
 /// Generated native for `_sum` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _sum(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_sum", args);
+        return fx.reinterpret("_sum", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p__total = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1095,11 +1095,11 @@ pub(super) fn _sum(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Val
 /// Generated native for `is_2d_transform` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn is_2d_transform(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "is_2d_transform", args);
+        return fx.reinterpret("is_2d_transform", FALLBACK_SOURCES, args);
     };
     let p_t = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, rt::index(rt::index(p_t.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::index(rt::index(p_t.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::index(rt::index(p_t.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::index(rt::index(p_t.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::index(rt::index(p_t.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() && rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, rt::index(rt::index(p_t.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy() || rt::apply_unary(rt::UnOp::Not, rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, rt::index(rt::index(p_t.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::index(rt::index(p_t.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::index(rt::index(p_t.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::index(rt::index(p_t.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy())).is_truthy()).is_truthy());
@@ -1109,11 +1109,11 @@ pub(super) fn is_2d_transform(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Res
 /// Generated native for `_is_point_on_line` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _is_point_on_line(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_is_point_on_line", args);
+        return fx.reinterpret("_is_point_on_line", FALLBACK_SOURCES, args);
     };
     let p_point = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_line = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1126,11 +1126,11 @@ pub(super) fn _is_point_on_line(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::R
 /// Generated native for `ident` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn ident(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "ident", args);
+        return fx.reinterpret("ident", FALLBACK_SOURCES, args);
     };
     let p_n = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, p_n.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l0_acc.push({ let mut l2_acc: Vec<rt::Value> = Vec::new(); for l3_j in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, p_n.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l2_acc.push(if rt::apply_binary(rt::BinOp::Eq, l1_i.clone(), l3_j.clone()).is_truthy() { rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)) } else { rt::Value::Num(f64::from_bits(0x0_u64)) });
@@ -1142,11 +1142,11 @@ pub(super) fn ident(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Va
 /// Generated native for `affine3d_zrot` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn affine3d_zrot(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "affine3d_zrot", args);
+        return fx.reinterpret("affine3d_zrot", FALLBACK_SOURCES, args);
     };
     let p_ang = args.first().cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
     let out = { if !(is_finite(fx, &[p_ang.clone()])?).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::build_vector(vec![rt::build_vector(vec![rt::bi::cos(&[p_ang.clone()]), rt::apply_unary(rt::UnOp::Neg, rt::bi::sin(&[p_ang.clone()])), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::bi::sin(&[p_ang.clone()]), rt::bi::cos(&[p_ang.clone()]), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))])]) };
@@ -1156,11 +1156,11 @@ pub(super) fn affine3d_zrot(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resul
 /// Generated native for `affine3d_xrot` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn affine3d_xrot(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "affine3d_xrot", args);
+        return fx.reinterpret("affine3d_xrot", FALLBACK_SOURCES, args);
     };
     let p_ang = args.first().cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
     let out = { if !(is_finite(fx, &[p_ang.clone()])?).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::build_vector(vec![rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::bi::cos(&[p_ang.clone()]), rt::apply_unary(rt::UnOp::Neg, rt::bi::sin(&[p_ang.clone()])), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::bi::sin(&[p_ang.clone()]), rt::bi::cos(&[p_ang.clone()]), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))])]) };
@@ -1170,11 +1170,11 @@ pub(super) fn affine3d_xrot(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resul
 /// Generated native for `affine3d_yrot` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn affine3d_yrot(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "affine3d_yrot", args);
+        return fx.reinterpret("affine3d_yrot", FALLBACK_SOURCES, args);
     };
     let p_ang = args.first().cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
     let out = { if !(is_finite(fx, &[p_ang.clone()])?).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::build_vector(vec![rt::build_vector(vec![rt::bi::cos(&[p_ang.clone()]), rt::Value::Num(f64::from_bits(0x0_u64)), rt::bi::sin(&[p_ang.clone()]), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::apply_unary(rt::UnOp::Neg, rt::bi::sin(&[p_ang.clone()])), rt::Value::Num(f64::from_bits(0x0_u64)), rt::bi::cos(&[p_ang.clone()]), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))])]) };
@@ -1184,11 +1184,11 @@ pub(super) fn affine3d_yrot(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resul
 /// Generated native for `in_list` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn in_list(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "in_list", args);
+        return fx.reinterpret("in_list", FALLBACK_SOURCES, args);
     };
     let p_val = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_list = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1202,11 +1202,11 @@ pub(super) fn in_list(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::
 /// Generated native for `_group_sort_by_index` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _group_sort_by_index(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_group_sort_by_index", args);
+        return fx.reinterpret("_group_sort_by_index", FALLBACK_SOURCES, args);
     };
     let p_l = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_idx = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1220,11 +1220,11 @@ pub(super) fn _group_sort_by_index(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt
 /// Generated native for `point2d` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn point2d(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "point2d", args);
+        return fx.reinterpret("point2d", FALLBACK_SOURCES, args);
     };
     let p_p = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_fill = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
@@ -1236,11 +1236,11 @@ pub(super) fn point2d(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::
 /// Generated native for `affine3d_identity` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn affine3d_identity(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "affine3d_identity", args);
+        return fx.reinterpret("affine3d_identity", FALLBACK_SOURCES, args);
     };
     let out = ident(fx, &[rt::Value::Num(f64::from_bits(0x4010000000000000_u64))])?;
     Ok(out)
@@ -1249,11 +1249,11 @@ pub(super) fn affine3d_identity(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::R
 /// Generated native for `affine3d_translate` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn affine3d_translate(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "affine3d_translate", args);
+        return fx.reinterpret("affine3d_translate", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or_else(|| rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]));
     let out = { if !(rt::bi::is_list(&[p_v.clone()])).is_truthy() { return Err(rt::bosl_assert("generated")); } { let l2_v = { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))) { l0_acc.push(default(fx, &[rt::index(p_v.clone(), &l1_i.clone()), rt::Value::Num(f64::from_bits(0x0_u64))])?);
@@ -1264,11 +1264,11 @@ pub(super) fn affine3d_translate(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::
 /// Generated native for `is_vector` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn is_vector(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "is_vector", args);
+        return fx.reinterpret("is_vector", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_length = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1283,11 +1283,11 @@ pub(super) fn is_vector(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt
 /// Generated native for `all_nonzero` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn all_nonzero(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "all_nonzero", args);
+        return fx.reinterpret("all_nonzero", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_eps = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
@@ -1299,11 +1299,11 @@ pub(super) fn all_nonzero(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<
 /// Generated native for `is_matrix` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn is_matrix(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "is_matrix", args);
+        return fx.reinterpret("is_matrix", FALLBACK_SOURCES, args);
     };
     let p_A = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_m = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1316,11 +1316,11 @@ pub(super) fn is_matrix(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt
 /// Generated native for `sum` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn sum(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "sum", args);
+        return fx.reinterpret("sum", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_dflt = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
@@ -1332,11 +1332,11 @@ pub(super) fn sum(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Valu
 /// Generated native for `unit` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn unit(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "unit", args);
+        return fx.reinterpret("unit", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_error = args.get(1).cloned().unwrap_or_else(|| rt::build_vector(vec![rt::build_vector(vec![rt::build_vector(vec![rt::Value::string("ASSERT")])])]));
@@ -1347,11 +1347,11 @@ pub(super) fn unit(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Val
 /// Generated native for `_apply` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _apply(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_apply", args);
+        return fx.reinterpret("_apply", FALLBACK_SOURCES, args);
     };
     let p_transform = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_points = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1366,11 +1366,11 @@ pub(super) fn _apply(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `_bt_search` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _bt_search(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_bt_search", args);
+        return fx.reinterpret("_bt_search", FALLBACK_SOURCES, args);
     };
     let p_query = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_r = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1385,11 +1385,11 @@ pub(super) fn _bt_search(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<r
 /// Generated native for `is_path` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn is_path(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "is_path", args);
+        return fx.reinterpret("is_path", FALLBACK_SOURCES, args);
     };
     let p_list = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_dim = args.get(1).cloned().unwrap_or_else(|| rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x4000000000000000_u64)), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))]));
@@ -1401,11 +1401,11 @@ pub(super) fn is_path(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::
 /// Generated native for `v_abs` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn v_abs(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "v_abs", args);
+        return fx.reinterpret("v_abs", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = { if !(is_vector(fx, &[p_v.clone()])?).is_truthy() { return Err(rt::bosl_assert("generated")); } { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_x in rt::iter_values_native(&p_v.clone()) { l0_acc.push(rt::bi::abs(&[l1_x.clone()]));
@@ -1416,11 +1416,11 @@ pub(super) fn v_abs(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Va
 /// Generated native for `v_theta` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn v_theta(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "v_theta", args);
+        return fx.reinterpret("v_theta", FALLBACK_SOURCES, args);
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = { if !(rt::Value::Bool(is_vector(fx, &[p_v.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))])?.is_truthy() || is_vector(fx, &[p_v.clone(), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))])?.is_truthy())).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::bi::atan2(&[rt::member(p_v.clone(), "y"), rt::member(p_v.clone(), "x")]) };
@@ -1430,11 +1430,11 @@ pub(super) fn v_theta(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::
 /// Generated native for `vector_axis` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn vector_axis(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "vector_axis", args);
+        return fx.reinterpret("vector_axis", FALLBACK_SOURCES, args);
     };
     let p_v1 = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_v2 = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1446,11 +1446,11 @@ pub(super) fn vector_axis(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<
 /// Generated native for `affine3d_rot_by_axis` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn affine3d_rot_by_axis(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "affine3d_rot_by_axis", args);
+        return fx.reinterpret("affine3d_rot_by_axis", FALLBACK_SOURCES, args);
     };
     let p_u = args.first().cloned().unwrap_or_else(|| rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]));
     let p_ang = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
@@ -1461,11 +1461,11 @@ pub(super) fn affine3d_rot_by_axis(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt
 /// Generated native for `is_range` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn is_range(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "is_range", args);
+        return fx.reinterpret("is_range", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::apply_unary(rt::UnOp::Not, rt::bi::is_list(&[p_x.clone()])).is_truthy() && is_finite(fx, &[rt::index(p_x.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))])?.is_truthy()).is_truthy() && is_finite(fx, &[rt::index(p_x.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))])?.is_truthy()).is_truthy() && is_finite(fx, &[rt::index(p_x.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))])?.is_truthy());
@@ -1475,11 +1475,11 @@ pub(super) fn is_range(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt:
 /// Generated native for `is_vnf` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn is_vnf(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "is_vnf", args);
+        return fx.reinterpret("is_vnf", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::bi::is_list(&[p_x.clone()]).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_x.clone()]), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy()).is_truthy() && rt::bi::is_list(&[rt::index(p_x.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))]).is_truthy()).is_truthy() && rt::bi::is_list(&[rt::index(p_x.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))]).is_truthy()).is_truthy() && rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, rt::index(p_x.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::build_vector(vec![])).is_truthy() || rt::Value::Bool(rt::apply_binary(rt::BinOp::Ge, rt::bi::len(&[rt::index(p_x.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))]), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))).is_truthy() && is_vector(fx, &[rt::index(rt::index(p_x.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))])?.is_truthy()).is_truthy()).is_truthy()).is_truthy() && rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, rt::index(p_x.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::build_vector(vec![])).is_truthy() || is_vector(fx, &[rt::index(rt::index(p_x.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x0_u64)))])?.is_truthy()).is_truthy());
@@ -1489,11 +1489,11 @@ pub(super) fn is_vnf(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `select` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn select(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "select", args);
+        return fx.reinterpret("select", FALLBACK_SOURCES, args);
     };
     let p_list = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_start = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1509,11 +1509,11 @@ pub(super) fn select(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
 /// Generated native for `_none_inside` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _none_inside(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_none_inside", args);
+        return fx.reinterpret("_none_inside", FALLBACK_SOURCES, args);
     };
     let p_idxs = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_poly = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1529,11 +1529,11 @@ pub(super) fn _none_inside(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result
 /// Generated native for `_point_dist` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _point_dist(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_point_dist", args);
+        return fx.reinterpret("_point_dist", FALLBACK_SOURCES, args);
     };
     let p_path = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_pathseg_unit = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1547,11 +1547,11 @@ pub(super) fn _point_dist(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<
 /// Generated native for `_get_ear` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _get_ear(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_get_ear", args);
+        return fx.reinterpret("_get_ear", FALLBACK_SOURCES, args);
     };
     let p_poly = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_ind = args.get(1).cloned().unwrap_or(rt::Value::Undef);
@@ -1565,11 +1565,11 @@ pub(super) fn _get_ear(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt:
 /// Generated native for `_vnf_centroid` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
 pub(super) fn _vnf_centroid(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
-    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
-    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
-    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
     let Some(_depth) = rt::DepthGuard::enter() else {
-        return rt::run_interpreted(FALLBACK_SOURCES, "_vnf_centroid", args);
+        return fx.reinterpret("_vnf_centroid", FALLBACK_SOURCES, args);
     };
     let p_vnf = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_eps = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));

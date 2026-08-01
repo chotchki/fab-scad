@@ -36,7 +36,6 @@ pub(crate) mod fingerprint;
 // Generated code keeps its emitter's exact bytes — the regen test pins them; fmt stays out.
 #[rustfmt::skip]
 mod generated;
-mod generated_bosl2_modules;
 mod generated_modules;
 mod geometry;
 mod lists;
@@ -2238,16 +2237,6 @@ pub(crate) fn builtin_rows() -> crate::registry::Rows {
         functions: REGISTRY,
         modules: MODULE_REGISTRY,
         pins: PINS,
-    }
-}
-
-/// The GENERATED BOSL2 module band, as its own row set (AR.23 keeps it in its own files, and
-/// AR.26.3 moves it into its own crate — where it will hand over exactly this).
-pub(crate) fn generated_bosl2_module_rows() -> crate::registry::Rows {
-    crate::registry::Rows {
-        name: "BOSL2 (generated modules)",
-        modules: generated_bosl2_modules::REGISTRY,
-        ..crate::registry::Rows::default()
     }
 }
 

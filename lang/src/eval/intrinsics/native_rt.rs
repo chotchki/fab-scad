@@ -26,8 +26,20 @@ pub(super) const MAX_NATIVE_DEPTH: u32 = 32;
 /// (ptr, len), `None` for an island whose parse failed (cached so it doesn't re-parse per decline).
 type IslandCache = Vec<((usize, usize), Option<Rc<crate::Program>>)>;
 
+/// The deepest native ladder this thread has built, ever.
+///
+/// [`MAX_NATIVE_DEPTH`] is a stack-size budget, and a budget nobody can measure against is a guess:
+/// the AR.10 note that "real BOSL2 data nests 2-3 deep and never sees it" was true of the 66 rows
+/// fab-lang shipped and is a claim about the LIBRARY, which changed the moment a consumer could load
+/// 1260. Monotonic per thread, so a caller reads it after a render.
+#[must_use]
+pub fn peak_native_depth() -> u32 {
+    PEAK.with(Cell::get)
+}
+
 thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
+    static PEAK: Cell<u32> = const { Cell::new(0) };
     // Parsed fallback programs, keyed by the SOURCES' identity (ptr+len of the `&'static str`) —
     // NOT first-comer-wins. Each generated module carries its own `FALLBACK_SOURCES` island, and a
     // declining native must interpret ITS island: an unkeyed cache would pin whichever module
@@ -48,7 +60,9 @@ impl DepthGuard {
             if d.get() >= MAX_NATIVE_DEPTH {
                 None
             } else {
-                d.set(d.get() + 1);
+                let now = d.get() + 1;
+                d.set(now);
+                PEAK.with(|p| p.set(p.get().max(now)));
                 Some(DepthGuard)
             }
         })

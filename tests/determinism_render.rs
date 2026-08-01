@@ -50,7 +50,19 @@ fn par_kernel_render_is_bit_identical_run_to_run() {
             eprintln!("SKIP {m}: not present (models submodule not checked out)");
             continue;
         }
-        let geo = match resolve_geometry_file(model, &libs, fab_lang::Config::from_env()) {
+        // ON A RESERVED STACK, like every other model-rendering site in the tree (the models
+        // harness says why, and says it was already SIGABRTing the run before it got one).
+        // AR.26.4.3 made it load-bearing HERE too: generated natives recurse on the host stack, and
+        // once the product loads all 1260 of BOSL2's, a real model builds a 12-level native ladder
+        // that needs ~3 MiB in debug — over the 2 MiB a test thread gets by default.
+        let (model, libs_c) = (model.to_path_buf(), libs.clone());
+        let geo = match std::thread::Builder::new()
+            .stack_size(fab_scad::EVAL_STACK)
+            .spawn(move || resolve_geometry_file(&model, &libs_c, fab_lang::Config::from_env()))
+            .expect("spawn render thread")
+            .join()
+            .expect("render thread")
+        {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("SKIP {m}: resolve failed: {e}");

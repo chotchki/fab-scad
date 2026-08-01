@@ -69,11 +69,23 @@ default = ["kernel", "native"]
 kernel = [
     "geometry",
     "mesh-io",
+    "bosl2",
     "dep:fab-manifold",
     "dep:threemf",
     "dep:quick-xml",
     "dep:usvg",
 ]
+# BOSL2, transpiled to Rust at build time (AR.26.4.3) — `import::registry()` accumulates it beside
+# fab-lang's own rows, so the compiled tier covers 1260 BOSL2 functions and 402 modules instead of
+# the 66 fab-lang hand-wrote. Rides `kernel`, which is what both the CLI and the wasm app turn on, so
+# the browser gets the same one tier the desktop does (it cannot JIT in-sandbox — that benefit was
+# the phase's, and it only lands if the wasm build carries the library).
+#
+# ITS OWN AXIS rather than folded into `geometry`, because it is not free: fab-bosl2's build script
+# compiles fab-lib + fab-lang host-side and transpiles ~85K lines of BOSL2, and the miri-lean
+# `--no-default-features --features geometry` build has no business paying for that. Without it every
+# BOSL2 call INTERPRETS — slower, never a different answer.
+bosl2 = ["geometry", "dep:fab-bosl2"]
 # Threaded kernel on BROWSER wasm (W.6): turn on fab-manifold's rayon-over-wasm-bindgen-rayon pool. The
 # geom worker's wasm build opts in (fab-geom `par`); native already gets `par` unconditionally (the
 # target-scoped dep below). Carries manifold's `initThreadPool` JS export into the final cdylib.
@@ -97,6 +109,9 @@ native = ["dep:reqwest", "dep:clap", "dep:rayon", "dep:fab-gen", "jit", "geometr
 # scad-rs, our OpenSCAD reimplementation — the differential harness's OTHER engine (G.3.7). Pure
 # Rust + wasm-clean, but only the native differ uses it for now, so gate it behind `native`.
 fab-lang = { path = "lang", optional = true }
+# BOSL2 as a generated library crate (AR.26.3): nothing checked in, transpiled by its build.rs from
+# the pinned submodule into OUT_DIR. Handed to the evaluator as registry rows, never called directly.
+fab-bosl2 = { path = "bosl2", optional = true }
 # AJ.8 gen-diff: the grammar generator feeding the oracle differential (native harness only).
 fab-gen = { path = "gen", optional = true }
 # The desktop numeric JIT (P.1) — native-only (cranelift can't JIT in-wasm), so gated behind `jit`/`native`.

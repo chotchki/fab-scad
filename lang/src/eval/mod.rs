@@ -32,7 +32,7 @@ mod metrics;
 mod mod_cache;
 mod mod_redundancy;
 mod module;
-mod module_rt;
+pub(crate) mod module_rt;
 mod object;
 pub(crate) mod ops;
 mod redundancy;

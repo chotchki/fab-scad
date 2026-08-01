@@ -409,9 +409,13 @@ impl Registry {
         all
     }
 
-    /// The registry fab-lang itself ships: its own natives, pins and POC modules, plus the generated
-    /// BOSL2 module band — TWO row sets accumulated, which is the composition path taking its own
-    /// medicine rather than a special case that only foreign libraries walk.
+    /// The registry fab-lang itself ships: its own natives, pins and POC modules, and NOTHING ELSE.
+    ///
+    /// It used to carry a second row set — 402 BOSL2 modules, checked into this crate as generated
+    /// files. AR.26.4.2 moved those to `fab-bosl2`, where they are transpiled at build time from the
+    /// pinned submodule, so a consumer that wants BOSL2 now says so: accumulate that crate's rows
+    /// beside these. A default that silently included somebody else's library was the shape this
+    /// phase spent AR.26.1 arguing against, one level up.
     ///
     /// Built ONCE per process because it is literally the same compile-time data every time. The
     /// memoization is of a named DEFAULT INSTANCE, not of "the only table there is", which is the
@@ -419,11 +423,8 @@ impl Registry {
     /// and hands it in, and the two coexist.
     #[must_use]
     pub fn builtin() -> &'static Registry {
-        static BUILTIN: LazyLock<Registry> = LazyLock::new(|| {
-            Registry::new()
-                .with(crate::eval::intrinsics::builtin_rows())
-                .with(crate::eval::intrinsics::generated_bosl2_module_rows())
-        });
+        static BUILTIN: LazyLock<Registry> =
+            LazyLock::new(|| Registry::new().with(crate::eval::intrinsics::builtin_rows()));
         &BUILTIN
     }
 
@@ -800,7 +801,6 @@ mod tests {
     fn every_shipped_row_is_accepted() {
         let reg = Registry::builtin();
         let own = crate::eval::intrinsics::builtin_rows();
-        let band = crate::eval::intrinsics::generated_bosl2_module_rows();
         assert_eq!(
             reg.faults(),
             Vec::new(),
@@ -810,8 +810,8 @@ mod tests {
         assert_eq!(reg.pin_count(), own.pins.len());
         assert_eq!(
             reg.module_count(),
-            own.modules.len() + band.modules.len(),
-            "both module row sets must land in one index"
+            own.modules.len(),
+            "one row set since AR.26.4.2 — the BOSL2 module band ships from fab-bosl2 now"
         );
     }
 
@@ -1066,9 +1066,7 @@ mod tests {
     /// any behavioural check.
     #[test]
     fn both_index_halves_are_lazy_and_independent() {
-        let reg = Registry::new()
-            .with(crate::eval::intrinsics::builtin_rows())
-            .with(crate::eval::intrinsics::generated_bosl2_module_rows());
+        let reg = Registry::new().with(crate::eval::intrinsics::builtin_rows());
         assert!(
             reg.fns.get().is_none() && reg.modules.get().is_none(),
             "accumulating rows must not index them"

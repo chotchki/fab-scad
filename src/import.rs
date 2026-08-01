@@ -180,6 +180,40 @@ fn jit_factory() -> Option<&'static dyn fab_lang::NumericJitFactory> {
     }
 }
 
+/// THE LIBRARIES THIS PRODUCT LOADS (AR.26.4.3) — one definition, so there is one answer to "what
+/// can a `.scad` here call and get compiled".
+///
+/// fab-lang's own rows first, then BOSL2's. Order decides only which of two libraries answers for a
+/// name they BOTH declare with a structurally identical reference (66 of them, all transcriptions of
+/// the same upstream source) — either is correct by the same fingerprint gate, and the loser stays
+/// indexed so its own rows keep anchoring. fab-lang's go first because that keeps today's dispatch
+/// exactly today's dispatch; when AR.21 deletes those 66 hand rows, BOSL2's identical twins take over
+/// and the deletion is inert rather than a behaviour change to reason about.
+///
+/// Built once. Indexing parses and fingerprints every reference the libraries handed over, and doing
+/// that per render would put a full library parse in front of each one.
+#[must_use]
+pub fn registry() -> &'static fab_lang::registry::Registry {
+    #[cfg(feature = "bosl2")]
+    {
+        use fab_lang::surface::LibrarySurface;
+        static REG: std::sync::LazyLock<fab_lang::registry::Registry> =
+            std::sync::LazyLock::new(|| {
+                fab_lang::registry::Registry::new()
+                    .with(fab_lang::surface::Natives.rows())
+                    .with(fab_bosl2::Bosl2.rows())
+            });
+        &REG
+    }
+    #[cfg(not(feature = "bosl2"))]
+    {
+        // The lean build (no `bosl2`): fab-lang's own rows, which is what `Registry::builtin()` is.
+        // A `.scad` that includes BOSL2 still RENDERS here — every function interprets — so the
+        // difference is speed, never an answer.
+        fab_lang::registry::Registry::builtin()
+    }
+}
+
 /// Evaluate a `.scad` FILE to a geometry [`Geo`] tree, resolving its `use`/`include` graph AND its
 /// `import`/`surface` files (via [`read_import`], relative to the file's own directory).
 ///
@@ -191,9 +225,14 @@ pub fn resolve_geometry_file(
     config: fab_lang::Config,
 ) -> Result<Geo, Error> {
     let base_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    fab_lang::resolve_geometry_file(path, library_paths, jit_factory(), config, |raw| {
-        read_import(&base_dir, raw)
-    })
+    fab_lang::resolve_geometry_file_with_registry(
+        path,
+        library_paths,
+        jit_factory(),
+        registry(),
+        config,
+        |raw| read_import(&base_dir, raw),
+    )
 }
 
 /// Like [`resolve_geometry_file`], but ALSO returns the console (AQ.1) — the file-rooted warning channel.
@@ -206,9 +245,14 @@ pub fn resolve_geometry_file_full(
     config: fab_lang::Config,
 ) -> fab_lang::RunResult<(Geo, Vec<Message>)> {
     let base_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    fab_lang::resolve_geometry_file_full(path, library_paths, jit_factory(), config, |raw| {
-        read_import(&base_dir, raw)
-    })
+    fab_lang::resolve_geometry_file_full_with_registry(
+        path,
+        library_paths,
+        jit_factory(),
+        registry(),
+        config,
+        |raw| read_import(&base_dir, raw),
+    )
 }
 
 /// Join a relative `raw` onto `base_dir`; an absolute `raw` is used as-is (OpenSCAD `find_valid_path` for

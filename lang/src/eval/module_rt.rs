@@ -45,6 +45,18 @@ thread_local! {
     pub(crate) static NATIVE_MODULE_RUNS: Cell<u64> = const { Cell::new(0) };
 }
 
+/// How many compiled MODULES have finished running on this thread.
+///
+/// "Armed" and "RAN" are different facts — the band-1 postmortem — and this is the run half: a
+/// module tier differential that only checks the two legs agree passes perfectly when nothing armed,
+/// so the tests that compare tiers read this before and after and assert it MOVED.
+///
+/// Thread-local and monotonic, so a caller takes a difference across the run it cares about.
+#[must_use]
+pub fn native_module_runs() -> u64 {
+    NATIVE_MODULE_RUNS.with(std::cell::Cell::get)
+}
+
 /// RAII ticket on [`MAX_MODULE_NATIVE_DEPTH`]. `enter` refuses past the budget; `Drop` gives the
 /// level back, so an early return through `?` cannot leak depth.
 pub(super) struct ModuleDepthGuard;

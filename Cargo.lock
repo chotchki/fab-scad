@@ -2944,6 +2944,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "clap",
+ "fab-bosl2",
  "fab-gen",
  "fab-jit",
  "fab-lang",

@@ -82,6 +82,8 @@ pub use eval::{
     evaluate_geometry_metered, fragments,
     interpret_fn, range_iter, range_len, wired_count,
 };
+pub use eval::intrinsics::native_rt::peak_native_depth;
+pub use eval::module_rt::native_module_runs;
 /// AR.14.3 — a function's structural identity, for tools that need to ask "is this the same
 /// function" the way dispatch asks it. Spans excluded, so reformatting survives.
 #[must_use]
@@ -421,7 +423,29 @@ pub fn intrinsic_matrix(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> Result<Vec<IntrinsicMatrixRow>> {
-    eval::io::drive_intrinsic_matrix(source, base_dir, library_paths, registry::Registry::builtin())
+    intrinsic_matrix_with_registry(
+        source,
+        base_dir,
+        library_paths,
+        registry::Registry::builtin(),
+    )
+}
+
+/// [`intrinsic_matrix`] against a registry the CALLER built.
+///
+/// The audit has to see the SAME rows dispatch will, or it reports drift for a library the product
+/// does not load and stays silent about the one it does — which for a sustainment signal is worse
+/// than not running it.
+///
+/// # Errors
+/// As [`intrinsic_matrix`].
+pub fn intrinsic_matrix_with_registry(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+    registry: &registry::Registry,
+) -> Result<Vec<IntrinsicMatrixRow>> {
+    eval::io::drive_intrinsic_matrix(source, base_dir, library_paths, registry)
 }
 
 /// Decode `.scad` source bytes the way the fs seam does (AA.5): UTF-8, with a LATIN-1 fallback when
@@ -560,6 +584,32 @@ pub fn resolve_geometry_file_full<R>(
 where
     R: FnMut(&str) -> Result<Imported>,
 {
+    resolve_geometry_file_full_with_registry(
+        path,
+        library_paths,
+        jit_factory,
+        registry::Registry::builtin(),
+        config,
+        mesh_reader,
+    )
+}
+
+/// [`resolve_geometry_file_full`] against a registry the CALLER built. See
+/// [`resolve_geometry_file_with_registry`].
+///
+/// # Errors
+/// As [`resolve_geometry_file`].
+pub fn resolve_geometry_file_full_with_registry<R>(
+    path: &Path,
+    library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
+    registry: &registry::Registry,
+    config: Config,
+    mesh_reader: R,
+) -> RunResult<(Geo, Vec<Message>)>
+where
+    R: FnMut(&str) -> Result<Imported>,
+{
     let source = eval::io::read_source(path)?;
     let base_dir = path.parent().unwrap_or(Path::new("."));
     eval::io::drive(
@@ -568,7 +618,7 @@ where
         Some(path),
         library_paths,
         jit_factory,
-        registry::Registry::builtin(),
+        registry,
         config,
         mesh_reader,
     )
@@ -589,6 +639,37 @@ pub fn resolve_geometry_file<R>(
 where
     R: FnMut(&str) -> Result<Imported>,
 {
+    resolve_geometry_file_with_registry(
+        path,
+        library_paths,
+        jit_factory,
+        registry::Registry::builtin(),
+        config,
+        mesh_reader,
+    )
+}
+
+/// [`resolve_geometry_file`] against a registry the CALLER built — the file-rooted door AR.26.1
+/// deferred until there was a real library crate to hand in.
+///
+/// This is the entry point a product uses. `resolve_geometry_file` is the same call with fab-lang's
+/// own rows and nothing else, which is the right default for a consumer that loads no libraries and
+/// the wrong one for a consumer that does — the registry says which libraries EXIST, and that is not
+/// something [`Config`] can carry (it is execution knobs, and `Copy`).
+///
+/// # Errors
+/// As [`resolve_geometry_file`].
+pub fn resolve_geometry_file_with_registry<R>(
+    path: &Path,
+    library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
+    registry: &registry::Registry,
+    config: Config,
+    mesh_reader: R,
+) -> Result<Geo>
+where
+    R: FnMut(&str) -> Result<Imported>,
+{
     let source = eval::io::read_source(path)?;
     let base_dir = path.parent().unwrap_or(Path::new("."));
     Ok(eval::io::drive(
@@ -597,7 +678,7 @@ where
         Some(path),
         library_paths,
         jit_factory,
-        registry::Registry::builtin(),
+        registry,
         config,
         mesh_reader,
     )?

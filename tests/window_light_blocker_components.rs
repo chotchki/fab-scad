@@ -21,7 +21,18 @@ fn whole_model_is_one_connected_body_with_pockets_intact() {
     }
     let model = manifest.join("models/window_light_blocker/window_light_blocker.scad");
     let libs = vec![manifest.join("libs"), manifest.join("scad-lib")];
-    let geo = fab_scad::import::resolve_geometry_file(&model, &libs, fab_lang::Config::from_env())
+    // ON A RESERVED STACK, like every other model-rendering site in the tree. AR.26.4.3 made it
+    // load-bearing here: generated natives recurse on the host stack, and once the product loads all
+    // 1260 of BOSL2's, this model builds a 12-level native ladder needing ~3 MiB in debug — over the
+    // 2 MiB a test thread gets by default.
+    let geo = std::thread::Builder::new()
+        .stack_size(fab_scad::EVAL_STACK)
+        .spawn(move || {
+            fab_scad::import::resolve_geometry_file(&model, &libs, fab_lang::Config::from_env())
+        })
+        .expect("spawn render thread")
+        .join()
+        .expect("render thread")
         .expect("render the whole model");
     let solid = build_geo(&geo, &ManifoldBackend).expect("non-empty geometry");
     assert!(

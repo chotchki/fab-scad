@@ -1176,8 +1176,15 @@ fn builtins_cmd(md: bool) -> Result<()> {
 }
 
 fn intrinsics_cmd(bosl2: &Path, json: bool, md: bool) -> Result<()> {
-    let rows = fab_lang::intrinsic_matrix("include <std.scad>\n", bosl2, &[])
-        .map_err(|e| anyhow::anyhow!("intrinsic audit against {}: {e}", bosl2.display()))?;
+    // AGAINST THE PRODUCT'S OWN REGISTRY, not fab-lang's default: the audit answers "did the library
+    // drift out from under the rows we dispatch on", so it has to be looking at those rows.
+    let rows = fab_lang::intrinsic_matrix_with_registry(
+        "include <std.scad>\n",
+        bosl2,
+        &[],
+        fab_scad::import::registry(),
+    )
+    .map_err(|e| anyhow::anyhow!("intrinsic audit against {}: {e}", bosl2.display()))?;
     let status = |r: &fab_lang::IntrinsicMatrixRow| match r.status {
         fab_lang::IntrinsicMatrixStatus::Matched => "matched",
         fab_lang::IntrinsicMatrixStatus::Changed => "changed",

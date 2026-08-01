@@ -105,13 +105,25 @@ pub mod stl;
 #[cfg(feature = "kernel")]
 pub mod svg;
 
-/// A modest stack reserve for the render/eval harness threads. As of M.3, geometry EVAL is HEAP-bounded (the
-/// explicit-stack driver — no host recursion; proven at `module_recursion_bound.rs` on a 512 KiB stack), joining
-/// the expression machine (Phase I) and tree `Drop` (M.1/M.1b). So eval no longer needs a reserve at all — this
-/// remains only as courtesy headroom for the NATIVE geometry backend (the Manifold tree-lowering + CSG render,
-/// a separate subsystem the harness threads run right after eval). Dropped from the old 1 GiB (M.2's guard for
-/// the then-host-recursive eval, now obsolete) to 64 MiB — ample for any real render, and eval itself would be
-/// fine on the default stack.
+/// A stack reserve for the render/eval harness threads, and as of AR.26.4.3 a REQUIREMENT rather
+/// than courtesy headroom.
+///
+/// The INTERPRETER is heap-bounded (the explicit-stack driver — no host recursion, proven at
+/// `module_recursion_bound.rs` on a 512 KiB stack), joining the expression machine (Phase I) and
+/// tree `Drop` (M.1/M.1b). That is still true and is why this dropped from 1 GiB to 64 MiB.
+///
+/// WHAT CHANGED: the COMPILED tier recurses on the host stack — a generated native calls its
+/// siblings with static Rust calls — and once the product loads BOSL2's 1260 rows instead of
+/// fab-lang's 66, a real model builds a native ladder 12 deep. Measured on
+/// `window_light_blocker.scad`: fine at 3 MiB, SIGABRT at 2 MiB, in debug. So a thread that renders
+/// a real model needs a reserve again, and the two tests that had been getting away with the
+/// default 2 MiB stopped.
+///
+/// `MAX_NATIVE_DEPTH` is supposed to bound this and does not, because it counts LEVELS while what
+/// overflows is BYTES: 32 levels at the measured ~200 KiB each is 6.4 MiB, and no level count both
+/// fits a 2 MiB thread and leaves this model's 12 undeclined. A byte-denominated guard is the real
+/// fix and is AR.26.4.4 — including the part this reserve cannot help with, which is wasm, where the
+/// stack is fixed at link time and a thread cannot ask for more.
 pub const EVAL_STACK: usize = 64 * 1024 * 1024;
 // surface() heightmap → mesh (M.5.2, DAT-only): needs fab-lang (Mesh); called by the import reader.
 #[cfg(feature = "geometry")]

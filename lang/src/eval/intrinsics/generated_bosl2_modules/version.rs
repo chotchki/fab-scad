@@ -28,6 +28,7 @@
     clippy::needless_else,
     clippy::if_same_then_else,
     clippy::too_many_lines,
+    clippy::collapsible_if,
     reason = "generated code: a module need not READ every parameter it declares, \
               parameter slots are indexed uniformly (so slot 0 is `get(0)`, not \
               `first()`), and a parts vec grows CONDITIONALLY even when the first \
@@ -49,7 +50,7 @@ pub(super) fn bosl_required(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     parts.push(fx.call(&rt::ModuleCall { name: "no_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
-    if !(rt::apply_binary(rt::BinOp::Ge, fx.call_fn(&rt::FnCall { name: "version_cmp", args: &[(None, fx.call_fn(&rt::FnCall { name: "bosl_version", args: &[] })?), (None, p_version.clone())] })?, rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
+    if !(rt::binary(fx, rt::BinOp::Ge, fx.call_fn(&rt::FnCall { name: "version_cmp", args: &[(None, fx.call_fn(&rt::FnCall { name: "bosl_version", args: &[] })?), (None, p_version.clone())] })?, rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
         fx.group(parts)
     };
     parts.push(l0_blk);

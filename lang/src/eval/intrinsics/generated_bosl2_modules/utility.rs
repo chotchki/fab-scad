@@ -28,6 +28,7 @@
     clippy::needless_else,
     clippy::if_same_then_else,
     clippy::too_many_lines,
+    clippy::collapsible_if,
     reason = "generated code: a module need not READ every parameter it declares, \
               parameter slots are indexed uniformly (so slot 0 is `get(0)`, not \
               `first()`), and a parts vec grows CONDITIONALLY even when the first \
@@ -51,12 +52,12 @@ pub(super) fn assert_approx(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     parts.push(fx.call(&rt::ModuleCall { name: "no_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
-    if (rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "approx", args: &[(None, p_got.clone()), (None, p_expected.clone())] })?)).is_truthy() {
+    if (rt::unary(fx, rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "approx", args: &[(None, p_got.clone()), (None, p_expected.clone())] })?)).is_truthy() {
     fx.echo(&[])?;
     fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("EXPECT: ")), (None, fx.call_fn(&rt::FnCall { name: "_valstr", args: &[(None, p_expected.clone())] })?)] })?), ])?;
     fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("GOT   : ")), (None, fx.call_fn(&rt::FnCall { name: "_valstr", args: &[(None, p_got.clone())] })?)] })?), ])?;
     if (fx.call_fn(&rt::FnCall { name: "same_shape", args: &[(None, p_got.clone()), (None, p_expected.clone())] })?).is_truthy() {
-    fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("DELTA : ")), (None, fx.call_fn(&rt::FnCall { name: "_valstr", args: &[(None, rt::apply_binary(rt::BinOp::Sub, p_got.clone(), p_expected.clone()))] })?)] })?), ])?;
+    fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("DELTA : ")), (None, fx.call_fn(&rt::FnCall { name: "_valstr", args: &[(None, rt::binary(fx, rt::BinOp::Sub, p_got.clone(), p_expected.clone()))] })?)] })?), ])?;
     } else {
     }
     if (fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_info.clone())] })?).is_truthy() {
@@ -83,19 +84,19 @@ pub(super) fn assert_equal(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     parts.push(fx.call(&rt::ModuleCall { name: "no_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
-    if (rt::Value::Bool(rt::apply_binary(rt::BinOp::Ne, p_got.clone(), p_expected.clone()).is_truthy() || rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_nan", args: &[(None, p_got.clone())] })?.is_truthy() && fx.call_fn(&rt::FnCall { name: "is_nan", args: &[(None, p_expected.clone())] })?.is_truthy()).is_truthy())).is_truthy() {
+    if (rt::Value::Bool(rt::binary(fx, rt::BinOp::Ne, p_got.clone(), p_expected.clone()).is_truthy() || rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_nan", args: &[(None, p_got.clone())] })?.is_truthy() && fx.call_fn(&rt::FnCall { name: "is_nan", args: &[(None, p_expected.clone())] })?.is_truthy()).is_truthy())).is_truthy() {
     fx.echo(&[])?;
     fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("EXPECT: ")), (None, fx.call_fn(&rt::FnCall { name: "_valstr", args: &[(None, p_expected.clone())] })?)] })?), ])?;
     fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("GOT   : ")), (None, fx.call_fn(&rt::FnCall { name: "_valstr", args: &[(None, p_got.clone())] })?)] })?), ])?;
     if (fx.call_fn(&rt::FnCall { name: "same_shape", args: &[(None, p_got.clone()), (None, p_expected.clone())] })?).is_truthy() {
-    fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("DELTA : ")), (None, fx.call_fn(&rt::FnCall { name: "_valstr", args: &[(None, rt::apply_binary(rt::BinOp::Sub, p_got.clone(), p_expected.clone()))] })?)] })?), ])?;
+    fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("DELTA : ")), (None, fx.call_fn(&rt::FnCall { name: "_valstr", args: &[(None, rt::binary(fx, rt::BinOp::Sub, p_got.clone(), p_expected.clone()))] })?)] })?), ])?;
     } else {
     }
     if (fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_info.clone())] })?).is_truthy() {
     fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("INFO  : ")), (None, fx.call_fn(&rt::FnCall { name: "_valstr", args: &[(None, p_info.clone())] })?)] })?), ])?;
     } else {
     }
-    if !(rt::apply_binary(rt::BinOp::Eq, p_got.clone(), p_expected.clone())).is_truthy() { return Err(rt::assert_decline()); }
+    if !(rt::binary(fx, rt::BinOp::Eq, p_got.clone(), p_expected.clone())).is_truthy() { return Err(rt::assert_decline()); }
     } else {
     }
         fx.group(parts)
@@ -142,9 +143,9 @@ pub(super) fn no_children(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let mut parts: Vec<rt::Geo> = Vec::new();
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
-    if !(rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
-    if (rt::apply_binary(rt::BinOp::Gt, fx.dollar("$parent_modules"), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
-    if !(rt::apply_binary(rt::BinOp::Eq, p_count.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
+    if !(rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
+    if (rt::binary(fx, rt::BinOp::Gt, fx.dollar("$parent_modules"), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
+    if !(rt::binary(fx, rt::BinOp::Eq, p_count.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
     } else {
     }
         fx.group(parts)
@@ -175,9 +176,9 @@ pub(super) fn req_children(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let mut parts: Vec<rt::Geo> = Vec::new();
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
-    if !(rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
-    if (rt::apply_binary(rt::BinOp::Gt, fx.dollar("$parent_modules"), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
-    if !(rt::apply_binary(rt::BinOp::Gt, p_count.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
+    if !(rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
+    if (rt::binary(fx, rt::BinOp::Gt, fx.dollar("$parent_modules"), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
+    if !(rt::binary(fx, rt::BinOp::Gt, p_count.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
     } else {
     }
         fx.group(parts)
@@ -194,10 +195,10 @@ pub(super) fn shape_compare(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let mut parts: Vec<rt::Geo> = Vec::new();
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
-    if !(rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); }
+    if !(rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); }
     parts.push(fx.call(&rt::ModuleCall { name: "union", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "difference", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l1_sel = rt::Value::Num(f64::from_bits(0x0_u64));
     parts.push(fx.child_at(&l1_sel)?);
- Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (rt::apply_binary(rt::BinOp::Eq, p_eps.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (rt::binary(fx, rt::BinOp::Eq, p_eps.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
     let l2_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
     parts.push(fx.child_at(&l2_sel)?);
     } else {
@@ -209,7 +210,7 @@ pub(super) fn shape_compare(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
  Ok(fx.group(parts)) }, ]) })?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "difference", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l4_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
     parts.push(fx.child_at(&l4_sel)?);
- Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (rt::apply_binary(rt::BinOp::Eq, p_eps.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (rt::binary(fx, rt::BinOp::Eq, p_eps.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
     let l5_sel = rt::Value::Num(f64::from_bits(0x0_u64));
     parts.push(fx.child_at(&l5_sel)?);
     } else {

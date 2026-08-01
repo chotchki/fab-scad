@@ -28,6 +28,23 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
     apply_binary_traced(op, a, b, &mut None)
 }
 
+/// [`apply_binary`] for GENERATED code: identical value, and the SV warning goes to the run's
+/// console instead of the floor.
+///
+/// The plain one drops it, which is right for a caller with nowhere to put it and was WRONG for
+/// every native — a compiled `undef * undef` answered correctly and silently while the interpreted
+/// twin warned. A tier difference no mesh comparison can see (the value was never wrong), which is
+/// exactly why the console is part of the differential.
+#[must_use]
+pub fn binary<W: crate::surface::Warn + ?Sized>(fx: &W, op: BinOp, a: Value, b: Value) -> Value {
+    let mut warn = None;
+    let out = apply_binary_traced(op, a, b, &mut warn);
+    if let Some(w) = warn {
+        fx.warn(w);
+    }
+    out
+}
+
 /// [`apply_binary`] plus upstream's diagnostic (SV): identical values bit-for-bit, and on a
 /// type-error path `warn` receives the message OpenSCAD prints — every string oracle-pinned
 /// (2026.06.12). First-write-wins, so nested failure sites can't clobber the outermost message.
@@ -123,6 +140,17 @@ pub(crate) fn apply_binary_traced(
 #[must_use]
 pub fn apply_unary(op: UnOp, v: Value) -> Value {
     apply_unary_traced(op, v, &mut None)
+}
+
+/// [`apply_unary`] for GENERATED code — see [`binary`].
+#[must_use]
+pub fn unary<W: crate::surface::Warn + ?Sized>(fx: &W, op: UnOp, v: Value) -> Value {
+    let mut warn = None;
+    let out = apply_unary_traced(op, v, &mut warn);
+    if let Some(w) = warn {
+        fx.warn(w);
+    }
+    out
 }
 
 /// [`apply_unary`] plus upstream's diagnostic — unary messages are SPACELESS: `(-string)`, `(~undefined)`.

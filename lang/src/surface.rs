@@ -267,6 +267,21 @@ pub trait LibrarySurface: Send + Sync {
     fn callables(&self) -> &'static [Decl];
 }
 
+/// Put a WARNING on the run's console — the diagnostic half of the value algebra, and the one
+/// capability BOTH native shapes need.
+///
+/// A supertrait rather than a method on each, because `rt::binary`/`rt::unary` are shared by the
+/// function and module emitters and must take whichever ctx the caller has. Found live in AR.27 and
+/// older than that: `rt::apply_binary` discarded the SV warning `apply_binary_traced` produces, so a
+/// native computing `undef * undef` returned the right VALUE in silence while the interpreted twin
+/// printed `undefined operation (undefined * undefined)`. A tier difference a user can see — and
+/// invisible to every mesh comparison, because the value was never wrong. Diff the echoes, not just
+/// the meshes.
+pub trait Warn {
+    /// Emit `message` as a run warning, exactly where the interpreter would.
+    fn warn(&self, message: String);
+}
+
 /// What a generated FUNCTION native may ask of the evaluator (AR.17) — and it is exactly ONE
 /// thing: invoke a function VALUE. A `Value::Function` carries a `closure_id` indexing the
 /// evaluator's closure table — the body lives in evaluator context, not in the value — so a
@@ -278,7 +293,7 @@ pub trait LibrarySurface: Send + Sync {
 /// the trait declares, not by whether a parameter exists. `&self` for `ModuleCtx`'s reason —
 /// nested native calls (`f(fx, &[g(fx, x)?])`) fight the borrow checker under `&mut`, and the
 /// evaluator's state is already behind `RefCell`/`Cell`.
-pub trait FnCtx {
+pub trait FnCtx: Warn {
     /// Invoke `callee` as a function with `args` (written names attached, `$`-names included),
     /// resolving through the interpreter's own `CallValue` machinery: letrec group re-injection,
     /// self LAST, defaults in the closure's lexical base, the name-less recursion verdict.
@@ -331,12 +346,46 @@ pub trait FnCtx {
         fallback_sources: &'static str,
         args: &[Value],
     ) -> crate::Result<Value>;
+
+    /// Call the user function `name` with positional `args`, resolved AT RUNTIME against the
+    /// running program — the outward-call capability (AR.27), and the function twin of what
+    /// [`ModuleCtx::call`] has done for modules since AR.20.5.
+    ///
+    /// WHY IT EXISTS. A generated native calls its siblings with STATIC Rust calls, so the emitter
+    /// can only compile a call whose callee it also compiled — and a function that declines takes
+    /// its callers down with it. Measured on BOSL2: of 463 functions the fixpoint dropped, only
+    /// ~88 declined for their own reasons and the rest were CASCADE. The module side never had
+    /// that problem for one reason — it resolves callees through dispatch instead of inlining them
+    /// — and this is that answer applied one tier down.
+    ///
+    /// IT IS ALSO THE STRICTER PATH, not a compromise. A static sibling call BAKES the callee's
+    /// semantics, which is exactly why it needs a dep fingerprint pin; this resolves whatever the
+    /// program actually defines, so it is right by construction and needs no pin at all. A user who
+    /// redefines the callee gets their own version here, where a baked call would have handed them
+    /// the library's.
+    ///
+    /// RESOLUTION ORDER IS THE INTERPRETER'S, and it must be: a user function, else a bound
+    /// function VALUE of that name, else the unknown-function path — warn `Ignoring unknown
+    /// function 'name'` and answer `undef`, which is what OpenSCAD does and what a corpus naming a
+    /// newer-BOSL2 function depends on to render the rest.
+    ///
+    /// # Errors
+    /// Whatever the callee's body raises. A decline (`Unimplemented`) where no evaluator exists
+    /// ([`NoClosures`]) — the whole call re-interprets, so the gap costs speed, never an answer.
+    fn call_named(&self, name: &str, args: &[Value]) -> crate::Result<Value>;
 }
 
 /// The [`FnCtx`] for call sites with NO evaluator — benches, oracles, value-level batteries. It
 /// REFUSES loudly rather than answering `undef`: a native reaching a closure here is a visible
 /// decline, not a silent wrong value.
 pub struct NoClosures;
+
+impl Warn for NoClosures {
+    fn warn(&self, _message: String) {
+        // No run, no console. A bench or a value-level battery has nowhere to put this, and
+        // inventing a sink would only hide that the caller has no evaluator.
+    }
+}
 
 impl FnCtx for NoClosures {
     fn call_value(
@@ -368,6 +417,16 @@ impl FnCtx for NoClosures {
         args: &[Value],
     ) -> crate::Result<Value> {
         crate::rt::run_interpreted(fallback_sources, name, args)
+    }
+
+    fn call_named(&self, _name: &str, _args: &[Value]) -> crate::Result<Value> {
+        // No program, so no definition to resolve against — and unlike `reinterpret` there is no
+        // batch-local island to fall back to, because the whole point of this capability is that
+        // the callee is NOT in the batch. Refuses rather than answering `undef`, which would be
+        // indistinguishable from the interpreter's unknown-function result and therefore silent.
+        Err(crate::Error::Unimplemented(
+            "an outward call with no evaluator — re-interpreting",
+        ))
     }
 }
 
@@ -472,7 +531,7 @@ impl std::fmt::Display for Fingerprint {
 /// stack depth, which the interpreter's explicit stack deliberately does not use, so it is bounded
 /// the same way AR.10 bounds function natives: a depth budget, and past it a decline back to the
 /// interpreter, whose own limit is `100_000` because its depth is heap.
-pub trait ModuleCtx {
+pub trait ModuleCtx: Warn {
     /// The call's bound arguments, already matched to parameters (positional fill, named, defaults)
     /// by the evaluator's own two-phase rule — the AN.1/AN.2/AN.6 semantics a native must not
     /// reimplement.

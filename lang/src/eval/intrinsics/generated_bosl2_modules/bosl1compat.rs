@@ -28,6 +28,7 @@
     clippy::needless_else,
     clippy::if_same_then_else,
     clippy::too_many_lines,
+    clippy::collapsible_if,
     reason = "generated code: a module need not READ every parameter it declares, \
               parameter slots are indexed uniformly (so slot 0 is `get(0)`, not \
               `first()`), and a parts vec grows CONDITIONALLY even when the first \
@@ -64,7 +65,7 @@ pub(super) fn chamf_cyl(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_top = fx.args().get(7).cloned().unwrap_or(rt::Value::Undef);
     let p_bottom = fx.args().get(8).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
-    let l0_chamf = if rt::apply_binary(rt::BinOp::Ne, p_chamfedge.clone(), rt::Value::Undef).is_truthy() { rt::apply_binary(rt::BinOp::Mul, p_chamfedge.clone(), fx.call_fn(&rt::FnCall { name: "sin", args: &[(None, p_angle.clone())] })?) } else { p_chamfer.clone() };
+    let l0_chamf = if rt::binary(fx, rt::BinOp::Ne, p_chamfedge.clone(), rt::Value::Undef).is_truthy() { rt::binary(fx, rt::BinOp::Mul, p_chamfedge.clone(), fx.call_fn(&rt::FnCall { name: "sin", args: &[(None, p_angle.clone())] })?) } else { p_chamfer.clone() };
     let l1_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     parts.push(fx.call(&rt::ModuleCall { name: "cyl", args: &[(Some("h"), p_h.clone()), (Some("r"), p_r.clone()), (Some("d"), p_d.clone()), (Some("chamfer1"), if p_bottom.clone().is_truthy() { l0_chamf.clone() } else { rt::Value::Num(f64::from_bits(0x0_u64)) }), (Some("chamfer2"), if p_top.clone().is_truthy() { l0_chamf.clone() } else { rt::Value::Num(f64::from_bits(0x0_u64)) }), (Some("chamfang"), p_angle.clone()), (Some("anchor"), if p_center.clone().is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]) } else { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)]) }), ], children: rt::Children::None })?);
@@ -109,7 +110,7 @@ pub(super) fn chamferred_cylinder(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo>
     let p_bottom = fx.args().get(7).cloned().unwrap_or(rt::Value::Undef);
     let p_center = fx.args().get(8).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
-    let l0_chamf = if rt::apply_binary(rt::BinOp::Ne, p_chamfedge.clone(), rt::Value::Undef).is_truthy() { rt::apply_binary(rt::BinOp::Mul, p_chamfedge.clone(), fx.call_fn(&rt::FnCall { name: "sin", args: &[(None, p_angle.clone())] })?) } else { p_chamfer.clone() };
+    let l0_chamf = if rt::binary(fx, rt::BinOp::Ne, p_chamfedge.clone(), rt::Value::Undef).is_truthy() { rt::binary(fx, rt::BinOp::Mul, p_chamfedge.clone(), fx.call_fn(&rt::FnCall { name: "sin", args: &[(None, p_angle.clone())] })?) } else { p_chamfer.clone() };
     let l1_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     parts.push(fx.call(&rt::ModuleCall { name: "cyl", args: &[(Some("h"), p_h.clone()), (Some("r"), p_r.clone()), (Some("d"), p_d.clone()), (Some("chamfer1"), if p_bottom.clone().is_truthy() { l0_chamf.clone() } else { rt::Value::Num(f64::from_bits(0x0_u64)) }), (Some("chamfer2"), if p_top.clone().is_truthy() { l0_chamf.clone() } else { rt::Value::Num(f64::from_bits(0x0_u64)) }), (Some("chamfang"), p_angle.clone()), (Some("anchor"), if p_center.clone().is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]) } else { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)]) }), ], children: rt::Children::None })?);
@@ -200,7 +201,7 @@ pub(super) fn offsetcube(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_size = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
     let p_v = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
-    parts.push(fx.call(&rt::ModuleCall { name: "cuboid", args: &[(None, p_size.clone()), (Some("anchor"), rt::apply_unary(rt::UnOp::Neg, p_v.clone())), ], children: rt::Children::None })?);
+    parts.push(fx.call(&rt::ModuleCall { name: "cuboid", args: &[(None, p_size.clone()), (Some("anchor"), rt::unary(fx, rt::UnOp::Neg, p_v.clone())), ], children: rt::Children::None })?);
     Ok(fx.group(parts))
 }
 
@@ -216,7 +217,7 @@ pub(super) fn prism(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_circum = fx.args().get(5).cloned().unwrap_or(rt::Value::Undef);
     let p_center = fx.args().get(6).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
-    let l0_radius = fx.call_fn(&rt::FnCall { name: "get_radius", args: &[(Some("r"), p_r.clone()), (Some("d"), p_d.clone()), (Some("dflt"), rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Div, p_l.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), fx.call_fn(&rt::FnCall { name: "sin", args: &[(None, rt::apply_binary(rt::BinOp::Div, rt::Value::Num(f64::from_bits(0x4066800000000000_u64)), p_n.clone()))] })?))] })?;
+    let l0_radius = fx.call_fn(&rt::FnCall { name: "get_radius", args: &[(Some("r"), p_r.clone()), (Some("d"), p_d.clone()), (Some("dflt"), rt::binary(fx, rt::BinOp::Div, rt::binary(fx, rt::BinOp::Div, p_l.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), fx.call_fn(&rt::FnCall { name: "sin", args: &[(None, rt::binary(fx, rt::BinOp::Div, rt::Value::Num(f64::from_bits(0x4066800000000000_u64)), p_n.clone()))] })?))] })?;
     let l1_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     parts.push(fx.call(&rt::ModuleCall { name: "cyl", args: &[(Some("r"), l0_radius.clone()), (Some("l"), p_h.clone()), (Some("circum"), p_circum.clone()), (Some("$fn"), p_n.clone()), (Some("realign"), rt::Value::Bool(true)), (Some("anchor"), if p_center.clone().is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]) } else { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)]) }), ], children: rt::Children::None })?);
@@ -237,7 +238,7 @@ pub(super) fn pyramid(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_d = fx.args().get(4).cloned().unwrap_or(rt::Value::Undef);
     let p_circum = fx.args().get(5).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
-    let l0_radius = fx.call_fn(&rt::FnCall { name: "get_radius", args: &[(Some("r"), p_r.clone()), (Some("d"), p_d.clone()), (Some("dflt"), rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Div, p_l.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), fx.call_fn(&rt::FnCall { name: "sin", args: &[(None, rt::apply_binary(rt::BinOp::Div, rt::Value::Num(f64::from_bits(0x4066800000000000_u64)), p_n.clone()))] })?))] })?;
+    let l0_radius = fx.call_fn(&rt::FnCall { name: "get_radius", args: &[(Some("r"), p_r.clone()), (Some("d"), p_d.clone()), (Some("dflt"), rt::binary(fx, rt::BinOp::Div, rt::binary(fx, rt::BinOp::Div, p_l.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), fx.call_fn(&rt::FnCall { name: "sin", args: &[(None, rt::binary(fx, rt::BinOp::Div, rt::Value::Num(f64::from_bits(0x4066800000000000_u64)), p_n.clone()))] })?))] })?;
     let l1_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     parts.push(fx.call(&rt::ModuleCall { name: "cyl", args: &[(Some("r1"), l0_radius.clone()), (Some("r2"), rt::Value::Num(f64::from_bits(0x0_u64))), (Some("l"), p_h.clone()), (Some("circum"), p_circum.clone()), (Some("$fn"), p_n.clone()), (Some("realign"), rt::Value::Bool(true)), (Some("anchor"), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)])), ], children: rt::Children::None })?);

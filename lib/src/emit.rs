@@ -599,12 +599,27 @@ struct Emitter<'a, 'e> {
 
 impl Emitter<'_, '_> {
     /// A collision-proof Rust ident for a `let`-bound scad name (shadowing gets a new number).
-    fn fresh_ident(&mut self, name: &str) -> String {
+    ///
+    /// # Errors
+    /// A `$`-NAMED binder, which is not a local at all — see [`Emitter::fresh_ident`]'s caller.
+    fn fresh_ident(&mut self, name: &str) -> Result<String, String> {
+        // A `$`-binding is DYNAMIC: `let($fn = 8) …` reaches every callee of the body, not just
+        // the lexical children, so binding it as a Rust local would be wrong even if `$` were a
+        // legal ident character. It is not, so the emitter produced `let l5_$attach_to = …` and
+        // the file simply did not build — which nothing noticed until AR.27 widened the band
+        // enough to include such a function. The MODULE side declined this at AR.20.4 for the
+        // semantic reason; the function side never had the check at all. Third time this phase
+        // has found a `$` counted as coverage it could not compile (AR.22 is the other two).
+        if name.starts_with('$') {
+            return Err(format!(
+                "a `$`-binding (`{name}`), which is dynamic rather than a local"
+            ));
+        }
         let id = self.fresh;
         self.fresh += 1;
         // scad names may lead with `_` (idx's `_s`) — `l1__s` trips non_snake_case, and the
         // counter already guarantees uniqueness, so the underscores add nothing.
-        format!("l{id}_{}", name.trim_start_matches('_'))
+        Ok(format!("l{id}_{}", name.trim_start_matches('_')))
     }
 
     fn expr(&mut self, e: &Expr) -> Result<String, String> {
@@ -644,7 +659,7 @@ impl Emitter<'_, '_> {
                 }
             }
             ExprKind::Unary { op, operand } => Ok(format!(
-                "rt::apply_unary(rt::UnOp::{op:?}, {})",
+                "rt::unary(fx, rt::UnOp::{op:?}, {})",
                 self.expr(operand)?
             )),
             // `&&`/`||` SHORT-CIRCUIT in the interpreter (the stack machine's ShortCircuit task);
@@ -663,7 +678,7 @@ impl Emitter<'_, '_> {
                 ))
             }
             ExprKind::Binary { op, lhs, rhs } => Ok(format!(
-                "rt::apply_binary(rt::BinOp::{op:?}, {}, {})",
+                "rt::binary(fx, rt::BinOp::{op:?}, {}, {})",
                 self.expr(lhs)?,
                 self.expr(rhs)?
             )),
@@ -887,7 +902,7 @@ impl Emitter<'_, '_> {
             } else {
                 self.expr(&b.value)?
             };
-            let ident = self.fresh_ident(bn);
+            let ident = self.fresh_ident(bn)?;
             let _ = write!(block, "let {ident} = {val}; ");
             if literal_rhs {
                 self.fn_locals.push(ident.clone());
@@ -920,7 +935,7 @@ impl Emitter<'_, '_> {
                 .collect::<Result<_, _>>()?;
             return Ok(format!("rt::build_vector(vec![{}])", emitted.join(", ")));
         }
-        let acc = self.fresh_ident("acc");
+        let acc = self.fresh_ident("acc")?;
         let mut block = format!("{{ let mut {acc}: Vec<rt::Value> = Vec::new(); ");
         for i in items {
             let _ = write!(block, "{}", self.element(i, &acc)?);
@@ -961,7 +976,7 @@ impl Emitter<'_, '_> {
         if !self.in_module
             && let Some(ident) = &shadow
         {
-            let cal = self.fresh_ident("cal");
+            let cal = self.fresh_ident("cal")?;
             let mut pairs: Vec<String> = Vec::with_capacity(args.len());
             for a in args {
                 let v = self.expr(&a.value)?;
@@ -1041,8 +1056,27 @@ impl Emitter<'_, '_> {
             return Ok(format!("rt::bi::{name}(&[{}])", emitted.join(", ")));
         }
         let Some(sib) = self.siblings.iter().find(|s| s.name == name) else {
+            // AR.27 — the callee is not in this batch, so DISPATCH instead of declining. Measured:
+            // this is the difference between 866 and 1162 of BOSL2's 1329 functions, because a
+            // static sibling call means a decliner takes every one of its callers with it and only
+            // ~88 of the 463 dropped had a reason of their own.
+            //
+            // ALL-POSITIONAL ONLY. A named argument has to be matched against the callee's declared
+            // parameter list, and the whole premise here is that we do not have one — the callee is
+            // outside the batch. Guessing a slot is the AN-family failure this codebase keeps
+            // finding, so a named arg still declines by name.
+            if args.iter().all(|a| a.name.is_none()) {
+                let emitted: Vec<String> = args
+                    .iter()
+                    .map(|a| self.expr(&a.value))
+                    .collect::<Result<_, _>>()?;
+                return Ok(format!(
+                    "fx.call_named({name:?}, &[{}])?",
+                    emitted.join(", ")
+                ));
+            }
             return Err(format!(
-                "call to `{name}` (not a builtin or generated sibling)"
+                "named arg to out-of-batch callee `{name}` (cannot positionalise without its params)"
             ));
         };
         // A generated sibling: everything is static, so the FULL binding rules run at COMPILE
@@ -1223,7 +1257,7 @@ impl Emitter<'_, '_> {
                 if top {
                     let _ = writeln!(out, "    fx.set_dollar({name:?}, {v});");
                 } else {
-                    let save = self.fresh_ident("sd");
+                    let save = self.fresh_ident("sd")?;
                     let _ = writeln!(
                         out,
                         "    let {save} = fx.dollar({name:?});\n    fx.set_dollar({name:?}, {v});"
@@ -1233,7 +1267,7 @@ impl Emitter<'_, '_> {
                 }
                 continue; // NOT a Rust local — body reads ride `fx.dollar`, the existing path.
             }
-            let id = self.fresh_ident(name);
+            let id = self.fresh_ident(name)?;
             let _ = writeln!(out, "    let {id} = {v};");
             pairs.push((name.to_string(), id.clone()));
             self.locals.push((name.to_string(), id));
@@ -1252,7 +1286,7 @@ impl Emitter<'_, '_> {
                 // NO locals boundary here — a block is not an assignment scope (see
                 // `hoist_prelude`: its assignments were hoisted by the ENCLOSING scope), and
                 // nothing else inside pushes locals that outlive its own arm.
-                let inner = self.fresh_ident("blk");
+                let inner = self.fresh_ident("blk")?;
                 let mut out = format!(
                     "    let {inner} = {{\n        let mut parts: Vec<rt::Geo> = Vec::new();\n"
                 );
@@ -1283,7 +1317,7 @@ impl Emitter<'_, '_> {
                 // probe: `*if`, `%if` and a bare `if` all produced byte-identical output.
                 let bg = match Self::modifier_plan(*modifiers)? {
                     ModPlan::Skip => return Ok(String::new()),
-                    ModPlan::Background => Some(self.fresh_ident("bg")),
+                    ModPlan::Background => Some(self.fresh_ident("bg")?),
                     ModPlan::Plain => None,
                 };
                 let c = self.expr(cond)?;
@@ -1378,7 +1412,7 @@ impl Emitter<'_, '_> {
         if children.is_empty() {
             return Ok(String::new());
         }
-        let inner = self.fresh_ident("un");
+        let inner = self.fresh_ident("un")?;
         let mark = self.locals.len();
         let mut out =
             format!("    let {inner} = {{\n        let mut parts: Vec<rt::Geo> = Vec::new();\n");
@@ -1401,7 +1435,7 @@ impl Emitter<'_, '_> {
         match Self::modifier_plan(mi.modifiers)? {
             ModPlan::Skip => return Ok(String::new()),
             ModPlan::Background => {
-                let mark = self.fresh_ident("bg");
+                let mark = self.fresh_ident("bg")?;
                 let mut out = format!("    let {mark} = parts.len();\n");
                 out.push_str(&self.module_call_body(mi)?);
                 // AFTER the body, never a scope guard: the interpreter's `DiscardAbove` is a WORK
@@ -1429,11 +1463,11 @@ impl Emitter<'_, '_> {
                 for a in &mi.args {
                     let v = self.expr(&a.value)?;
                     if a.name.is_none() && sel.is_none() {
-                        let id = self.fresh_ident("sel");
+                        let id = self.fresh_ident("sel")?;
                         let _ = writeln!(out, "    let {id} = {v};");
                         sel = Some(id);
                     } else {
-                        let id = self.fresh_ident("arg");
+                        let id = self.fresh_ident("arg")?;
                         let _ = writeln!(out, "    let _{id} = {v};");
                     }
                 }
@@ -1466,15 +1500,15 @@ impl Emitter<'_, '_> {
                         // children it renders can read it): per-iteration SET into the frame,
                         // saved before the loop opens and restored after every loop closes —
                         // reads inside the body ride `fx.dollar`, so no lexical slot exists.
-                        let save = self.fresh_ident("sd");
+                        let save = self.fresh_ident("sd")?;
                         let _ = writeln!(out, "    let {save} = fx.dollar({bn:?});");
-                        let ident = self.fresh_ident("dv");
+                        let ident = self.fresh_ident("dv")?;
                         let _ =
                             writeln!(out, "    for {ident} in rt::iter_values_native(&{iter}) {{");
                         let _ = writeln!(out, "    fx.set_dollar({bn:?}, {ident}.clone());");
                         restores = format!("    fx.set_dollar({bn:?}, {save});\n{restores}");
                     } else {
-                        let ident = self.fresh_ident(bn);
+                        let ident = self.fresh_ident(bn)?;
                         let _ =
                             writeln!(out, "    for {ident} in rt::iter_values_native(&{iter}) {{");
                         self.locals.push((bn.to_string(), ident));
@@ -1510,14 +1544,14 @@ impl Emitter<'_, '_> {
                         // A `$`-binding is DYNAMIC — it reaches every callee and rendered child,
                         // not just the lexical children — so it is a frame SET scoped to the
                         // `let`'s children: save, set, restore after them (AR.22).
-                        let save = self.fresh_ident("sd");
+                        let save = self.fresh_ident("sd")?;
                         let _ = writeln!(
                             out,
                             "    let {save} = fx.dollar({bn:?});\n    fx.set_dollar({bn:?}, {v});"
                         );
                         restores = format!("    fx.set_dollar({bn:?}, {save});\n{restores}");
                     } else {
-                        let ident = self.fresh_ident(bn);
+                        let ident = self.fresh_ident(bn)?;
                         let _ = writeln!(out, "    let {ident} = {v};");
                         self.locals.push((bn.to_string(), ident));
                     }
@@ -1650,14 +1684,14 @@ impl Emitter<'_, '_> {
         for (name, value) in assigns {
             let v = self.expr(value)?;
             if name.starts_with('$') {
-                let save = self.fresh_ident("sd");
+                let save = self.fresh_ident("sd")?;
                 let _ = write!(
                     prelude,
                     "let {save} = fx.dollar({name:?}); fx.set_dollar({name:?}, {v}); "
                 );
                 epilogue = format!("fx.set_dollar({name:?}, {save}); {epilogue}");
             } else {
-                let id = self.fresh_ident(name);
+                let id = self.fresh_ident(name)?;
                 let _ = write!(prelude, "let {id} = {v}; ");
                 self.locals.push((name.to_string(), id));
             }
@@ -1691,7 +1725,7 @@ impl Emitter<'_, '_> {
                     // Each iterable is emitted INSIDE the enclosing loops, so a later binding's
                     // iterable sees the earlier binders — the interpreter's nesting order.
                     let iter = self.expr(&b.value)?;
-                    let ident = self.fresh_ident(bn);
+                    let ident = self.fresh_ident(bn)?;
                     let _ = write!(open, "for {ident} in rt::iter_values_native(&{iter}) {{ ");
                     self.locals.push((bn.to_string(), ident));
                     depth += 1;
@@ -1716,7 +1750,7 @@ impl Emitter<'_, '_> {
             }
             ExprKind::LcEach(inner) => {
                 let v = self.expr(inner)?;
-                let each = self.fresh_ident("each");
+                let each = self.fresh_ident("each")?;
                 Ok(format!(
                     "for {each} in rt::iter_values_native(&{v}) {{ {acc}.push({each}); }} "
                 ))
@@ -1745,7 +1779,7 @@ impl Emitter<'_, '_> {
                     } else {
                         self.expr(&b.value)?
                     };
-                    let ident = self.fresh_ident(bn);
+                    let ident = self.fresh_ident(bn)?;
                     let _ = write!(out, "let {ident} = {val}; ");
                     if literal_rhs {
                         self.fn_locals.push(ident.clone());
@@ -2151,6 +2185,7 @@ const MODULE_FILE_DOC_AND_TAIL: &str = "// A module native builds GEOMETRY throu
      \x20   clippy::needless_else,\n\
      \x20   clippy::if_same_then_else,\n\
      \x20   clippy::too_many_lines,\n\
+     \x20   clippy::collapsible_if,\n\
      \x20   reason = \"generated code: a module need not READ every parameter it declares, \\\n\
      \x20             parameter slots are indexed uniformly (so slot 0 is `get(0)`, not \\\n\
      \x20             `first()`), and a parts vec grows CONDITIONALLY even when the first \\\n\
@@ -2571,6 +2606,8 @@ pub fn generate_batch(subjects: &[Subject<'_>], declared: &[&str]) -> Result<Str
          \x20   clippy::needless_else,\n\
          \x20   clippy::if_same_then_else,\n\
          \x20   clippy::too_many_lines,\n\
+         \x20   clippy::collapsible_if,\n\
+         \x20   clippy::vec_init_then_push,\n\
          \x20   reason = \"generated code: bit-exact from_bits literals, mechanical clones, \\\n\
          \x20             upstream's underscore-prefixed names (params too — `p__total`), unused \\\n\
          \x20             loop binders a body never reads, fresh idents differing by counter, and \\\n\
@@ -2858,6 +2895,10 @@ pub const GENERATED_ENTRIES: &[&str] = &[
     "_fab_poc_sq",
     "_fab_poc_near0",
     "_fab_poc_outer",
+    // AR.27 — the OUTWARD call. `_fab_poc_absent` is deliberately NOT in this list, so the
+    // emitter cannot compile it and the call has to dispatch through `fx.call_named` instead of
+    // taking the caller down with it. A POC whose whole point is what is MISSING.
+    "_fab_poc_outward",
     "_fab_poc_isup",
     // AR.7 — the first REAL BOSL2 intrinsics through the pipeline: the two hottest functions on
     // the model profile (56% of user-fn calls between them). `is_nan` first: `is_finite`'s
@@ -3704,14 +3745,27 @@ mod tests {
         /// file does not compile, and a decliner takes its callers down with it. `function_band`
         /// runs the drop-and-rebuild to a FIXPOINT — 9 rounds — and 866 is what survives.
         ///
-        /// WHERE THE 463 WENT, and it is the roadmap: only about 62 decline for their own reasons
-        /// (free read 25, echo-in-function 23, C-style comprehension 8, `rands` 6). The rest is
-        /// CASCADE, and the histogram names each victim's callee — `move` alone takes 24 with it,
-        /// `sort` 15, `rot` 14. Two levers, both worth more than any remaining construct band:
-        /// clear the high-fan-in root declines, or let a call to a non-emitting sibling dispatch
-        /// through the evaluator the way a MODULE call already does (which is exactly why the
-        /// module side has no cascade at all).
-        const FLOOR: usize = 866;
+        /// WHERE THE 463 WENT, and it was the roadmap: only about 88 declined for their own reasons
+        /// (free read 36, echo 28, C-style comprehension 11, `rands` 8, duplicate parameter 5). The
+        /// rest was CASCADE — a decliner taking its callers with it — and the histogram named each
+        /// victim's callee: `move` alone took 19, `segs` 19, `sort` 18.
+        ///
+        /// RAISED 866 -> 1162 at AR.27, which took the second of those two levers: a call to a
+        /// non-emitting sibling now DISPATCHES through the evaluator instead of declining, exactly
+        /// as a MODULE call has since AR.20.5 — which is why the module side never had a cascade.
+        /// The fixpoint converges in 5 rounds instead of 9, and the tail is finally constructs
+        /// rather than collateral: free reads, echo-in-function, `rands`, `$`-args in sibling
+        /// calls, and named args to an out-of-batch callee (which cannot be positionalised without
+        /// the callee's parameter list, so they decline honestly).
+        ///
+        /// Then 1162 -> 1139, a CORRECTION rather than a regression and the same shape as AR.22's:
+        /// a `$`-named `let` binder emitted `let l5_$attach_to = …`, which is not a Rust
+        /// identifier, so 23 of those 1162 could never have compiled. They were coverage on paper.
+        /// The module side declined `$`-bindings at AR.20.4 for the SEMANTIC reason — a `$` binding
+        /// is dynamic, it reaches every callee rather than the lexical children — and the function
+        /// side simply never had the check. Found the only way this class ever gets found: by
+        /// building the band.
+        const FLOOR: usize = 1139;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -4260,7 +4314,7 @@ mod tests {
         // The hoisted binding appears BEFORE the statement above it, and its self-reference reads
         // the PARAM (the outer binding), exactly as `hoist_scope`'s sequential bind resolves it.
         let bind = out
-            .find("_x = rt::apply_binary")
+            .find("_x = rt::binary")
             .expect("hoisted x binds from an expression");
         let cube = out.find("name: \"cube\"").expect("cube call emitted");
         assert!(
@@ -4515,7 +4569,7 @@ mod tests {
             );
         }
         assert!(
-            code.contains("rt::apply_binary") && code.contains("rt::bi::"),
+            code.contains("rt::binary") && code.contains("rt::bi::"),
             "the scan found no rt calls at all, so it would pass on an empty file"
         );
     }

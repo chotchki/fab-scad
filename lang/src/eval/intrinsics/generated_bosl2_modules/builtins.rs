@@ -28,6 +28,7 @@
     clippy::needless_else,
     clippy::if_same_then_else,
     clippy::too_many_lines,
+    clippy::collapsible_if,
     reason = "generated code: a module need not READ every parameter it declares, \
               parameter slots are indexed uniformly (so slot 0 is `get(0)`, not \
               `first()`), and a parts vec grows CONDITIONALLY even when the first \
@@ -57,7 +58,7 @@ pub(super) fn _circle(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 pub(super) fn _color(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_color = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
-    if (rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, p_color.clone(), rt::Value::Undef).is_truthy() || rt::apply_binary(rt::BinOp::Eq, p_color.clone(), rt::Value::string("default")).is_truthy())).is_truthy() {
+    if (rt::Value::Bool(rt::binary(fx, rt::BinOp::Eq, p_color.clone(), rt::Value::Undef).is_truthy() || rt::binary(fx, rt::BinOp::Eq, p_color.clone(), rt::Value::string("default")).is_truthy())).is_truthy() {
     parts.push(fx.children()?);
     } else {
     parts.push(fx.call(&rt::ModuleCall { name: "color", args: &[(None, p_color.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);

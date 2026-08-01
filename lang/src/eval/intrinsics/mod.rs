@@ -642,6 +642,21 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &["abs"],
         func: generated::_fab_poc_outer,
     },
+    // AR.27 — the OUTWARD call. Its callee `_fab_poc_absent` is not a registry entry and not in
+    // `GENERATED_ENTRIES`, so the emitter has no sibling to call statically and emits
+    // `fx.call_named` instead of declining. NOTE WHAT IS *NOT* HERE: no `deps` entry for the
+    // callee, and that absence is the design rather than an oversight — a dispatched call resolves
+    // against the running program, so there is no baked semantics to pin. A static call bakes and
+    // therefore must pin; this one cannot bake and therefore must not.
+    Entry {
+        name: "_fab_poc_outward",
+        reference: "function _fab_poc_outward(x) = _fab_poc_absent(x) + 1;",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::_fab_poc_outward,
+    },
     // The VALUE-const guard POC (O.8): bakes the vector constant `UP` — wires only when the home scope's
     // `UP` is bit-exactly `[0,0,1]` AS A NumList ([`value_bits_eq`] is variant-exact). The real consumers
     // (vector_axis's UP/RIGHT, rot's _NO_ARG sentinel) are O.9.

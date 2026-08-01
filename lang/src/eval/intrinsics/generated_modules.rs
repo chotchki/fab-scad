@@ -24,6 +24,7 @@
     clippy::needless_else,
     clippy::if_same_then_else,
     clippy::too_many_lines,
+    clippy::collapsible_if,
     reason = "generated code: a module need not READ every parameter it declares, \
               parameter slots are indexed uniformly (so slot 0 is `get(0)`, not \
               `first()`), and a parts vec grows CONDITIONALLY even when the first \
@@ -91,7 +92,7 @@ pub(super) fn _fab_poc_dollar(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let mut parts: Vec<rt::Geo> = Vec::new();
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
-    if (rt::apply_binary(rt::BinOp::Gt, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))).is_truthy() {
+    if (rt::binary(fx, rt::BinOp::Gt, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))).is_truthy() {
     let l1_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
     parts.push(fx.child_at(&l1_sel)?);
     } else {
@@ -144,7 +145,7 @@ pub(super) fn _fab_poc_star(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 pub(super) fn _fab_poc_hoist(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_x = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
-    let l0_x = rt::apply_binary(rt::BinOp::Add, p_x.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
+    let l0_x = rt::binary(fx, rt::BinOp::Add, p_x.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
     let l1_y = l0_x.clone();
     let l2_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
@@ -169,7 +170,7 @@ pub(super) fn _fab_poc_echo(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let mut parts: Vec<rt::Geo> = Vec::new();
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
-    fx.echo(&[(None, rt::Value::string("poc")), (None, p_n.clone()), (Some("k"), rt::apply_binary(rt::BinOp::Add, p_n.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), ])?;
+    fx.echo(&[(None, rt::Value::string("poc")), (None, p_n.clone()), (Some("k"), rt::binary(fx, rt::BinOp::Add, p_n.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), ])?;
     fx.echo(&[(None, p_n.clone()), ])?;
     let l1_un = {
         let mut parts: Vec<rt::Geo> = Vec::new();
@@ -193,8 +194,8 @@ pub(super) fn _fab_poc_rec(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let mut parts: Vec<rt::Geo> = Vec::new();
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
-    if (rt::apply_binary(rt::BinOp::Gt, p_n.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
-    parts.push(fx.call(&rt::ModuleCall { name: "_fab_poc_rec", args: &[(None, rt::apply_binary(rt::BinOp::Sub, p_n.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), ], children: rt::Children::None })?);
+    if (rt::binary(fx, rt::BinOp::Gt, p_n.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "_fab_poc_rec", args: &[(None, rt::binary(fx, rt::BinOp::Sub, p_n.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), ], children: rt::Children::None })?);
     } else {
     parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), ], children: rt::Children::None })?);
     }
@@ -212,7 +213,7 @@ pub(super) fn _fab_poc_bake(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let mut parts: Vec<rt::Geo> = Vec::new();
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
-    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, rt::apply_binary(rt::BinOp::Mul, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]), p_s.clone())), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, rt::apply_binary(rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)), rt::Value::Num(f64::from_bits(0x41cdcd6500000000_u64)))), ], children: rt::Children::None })?);
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, rt::binary(fx, rt::BinOp::Mul, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]), p_s.clone())), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, rt::binary(fx, rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)), rt::Value::Num(f64::from_bits(0x41cdcd6500000000_u64)))), ], children: rt::Children::None })?);
  Ok(fx.group(parts)) }, ]) })?);
         fx.group(parts)
     };
@@ -242,7 +243,7 @@ pub(super) fn _fab_poc_fncall(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 pub(super) fn _fab_poc_dollarset(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_k = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
-    fx.set_dollar("$fab_ds", rt::apply_binary(rt::BinOp::Add, fx.dollar("$fab_ds"), p_k.clone()));
+    fx.set_dollar("$fab_ds", rt::binary(fx, rt::BinOp::Add, fx.dollar("$fab_ds"), p_k.clone()));
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     fx.echo(&[(Some("ds"), fx.dollar("$fab_ds")), ])?;
@@ -261,7 +262,7 @@ pub(super) fn _fab_poc_dollarset(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> 
 pub(super) fn _fab_poc_localmod(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_k = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
-    let l0_w = rt::apply_binary(rt::BinOp::Mul, p_k.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
+    let l0_w = rt::binary(fx, rt::BinOp::Mul, p_k.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
     fx.register_local_modules(&["inner"], &[("w", l0_w.clone())])?;
     let l1_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
@@ -280,7 +281,7 @@ pub(super) fn _fab_poc_localfn(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_k = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
     let l0_pre = fx.call_fn(&rt::FnCall { name: "f", args: &[(None, p_k.clone())] })?;
-    let l1_b = rt::apply_binary(rt::BinOp::Add, p_k.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    let l1_b = rt::binary(fx, rt::BinOp::Add, p_k.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
     fx.register_local_fn("f", &[("pre", l0_pre.clone()), ("b", l1_b.clone())])?;
     fx.register_local_fn("g", &[("pre", l0_pre.clone()), ("b", l1_b.clone())])?;
     let l2_c = fx.call_fn(&rt::FnCall { name: "f", args: &[(None, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))] })?;

@@ -5446,3 +5446,73 @@ fn the_emitted_rows_agree_with_the_hand_registry() {
          overlapping, so this test is no longer checking anything"
     );
 }
+
+/// AR.27 — THE OUTWARD CALL. A compiled native whose callee the emitter did NOT compile dispatches
+/// through the evaluator instead of taking its caller down with it.
+///
+/// The reason this is worth four cases rather than one: dispatching is not merely a coverage trick,
+/// it changes what a call MEANS. A static sibling call bakes the callee's semantics — which is why
+/// it needs a fingerprint pin — while this resolves whatever the program actually defines. So the
+/// properties to prove are about RESOLUTION, not about agreement: the redefine case is the one a
+/// baked call could never pass, and it is the argument for the whole design.
+#[test]
+fn an_outward_call_resolves_against_the_running_program() {
+    // The callee is defined by the PROGRAM and is not a registry entry, so `_fab_poc_outward`'s
+    // native has no sibling to call statically.
+    let reference = reference_of("_fab_poc_outward").expect("registered");
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (_geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        format!("{msgs:?}")
+    };
+
+    // (1) AGREEMENT. Compiled caller + interpreted callee == fully interpreted.
+    let src = format!("function _fab_poc_absent(x) = x * 10;\n{reference}\necho(_fab_poc_outward(4));\n");
+    let fast = run(&src, true);
+    let slow = run(&src, false);
+    assert_eq!(fast, slow, "the outward call diverged across tiers");
+    assert!(
+        fast.contains("41"),
+        "4 * 10 + 1 = 41, got {fast:?}"
+    );
+
+    // (2) THE REDEFINE, which is the whole argument. A DIFFERENT callee body must change the
+    // answer, identically on both tiers. A baked static call would have kept the old semantics and
+    // this is the case that would have caught it.
+    let redefined =
+        format!("function _fab_poc_absent(x) = x + 100;\n{reference}\necho(_fab_poc_outward(4));\n");
+    let fast2 = run(&redefined, true);
+    assert_eq!(fast2, run(&redefined, false), "redefinition diverged across tiers");
+    assert!(
+        fast2.contains("105"),
+        "4 + 100 + 1 = 105 — the native answered from a BAKED callee, got {fast2:?}"
+    );
+    assert_ne!(fast, fast2, "the two programs must not answer the same");
+
+    // (3) UNKNOWN. No definition at all: the interpreter warns and answers undef, and a compiled
+    // caller that ERRORED here would be a tier difference a user can see — the one thing this tier
+    // promises never to produce.
+    let missing = format!("{reference}\necho(_fab_poc_outward(4));\n");
+    let fast3 = run(&missing, true);
+    assert_eq!(fast3, run(&missing, false), "the unknown-callee path diverged");
+    assert!(
+        fast3.contains("Ignoring unknown function"),
+        "an absent callee must WARN like the interpreter: {fast3:?}"
+    );
+
+    // (4) A BOUND FUNCTION VALUE of that name — the interpreter's second resolution arm, which a
+    // native that only consulted the function table would miss.
+    let as_value =
+        format!("_fab_poc_absent = function(x) x - 3;\n{reference}\necho(_fab_poc_outward(4));\n");
+    let fast4 = run(&as_value, true);
+    assert_eq!(fast4, run(&as_value, false), "the function-value arm diverged");
+    assert!(
+        fast4.contains("Echo(\"2\")"),
+        "4 - 3 + 1 = 2, got {fast4:?}"
+    );
+}

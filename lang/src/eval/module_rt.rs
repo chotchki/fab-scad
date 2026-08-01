@@ -428,6 +428,12 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
     }
 }
 
+impl crate::surface::Warn for NativeModuleCtx<'_, '_, '_> {
+    fn warn(&self, message: String) {
+        self.ctx.warn(message);
+    }
+}
+
 impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
     fn args(&self) -> &[Value] {
         &self.args
@@ -965,6 +971,17 @@ impl crate::surface::FnCtx for NativeFnCtx<'_, '_> {
     ) -> crate::Result<Value> {
         reinterpret_named(self.ctx, &self.caller, name, args)
     }
+
+    fn call_named(&self, name: &str, args: &[Value]) -> crate::Result<Value> {
+        call_named_outward(self.ctx, &self.caller, name, args)
+    }
+
+}
+
+impl crate::surface::Warn for NativeFnCtx<'_, '_> {
+    fn warn(&self, message: String) {
+        self.ctx.warn(message);
+    }
 }
 
 /// RAII on [`Ctx::suppress_intrinsics`] — held across a re-interpretation so the subtree stays
@@ -1021,6 +1038,47 @@ pub(super) fn reinterpret_named(
     let slots: Vec<Option<Value>> = (0..params.len()).map(|i| args.get(i).cloned()).collect();
     let call = bind_values(params, &slots, &[], caller, &base, ctx)?;
     super::eval_with_ctx(body, &call, ctx)
+}
+
+
+/// AR.27 — the OUTWARD CALL: `name` resolved AT RUNTIME against the running program, for a callee
+/// the emitter did not compile.
+///
+/// Deliberately NOT `reinterpret_named`, which is a different contract wearing a similar shape.
+/// That one re-runs a definition the arming gate already PROVED, so a missing name there is a fab
+/// bug it says so about; this one is handed a name nobody proved anything about — the emitter
+/// declined to compile it, and whether the program even defines it is a runtime question. So the
+/// resolution order is the INTERPRETER'S, arm for arm, because being wrong here is being wrong
+/// about what a call means:
+///
+/// 1. a user FUNCTION of that name — interpret it, exactly as a depth-decline would;
+/// 2. else a bound function VALUE of that name — invoke it (`lookup` walks the caller's chain, so
+///    a top-level `f = function(x) …` answers here, which is what the interpreter's own
+///    `CallValue` arm does);
+/// 3. else warn `Ignoring unknown function 'name'` and answer `undef` — OpenSCAD's behaviour, and
+///    the reason a corpus naming a newer-BOSL2 function still renders the rest instead of hard
+///    failing (L.5.7).
+///
+/// Arm 3 is the one worth arguing about, and the argument is that the alternative is worse: an
+/// error would make a compiled caller FAIL where the interpreted twin merely warns, which is a
+/// tier difference visible to a user — the one thing this whole tier promises never to produce.
+pub(super) fn call_named_outward(
+    ctx: &super::Ctx<'_>,
+    caller: &Scope,
+    name: &str,
+    args: &[Value],
+) -> crate::Result<Value> {
+    if ctx.functions.contains_key(name) {
+        return reinterpret_named(ctx, caller, name, args);
+    }
+    let bound = caller.lookup(name);
+    if matches!(bound, Value::Function { .. }) {
+        let named: Vec<(Option<&'static str>, Value)> =
+            args.iter().map(|v| (None, v.clone())).collect();
+        return invoke_function_value(ctx, caller, &bound, &named);
+    }
+    ctx.warn(format!("Ignoring unknown function '{name}'"));
+    Ok(Value::Undef)
 }
 
 /// AR.17.2 — MINT a `Value::Function` from the literal at `path` inside the fingerprint-proven

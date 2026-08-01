@@ -28,6 +28,7 @@
     clippy::needless_else,
     clippy::if_same_then_else,
     clippy::too_many_lines,
+    clippy::collapsible_if,
     reason = "generated code: a module need not READ every parameter it declares, \
               parameter slots are indexed uniformly (so slot 0 is `get(0)`, not \
               `first()`), and a parts vec grows CONDITIONALLY even when the first \
@@ -52,11 +53,11 @@ pub(super) fn debug_region(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let mut parts: Vec<rt::Geo> = Vec::new();
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
-    if (rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_path", args: &[(None, p_region.clone())] })?.is_truthy() || rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_region", args: &[(None, p_region.clone())] })?.is_truthy() && rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, p_region.clone())] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy()).is_truthy())).is_truthy() {
+    if (rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_path", args: &[(None, p_region.clone())] })?.is_truthy() || rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_region", args: &[(None, p_region.clone())] })?.is_truthy() && rt::binary(fx, rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, p_region.clone())] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy()).is_truthy())).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "debug_polygon", args: &[(None, fx.call_fn(&rt::FnCall { name: "force_path", args: &[(None, p_region.clone())] })?), (Some("vertices"), p_vertices.clone()), (Some("edges"), p_edges.clone()), (Some("convexity"), p_convexity.clone()), (Some("size"), p_size.clone()), ], children: rt::Children::None })?);
     } else {
     for l1_i in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, p_region.clone())] })?) {
-    fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("points_")), (None, fx.call_fn(&rt::FnCall { name: "chr", args: &[(None, rt::apply_binary(rt::BinOp::Add, rt::Value::Num(f64::from_bits(0x4058400000000000_u64)), l1_i.clone()))] })?), (None, rt::Value::string(" = ")), (None, rt::index(p_region.clone(), &l1_i.clone()))] })?), ])?;
+    fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("points_")), (None, fx.call_fn(&rt::FnCall { name: "chr", args: &[(None, rt::binary(fx, rt::BinOp::Add, rt::Value::Num(f64::from_bits(0x4058400000000000_u64)), l1_i.clone()))] })?), (None, rt::Value::string(" = ")), (None, rt::index(p_region.clone(), &l1_i.clone()))] })?), ])?;
     let l2_un = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     parts.push(fx.call(&rt::ModuleCall { name: "linear_extrude", args: &[(Some("height"), rt::Value::Num(f64::from_bits(0x3f847ae147ae147b_u64))), (Some("convexity"), p_convexity.clone()), (Some("center"), rt::Value::Bool(true)), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "region", args: &[(None, p_region.clone()), ], children: rt::Children::None })?);
@@ -89,10 +90,10 @@ pub(super) fn exclusive_or(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let mut parts: Vec<rt::Geo> = Vec::new();
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
-    if (rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))).is_truthy() {
+    if (rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))).is_truthy() {
     parts.push(fx.children()?);
     } else {
-    if (rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() {
+    if (rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "difference", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l1_sel = rt::Value::Num(f64::from_bits(0x0_u64));
     parts.push(fx.child_at(&l1_sel)?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l2_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
@@ -104,7 +105,7 @@ pub(super) fn exclusive_or(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     parts.push(fx.child_at(&l4_sel)?);
  Ok(fx.group(parts)) }, ]) })?);
     } else {
-    if (rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))).is_truthy() {
+    if (rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l5_sel = rt::Value::Num(f64::from_bits(0x0_u64));
     parts.push(fx.child_at(&l5_sel)?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l6_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
@@ -114,7 +115,7 @@ pub(super) fn exclusive_or(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     parts.push(fx.child_at(&l7_sel)?);
  Ok(fx.group(parts)) }, ]) })?);
     } else {
-    if (rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4010000000000000_u64)))).is_truthy() {
+    if (rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4010000000000000_u64)))).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l8_sel = rt::Value::Num(f64::from_bits(0x0_u64));
     parts.push(fx.child_at(&l8_sel)?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l9_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
@@ -127,7 +128,7 @@ pub(super) fn exclusive_or(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
  Ok(fx.group(parts)) }, ]) })?);
  Ok(fx.group(parts)) }, ]) })?);
     } else {
-    if (rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4014000000000000_u64)))).is_truthy() {
+    if (rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4014000000000000_u64)))).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l12_sel = rt::Value::Num(f64::from_bits(0x0_u64));
     parts.push(fx.child_at(&l12_sel)?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l13_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
@@ -141,7 +142,7 @@ pub(super) fn exclusive_or(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     parts.push(fx.child_at(&l16_sel)?);
  Ok(fx.group(parts)) }, ]) })?);
     } else {
-    if (rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4018000000000000_u64)))).is_truthy() {
+    if (rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4018000000000000_u64)))).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l17_sel = rt::Value::Num(f64::from_bits(0x0_u64));
     parts.push(fx.child_at(&l17_sel)?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l18_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
@@ -157,7 +158,7 @@ pub(super) fn exclusive_or(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     parts.push(fx.child_at(&l22_sel)?);
  Ok(fx.group(parts)) }, ]) })?);
     } else {
-    if (rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x401c000000000000_u64)))).is_truthy() {
+    if (rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x401c000000000000_u64)))).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l23_sel = rt::Value::Num(f64::from_bits(0x0_u64));
     parts.push(fx.child_at(&l23_sel)?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l24_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
@@ -175,7 +176,7 @@ pub(super) fn exclusive_or(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     parts.push(fx.child_at(&l29_sel)?);
  Ok(fx.group(parts)) }, ]) })?);
     } else {
-    if (rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4020000000000000_u64)))).is_truthy() {
+    if (rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4020000000000000_u64)))).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l30_sel = rt::Value::Num(f64::from_bits(0x0_u64));
     parts.push(fx.child_at(&l30_sel)?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l31_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
@@ -196,7 +197,7 @@ pub(super) fn exclusive_or(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
  Ok(fx.group(parts)) }, ]) })?);
  Ok(fx.group(parts)) }, ]) })?);
     } else {
-    if (rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4022000000000000_u64)))).is_truthy() {
+    if (rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4022000000000000_u64)))).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l38_sel = rt::Value::Num(f64::from_bits(0x0_u64));
     parts.push(fx.child_at(&l38_sel)?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l39_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
@@ -219,7 +220,7 @@ pub(super) fn exclusive_or(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     parts.push(fx.child_at(&l46_sel)?);
  Ok(fx.group(parts)) }, ]) })?);
     } else {
-    if (rt::apply_binary(rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4024000000000000_u64)))).is_truthy() {
+    if (rt::binary(fx, rt::BinOp::Eq, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4024000000000000_u64)))).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "exclusive_or", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l47_sel = rt::Value::Num(f64::from_bits(0x0_u64));
     parts.push(fx.child_at(&l47_sel)?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l48_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
@@ -244,7 +245,7 @@ pub(super) fn exclusive_or(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     parts.push(fx.child_at(&l56_sel)?);
  Ok(fx.group(parts)) }, ]) })?);
     } else {
-    if !(rt::apply_binary(rt::BinOp::Le, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4024000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); }
+    if !(rt::binary(fx, rt::BinOp::Le, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4024000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); }
     }
     }
     }
@@ -299,7 +300,7 @@ pub(super) fn region(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let l12_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     if !(fx.call_fn(&rt::FnCall { name: "in_list", args: &[(None, p_atype.clone()), (None, rt::Value::list(vec![rt::Value::string("intersect"), rt::Value::string("hull")]))] })?).is_truthy() { return Err(rt::assert_decline()); }
-    parts.push(fx.call(&rt::ModuleCall { name: "attachable", args: &[(None, p_anchor.clone()), (None, p_spin.clone()), (Some("two_d"), rt::Value::Bool(true)), (Some("region"), l0_r.clone()), (Some("extent"), rt::apply_binary(rt::BinOp::Eq, p_atype.clone(), rt::Value::string("hull"))), (Some("cp"), p_cp.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "polygon", args: &[(Some("points"), l2_points.clone()), (Some("paths"), l11_paths.clone()), ], children: rt::Children::None })?);
+    parts.push(fx.call(&rt::ModuleCall { name: "attachable", args: &[(None, p_anchor.clone()), (None, p_spin.clone()), (Some("two_d"), rt::Value::Bool(true)), (Some("region"), l0_r.clone()), (Some("extent"), rt::binary(fx, rt::BinOp::Eq, p_atype.clone(), rt::Value::string("hull"))), (Some("cp"), p_cp.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "polygon", args: &[(Some("points"), l2_points.clone()), (Some("paths"), l11_paths.clone()), ], children: rt::Children::None })?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
  Ok(fx.group(parts)) }, ]) })?);
         fx.group(parts)

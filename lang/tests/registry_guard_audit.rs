@@ -36,6 +36,17 @@ use fab_lib::library::Library;
 /// answer wrong; a name missing from DERIVED is a red test and an analyzer bug.
 fn pruned_by_author(entry: &str) -> &'static [&'static str] {
     match entry {
+        // ── AR.27: the OUTWARD call, and it is a different KIND of exclusion ─────────────────
+        // Every other arm here prunes a name the author proved UNREACHABLE. This one prunes a
+        // name that is very much reached — and still must not be a dep, because a dep pin exists
+        // to guard BAKED semantics and nothing is baked here. `_fab_poc_absent` is not in the
+        // batch, so the emitter dispatches to it through `fx.call_named`, which resolves against
+        // whatever the running program defines. That is what the INTERPRETER does, so there is
+        // no second implementation for a fingerprint to prove equal.
+        //
+        // Pinning it anyway would be worse than noise: `anchor_fp` would find no anchor for a
+        // name the library never compiled, and the entry would never wire at all.
+        "_fab_poc_outward" => &["_fab_poc_absent"],
         // ── the `is_vector` family ───────────────────────────────────────────────────────────
         // `is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON)` has two dead tails for
         // every entry here, because none of them passes anything past the SECOND parameter:

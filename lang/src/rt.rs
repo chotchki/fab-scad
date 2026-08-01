@@ -31,6 +31,10 @@ pub use crate::eval::geo2d::Geo;
 pub use crate::eval::intrinsics::native_rt::{DepthGuard, run_interpreted};
 pub use crate::eval::intrinsics::{assert_decline, assert_failed, bosl_assert};
 pub use crate::eval::ops::{apply_binary, apply_unary, index, member};
+/// AR.27 — the value algebra WITH its console. `binary`/`unary` are what generated code emits:
+/// same bits as `apply_binary`/`apply_unary`, plus the SV warning routed to the run instead of
+/// dropped. The pure pair stays for callers that genuinely have nowhere to put a diagnostic.
+pub use crate::eval::ops::{binary, unary};
 pub use crate::eval::value::Value;
 pub use crate::eval::{build_range, build_vector, iter_values_native};
 pub use crate::parser::{BinOp, UnOp};
@@ -40,7 +44,7 @@ pub use crate::parser::{BinOp, UnOp};
 /// emission was exercised as generated TEXT, which never proved the text would build.
 pub use crate::surface::{
     ChildThunk, Children, Decl, Domain, FnCall, FnCtx, Kind, ModuleCall, ModuleCtx, NoClosures,
-    Param,
+    Param, Warn,
 };
 /// The REGISTRY ROWS a generated library declares (AR.26.2). Emitted as static struct literals
 /// beside the natives they name, so a generated crate hands over its own dispatch table rather

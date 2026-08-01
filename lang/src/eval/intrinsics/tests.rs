@@ -260,13 +260,19 @@ fn generated_band2_matches_the_interpreter() {
     }
 }
 
-/// AR.10 — the depth budget, end to end: `approx` over lists nested far past `MAX_NATIVE_DEPTH`
-/// must DECLINE to the pure interpreter (explicit stack) and still bit-match it — never ride the
-/// Rust stack unbounded. Depth 300 is ~5x the budget: without the guard this recursed 300 heavy
-/// native frames; with it, level 64 falls back and the rest runs on the machine. The structures
-/// differ at the INNERMOST leaf so the `a == b` fast path can't short-circuit the recursion.
+/// `approx` over lists nested 300 deep must bit-match the interpreter WITHOUT building a native
+/// ladder — the recursion has to live on the explicit stack, not the Rust one. The structures differ
+/// at the INNERMOST leaf so the `a == b` fast path cannot short-circuit the descent.
+///
+/// AR.10 wrote this test for a DIFFERENT mechanism, and the difference is the whole of AR.26.4.4.
+/// Then, `approx` recursed 32 native frames and the depth COUNTER declined the 33rd into a throwaway
+/// interpreter. That bounded the damage without fixing it: a counter fires only after its frames are
+/// already spent, it is denominated in levels while what overflows is bytes (~200 KiB per level in
+/// debug), and the decline itself pays `run_interpreted`'s island parse. Now `approx` is in a cycle
+/// group, so its recursive call is emitted as `fx.call_named` and lands in the LIVE evaluator on the
+/// first level. The assertion moves accordingly: not "it declined in time" but "it never climbed".
 #[test]
-fn deep_nesting_declines_to_the_interpreter() {
+fn deep_nesting_never_climbs_the_host_stack() {
     fn nest(depth: usize, leaf: f64) -> Value {
         let mut v = Value::num_list(vec![leaf]);
         for _ in 0..depth {
@@ -275,31 +281,32 @@ fn deep_nesting_declines_to_the_interpreter() {
         v
     }
     let reference = reference_of("approx").expect("registered");
-    let (params, body) = parse_fn(reference);
-    let func = resolve("approx", &params, &body)
-        .expect("its own reference must register")
-        .func;
-    let a = nest(300, 1.0);
-    let b = nest(300, 2.0);
     let deps = [
         reference_of("idx").expect("registered"),
         reference_of("posmod").expect("registered"),
         reference_of("is_finite").expect("registered"),
         reference_of("is_nan").expect("registered"),
     ];
-    let input = [a, b];
-    let fast = func(&crate::surface::NoClosures, &input);
+    let consts = [("_EPSILON", Value::Num(1e-9))];
+    let input = [nest(300, 1.0), nest(300, 2.0)];
+
+    let before = crate::eval::intrinsics::native_rt::peak_native_depth();
+    let fast = with_native(reference, &deps, &consts, |fx, f| f(fx, &input));
+    let climbed = crate::eval::intrinsics::native_rt::peak_native_depth() - before;
+
     assert!(
         same_result(
             &fast,
-            &interpret_with_deps_consts(
-                reference,
-                &deps,
-                &[("_EPSILON", Value::Num(1e-9))],
-                &input
-            ),
+            &interpret_with_deps_consts(reference, &deps, &consts, &input),
         ),
-        "deep nesting must decline to the interpreter and still agree; fast: {fast:?}"
+        "deep nesting must agree with the interpreter; fast: {fast:?}"
+    );
+    // 300 levels of DATA must not buy 300 (or 32) levels of Rust stack. A handful is the whole
+    // budget: one entry for `approx` itself, and whatever the non-recursive branch statically calls.
+    assert!(
+        climbed <= 4,
+        "the native ladder tracked the nesting ({climbed} frames for 300 levels) — the recursion \
+         is still on the host stack"
     );
 }
 
@@ -483,6 +490,86 @@ fn interpret_with_deps_consts(
     crate::eval::eval_with_ctx(body, &scope, &ctx)
 }
 
+/// A live evaluator over `target` + `deps`, handed to `call` as a real [`crate::surface::FnCtx`].
+///
+/// AR.26.4.4 made this necessary, and the reason is the point rather than an inconvenience. A native
+/// whose call graph contains a CYCLE now routes the cycle-internal calls through `fx.call_named`
+/// instead of recursing on the host stack, so those natives genuinely cannot run without an
+/// evaluator — `NoClosures` answers `Unimplemented` and means it. Only the branches that REACH a
+/// cycle need this (`approx` on two numbers is still self-contained; `approx` on two LISTS reaches
+/// `idx`), which is why most of this file still calls the fn pointer directly.
+fn with_fx<R>(
+    target: &str,
+    deps: &[&str],
+    consts: &[(&str, Value)],
+    call: impl FnOnce(&dyn crate::surface::FnCtx, &crate::eval::Ctx<'_>) -> R,
+) -> R {
+    let mut sources: Vec<&str> = deps.to_vec();
+    sources.sort_unstable();
+    sources.dedup();
+    let src = format!("{}\n{target}", sources.join("\n"));
+    let program = parse(&src).expect("deps+target parse");
+    let mut ctx = build_ctx(&program, crate::Config::default());
+    // The consts as island 0's global — the same publication the interpreted twin does, and the
+    // precondition for ARMING: a const-guarded entry proves its bakes against this scope, and
+    // `build_ctx` alone leaves those unwired because the raw-AST path fuses hoist and eval.
+    let mut scope = Scope::new();
+    for (n, v) in consts {
+        scope.bind((*n).to_string(), v.clone());
+    }
+    if let Some(slot) = ctx.island_globals.borrow_mut().first_mut() {
+        *slot = scope.clone();
+    }
+    for (n, f) in crate::eval::arm_guarded_intrinsics(&ctx) {
+        ctx.intrinsics.insert(n, f);
+    }
+    let fx = crate::eval::module_rt::NativeFnCtx {
+        ctx: &ctx,
+        caller: scope,
+    };
+    call(&fx, &ctx)
+}
+
+/// [`with_fx`], plus resolving `target`'s own native through the DISPATCH GATE and proving it wired.
+///
+/// The stronger harness where it applies, and worth saying plainly: calling the fn pointer directly
+/// proves the pointer computes the right thing and never that the gate would ever hand a program to
+/// it. This asserts the wiring first, then compares.
+fn with_native<R>(
+    target: &str,
+    deps: &[&str],
+    consts: &[(&str, Value)],
+    call: impl FnOnce(&dyn crate::surface::FnCtx, super::Intrinsic) -> R,
+) -> R {
+    // THE ROW'S OWN DEP CLOSURE, unioned with the caller's list. The two are chosen for different
+    // jobs: a caller passes what the INTERPRETED oracle needs defined, while `guard_veto` requires
+    // every name the native PINNED to be present and fingerprint-matched, or the entry declines and
+    // this harness has nothing left to test.
+    let name = {
+        let p = parse(target).expect("target parses");
+        match &p.stmts.first().expect("target has a stmt").kind {
+            StmtKind::FunctionDef { name, .. } => name.clone(),
+            other => panic!("target is not a function def: {other:?}"),
+        }
+    };
+    let mut sources: Vec<&str> = deps.to_vec();
+    let entry = super::entry_by_name(&name)
+        .unwrap_or_else(|| panic!("`{name}` has no registry row — use `with_fx`"));
+    for d in entry.deps {
+        if let Some(r) = reference_of(d).or_else(|| pin_reference_of(d)) {
+            sources.push(r);
+        }
+    }
+    with_fx(target, &sources, consts, |fx, ctx| {
+        let native = *ctx.intrinsics.get(&*name).unwrap_or_else(|| {
+            panic!(
+                "`{name}` did not WIRE — a differential against a native that never armed is vacuous"
+            )
+        });
+        call(fx, native)
+    })
+}
+
 /// The shape band's richer battery: everything in [`value_battery`] plus the nested/mixed/undef-bearing
 /// shapes `_list_pattern`/`is_consistent`/`same_shape` actually discriminate on.
 fn shape_battery() -> Vec<Value> {
@@ -639,7 +726,7 @@ fn fast_equals_slow_epsilon_family() {
                 }
                 assert!(
                     same_result(
-                        &super::approx(&crate::surface::NoClosures, &args),
+                        &with_native(approx_ref, &approx_deps, &consts, |fx, f| f(fx, &args)),
                         &interpret_with_deps_consts(approx_ref, &approx_deps, &consts, &args)
                     ),
                     "approx diverged on ({a:?}, {b:?}, eps {eps:?})"
@@ -671,7 +758,7 @@ fn fast_equals_slow_epsilon_family() {
             let args = [x.clone(), m.clone()];
             assert!(
                 same_result(
-                    &super::posmod(&crate::surface::NoClosures, &args),
+                    &with_native(posmod_ref, &posmod_deps, &consts, |fx, f| f(fx, &args)),
                     &interpret_with_deps_consts(posmod_ref, &posmod_deps, &consts, &args)
                 ),
                 "posmod diverged on ({x:?}, {m:?})"
@@ -696,7 +783,7 @@ fn fast_equals_slow_epsilon_family() {
             args.extend(tail.iter().cloned());
             assert!(
                 same_result(
-                    &super::idx(&crate::surface::NoClosures, &args),
+                    &with_native(idx_ref, &idx_deps, &consts, |fx, f| f(fx, &args)),
                     &interpret_with_deps_consts(idx_ref, &idx_deps, &consts, &args)
                 ),
                 "idx diverged on ({v:?}, tail {tail:?})"
@@ -715,7 +802,7 @@ fn fast_equals_slow_epsilon_family() {
             }
             assert!(
                 same_result(
-                    &super::all_nonzero(&crate::surface::NoClosures, &args),
+                    &with_native(anz_ref, &anz_deps, &consts, |fx, f| f(fx, &args)),
                     &interpret_with_deps_consts(anz_ref, &anz_deps, &consts, &args)
                 ),
                 "all_nonzero diverged on ({v:?}, eps {eps:?})"
@@ -740,7 +827,7 @@ fn fast_equals_slow_epsilon_family() {
             let args = [v.clone(), length.clone()];
             assert!(
                 same_result(
-                    &super::is_vector(&crate::surface::NoClosures, &args),
+                    &with_native(iv_ref, &iv_deps, &consts, |fx, f| f(fx, &args)),
                     &interpret_with_deps_consts(iv_ref, &iv_deps, &consts, &args)
                 ),
                 "is_vector diverged on ({v:?}, length {length:?})"
@@ -757,7 +844,7 @@ fn fast_equals_slow_epsilon_family() {
                 ];
                 assert!(
                     same_result(
-                        &super::is_vector(&crate::surface::NoClosures, &args),
+                        &with_native(iv_ref, &iv_deps, &consts, |fx, f| f(fx, &args)),
                         &interpret_with_deps_consts(iv_ref, &iv_deps, &consts, &args)
                     ),
                     "is_vector diverged on ({v:?}, zero {zero:?}, eps {eps:?})"
@@ -768,7 +855,7 @@ fn fast_equals_slow_epsilon_family() {
             let args = [v.clone(), Value::Undef, Value::Undef, anz.clone()];
             assert!(
                 same_result(
-                    &super::is_vector(&crate::surface::NoClosures, &args),
+                    &with_native(iv_ref, &iv_deps, &consts, |fx, f| f(fx, &args)),
                     &interpret_with_deps_consts(iv_ref, &iv_deps, &consts, &args)
                 ),
                 "is_vector diverged on ({v:?}, all_nonzero {anz:?})"
@@ -810,7 +897,7 @@ fn fast_equals_slow_epsilon_family() {
                     let args = [a.clone(), m.clone(), n.clone(), square.clone()];
                     assert!(
                         same_result(
-                            &super::is_matrix(&crate::surface::NoClosures, &args),
+                            &with_native(im_ref, &im_deps, &consts, |fx, f| f(fx, &args)),
                             &interpret_with_deps_consts(im_ref, &im_deps, &consts, &args)
                         ),
                         "is_matrix diverged on ({a:?}, m {m:?}, n {n:?}, square {square:?})"
@@ -912,7 +999,7 @@ fn fast_equals_slow_earcut_band() {
                 }
                 assert!(
                     same_result(
-                        &super::is_at_left(&crate::surface::NoClosures, &args),
+                        &with_native(al_ref, &al_deps, &consts, |fx, f| f(fx, &args)),
                         &interpret_with_deps_consts(al_ref, &al_deps, &consts, &args)
                     ),
                     "_is_at_left diverged on ({pt:?}, {line:?}, eps {eps:?})"
@@ -1093,7 +1180,7 @@ fn fast_equals_slow_aggregate_band() {
             }
             assert!(
                 same_result(
-                    &super::sum(&crate::surface::NoClosures, &args),
+                    &with_native(sum_ref, &sum_deps, &consts, |fx, f| f(fx, &args)),
                     &interpret_with_deps_consts(sum_ref, &sum_deps, &consts, &args)
                 ),
                 "sum diverged on ({v:?}, dflt {dflt:?})"
@@ -1149,7 +1236,7 @@ fn fast_equals_slow_aggregate_band() {
             }
             assert!(
                 same_result(
-                    &super::unit(&crate::surface::NoClosures, &args),
+                    &with_native(unit_ref, &unit_deps, &consts, |fx, f| f(fx, &args)),
                     &interpret_with_deps_consts(unit_ref, &unit_deps, &consts, &args)
                 ),
                 "unit diverged on ({v:?}, error {err:?})"
@@ -1232,7 +1319,7 @@ fn fast_equals_slow_aggregate_band() {
             let args = [t.clone(), p.clone()];
             assert!(
                 same_result(
-                    &super::apply_transform(&crate::surface::NoClosures, &args),
+                    &with_native(ap_ref, &ap_deps, &consts, |fx, f| f(fx, &args)),
                     &interpret_with_deps_consts(ap_ref, &ap_deps, &consts, &args)
                 ),
                 "_apply diverged on ({t:?}, {p:?})"
@@ -1424,7 +1511,7 @@ fn fast_equals_slow_band5_batch1() {
             }
             assert!(
                 same_result(
-                    &super::is_point_on_line(&crate::surface::NoClosures, &args),
+                    &with_native(ipol_ref, &ipol_deps, &consts, |fx, f| f(fx, &args)),
                     &interpret_with_deps_consts(ipol_ref, &ipol_deps, &consts, &args)
                 ),
                 "_is_point_on_line diverged on ({pt:?}, {line:?}, {b:?})"
@@ -1506,7 +1593,7 @@ fn fast_equals_slow_band5_batch1() {
         let args = [vnf.clone()];
         assert!(
             same_result(
-                &super::vnf_centroid(&crate::surface::NoClosures, &args),
+                &with_native(vc_ref, &vc_deps, &consts, |fx, f| f(fx, &args)),
                 &interpret_with_deps_consts(vc_ref, &vc_deps, &consts, &args)
             ),
             "_vnf_centroid diverged on {vnf:?}"
@@ -1593,7 +1680,7 @@ fn fast_equals_slow_band5_batch2() {
         Some(Value::Num(f64::NAN)),
         Some(Value::Undef),
     ];
-    for (name, func) in [
+    for (name, _func) in [
         // The GENERATED versions — the hand ones are helpers on their way out (AR.17 stage A).
         (
             "affine3d_zrot",
@@ -1607,7 +1694,7 @@ fn fast_equals_slow_band5_batch2() {
             let args: Vec<Value> = ang.iter().cloned().collect();
             assert!(
                 same_result(
-                    &func(&crate::surface::NoClosures, &args),
+                    &with_native(r, &rot_deps, &consts, |fx, f| f(fx, &args)),
                     &interpret_with_deps_consts(r, &rot_deps, &consts, &args)
                 ),
                 "{name} diverged on {ang:?}"
@@ -1659,7 +1746,7 @@ fn fast_equals_slow_band5_batch2() {
     for args in &ge_cases {
         assert!(
             same_result(
-                &super::get_ear(&crate::surface::NoClosures, args),
+                &with_native(ge_ref, &ge_deps, &consts, |fx, f| f(fx, args)),
                 &interpret_with_deps_consts(ge_ref, &ge_deps, &consts, args)
             ),
             "_get_ear diverged on {args:?}"
@@ -1957,7 +2044,7 @@ fn fast_equals_slow_o9_tree2b_rot() {
         let args = [v.clone()];
         assert!(
             same_result(
-                &super::affine3d_translate(&crate::surface::NoClosures, &args),
+                &with_native(tr_ref, &tr_deps, &consts, |fx, f| f(fx, &args)),
                 &interpret_with_deps_consts(tr_ref, &tr_deps, &consts, &args)
             ),
             "affine3d_translate diverged on {v:?}"
@@ -2046,7 +2133,7 @@ fn fast_equals_slow_o9_tree2b_rot() {
     for args in &cases {
         assert!(
             same_result(
-                &super::rot(&crate::surface::NoClosures, args),
+                &with_native(rot_ref, &deps, &consts, |fx, f| f(fx, args)),
                 &interpret_with_deps_consts(rot_ref, &deps, &consts, args)
             ),
             "rot diverged on {args:?}"
@@ -2084,14 +2171,14 @@ fn fast_equals_slow_o9_tree1() {
         let args = [v.clone()];
         assert!(
             same_result(
-                &super::v_abs(&crate::surface::NoClosures, &args),
+                &with_native(va_ref, &iv_knot, &consts, |fx, f| f(fx, &args)),
                 &interpret_with_deps_consts(va_ref, &iv_knot, &consts, &args)
             ),
             "v_abs diverged on {v:?}"
         );
         assert!(
             same_result(
-                &super::v_theta(&crate::surface::NoClosures, &args),
+                &with_native(vt_ref, &iv_knot, &consts, |fx, f| f(fx, &args)),
                 &interpret_with_deps_consts(vt_ref, &iv_knot, &consts, &args)
             ),
             "v_theta diverged on {v:?}"
@@ -2207,7 +2294,7 @@ fn fast_equals_slow_o9_tree1() {
     for args in &rft_cases {
         assert!(
             same_result(
-                &super::generated::affine3d_rot_from_to(&crate::surface::NoClosures, args),
+                &with_native(rft_ref, &rft_deps, &consts, |fx, f| f(fx, args)),
                 &interpret_with_deps_consts(rft_ref, &rft_deps, &consts, args)
             ),
             "affine3d_rot_from_to diverged on {args:?}"
@@ -2734,11 +2821,9 @@ fn fast_equals_slow_o10_dep_tier() {
         let args = vec![list.clone(), Value::Num(1e-9)];
         assert!(
             same_result(
-                &super::regions::list_wrap_val(
-                    &crate::surface::NoClosures,
-                    list,
-                    &Value::Num(1e-9)
-                ),
+                &with_fx(lw_ref, &lw_deps, &consts, |fx, _| {
+                    super::regions::list_wrap_val(fx, list, &Value::Num(1e-9))
+                }),
                 &interpret_with_deps_consts(lw_ref, &lw_deps, &consts, &args)
             ),
             "list_wrap diverged on {list:?}"
@@ -2751,11 +2836,9 @@ fn fast_equals_slow_o10_dep_tier() {
             .collect();
         assert!(
             same_result(
-                &super::regions::are_ends_equal_val(
-                    &crate::surface::NoClosures,
-                    list,
-                    &Value::Num(1e-9)
-                ),
+                &with_fx(ae_ref, &ae_deps, &consts, |fx, _| {
+                    super::regions::are_ends_equal_val(fx, list, &Value::Num(1e-9))
+                }),
                 &interpret_with_deps_consts(ae_ref, &ae_deps, &consts, &args)
             ),
             "are_ends_equal diverged on {list:?}"
@@ -3333,7 +3416,7 @@ fn fast_equals_slow_o10_region_monster() {
         let args = vec![r1.clone(), r2.clone(), c1.clone(), c2.clone(), eps.clone()];
         assert!(
             same_result(
-                &super::regions::rri_val(&crate::surface::NoClosures, &args),
+                &with_native(rri_ref, &deps, &consts, |fx, f| f(fx, &args)),
                 &interpret_with_deps_consts(rri_ref, &deps, &consts, &args)
             ),
             "_rri diverged on closed=({c1:?},{c2:?}) eps={eps:?} r1={r1:?}"
@@ -3413,50 +3496,55 @@ fn registry_and_pin_names_are_unique() {
     }
 }
 
-/// The dep graph REFERENCES ITSELF and the cycles are real — `approx` ↔ `idx` ↔ `posmod` (approx's
-/// list branch calls idx, idx wraps offsets through posmod, posmod's assert calls approx) and
-/// `all_nonzero` ↔ `is_vector`.
+/// THE DEP GRAPH IS ACYCLIC, and since AR.26.4.4 that is by construction rather than by luck.
 ///
-/// The cycles are NOT why the cross-links are names, and an earlier version of this comment said
-/// they were. Corrected: a cyclic graph of `&'static` references compiles fine in safe Rust, because
-/// statics resolve to addresses at link time and there is no initialization order to get wrong —
-/// `static A: Node = Node { next: &B }; static B: Node = Node { next: &A };` builds and walks.
-/// (`Rc` specifically cannot do this job, but for unrelated reasons: it is neither `Send` nor
-/// `Sync`, so it cannot live in the `static` the table is cached in, and an `Rc` cycle leaks
-/// without `Weak`.)
+/// This test used to assert the OPPOSITE, and the flip is the point. BOSL2's `approx` ↔ `idx` ↔
+/// `posmod` and `all_nonzero` ↔ `is_vector` really are cycles in the SOURCE, and while a generated
+/// native compiled its cycle-mates as static Rust calls those cycles were in the dep graph too —
+/// which meant a native's recursion rode the HOST stack, unbounded, the class the interpreter
+/// designed out with its explicit stack. The emitter now drops each subject's cycle group from its
+/// sibling table, so those calls dispatch through `fx.call_named` into the live evaluator, and a
+/// dispatched callee is deliberately not a dep (it bakes nothing, so there is nothing to pin).
 ///
-/// The real reason a dep stays a NAME is that the name is not addressing anything of ours. Of its
-/// three uses in `guard_veto`, two cannot be a pointer at all: it keys into the USER's function
-/// table (`functions.get(dep)` — a program that does not exist until one is loaded), and it is
-/// compared against the native's own PARAMETER names for the AN.10 shadow check. Only the third
-/// use, fetching the expected fingerprint, addresses the registry.
+/// What is left is a DAG, and that buys two things worth asserting: the closure computation has no
+/// fixpoint to reach, and the static call depth is a build-time constant rather than a number a
+/// runtime counter discovers after the frames are already spent. `fab_lib`'s
+/// `the_static_call_graph_is_measured` asserts the same property one level up, over the whole 1260.
 ///
-/// So the cycles are pinned here for a different reason than first written: they say the dep graph
-/// is a real graph rather than a DAG, which is what makes a topological "resolve deps first" scheme
-/// impossible and forces the guard to work name-at-a-time. A direct `&'static` link alongside the
-/// name is still worth adding — it would make a typo'd dep a COMPILE error rather than a permanent
-/// silent veto — and that is AR.14.4's business, where the macro can emit it.
+/// The cross-links stay NAMES, and the reason was never the cycles — a cyclic graph of `&'static`
+/// references compiles fine in safe Rust, since statics resolve at link time and there is no
+/// initialization order to get wrong. The real reason is that a dep name is not addressing anything
+/// of OURS: of its three uses in `guard_veto`, two cannot be a pointer at all — it keys into the
+/// USER's function table (a program that does not exist until one is loaded), and it is compared
+/// against the native's own PARAMETER names for the AN.10 shadow check. Only fetching the expected
+/// fingerprint addresses the registry.
 #[test]
-fn the_dep_graph_really_does_contain_cycles() {
+fn the_dep_graph_is_acyclic() {
     use super::REGISTRY;
 
-    fn reaches(from: &str, target: &str, depth: usize) -> bool {
-        if depth == 0 {
-            return false;
+    // Depth-first, tracking the path, so a re-entered name on the CURRENT path is a back-edge —
+    // the same test `cycle_groups` applies in the emitter, run against the shipped table.
+    fn walk<'a>(name: &'a str, path: &mut Vec<&'a str>) -> Option<String> {
+        if let Some(at) = path.iter().position(|&p| p == name) {
+            return Some(format!("{} -> {name}", path[at..].join(" -> ")));
         }
-        REGISTRY.iter().find(|e| e.name == from).is_some_and(|e| {
-            e.deps
-                .iter()
-                .any(|&d| d == target || reaches(d, target, depth - 1))
-        })
+        path.push(name);
+        let found = REGISTRY
+            .iter()
+            .find(|e| e.name == name)
+            .and_then(|e| e.deps.iter().find_map(|&d| walk(d, path)));
+        path.pop();
+        found
     }
 
-    for (a, b) in [("approx", "idx"), ("approx", "posmod")] {
-        assert!(
-            reaches(a, b, 8) && reaches(b, a, 8),
-            "`{a}` and `{b}` are supposed to be mutually reachable — if that is no longer true, \
-             see this test's doc before changing how the registry links itself"
-        );
+    for entry in REGISTRY {
+        if let Some(cycle) = walk(entry.name, &mut Vec::new()) {
+            panic!(
+                "the dep graph has a cycle: {cycle}. A dep is a name whose semantics the native \
+                 INLINED, so a cycle here is unbounded host-stack recursion — the emitter is \
+                 supposed to route a cycle-mate through dispatch instead (AR.26.4.4)"
+            );
+        }
     }
 }
 

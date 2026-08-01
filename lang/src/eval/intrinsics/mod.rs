@@ -62,41 +62,34 @@ pub(super) use fingerprint::fingerprint;
 // The fast==slow harness addresses every native as `super::<name>`; these bindings keep those
 // paths valid from the tests submodule.
 #[cfg(test)]
-use affine::{
-    affine3d_identity, affine3d_rot_by_axis, affine3d_translate, apply, apply_transform, ident,
-    is_2d_transform, rot,
-};
+use affine::{affine3d_identity, affine3d_rot_by_axis, apply, ident, is_2d_transform};
 // AR.25 — the vector_angle/rot_from_to cone's hand natives are DELETED; direct-call tests now
 // exercise the generated versions under the old names (the tests cover what ships).
 #[cfg(test)]
 use generated::{_fab_poc_isup as poc_isup, _fab_poc_near0 as poc_near0, _fab_poc_sq as poc_sq};
 #[cfg(test)]
-use generated::{approx, idx, posmod};
-#[cfg(test)]
-use generated::{point2d, v_abs, v_theta, vector_axis};
+use generated::{point2d, vector_axis};
 // AR.17 stage A — these hand natives are DELETED; their direct-call unit tests now exercise the
 // generated versions under the old names, which is strictly better: the tests cover what ships.
 #[cfg(test)]
 use generated::same_shape;
 #[cfg(test)]
 use generated::{
-    _get_ear as get_ear, _none_inside as none_inside, _point_dist as point_dist,
-    _vnf_centroid as vnf_centroid,
+    _none_inside as none_inside, _point_dist as point_dist,
 };
 #[cfg(test)]
 use generated::{
-    _group_sort_by_index as group_sort_by_index, _is_at_left as is_at_left,
-    _is_point_on_line as is_point_on_line, _list_pattern as list_pattern, _tri_class as tri_class,
+    _group_sort_by_index as group_sort_by_index, _list_pattern as list_pattern, _tri_class as tri_class,
     num_defined,
 };
 #[cfg(test)]
 use lists::{force_list, in_list};
 #[cfg(test)]
-use math::{sum, sum_tail};
+use math::sum_tail;
 #[cfg(test)]
-use shape::{all_nonzero, is_consistent, is_matrix, is_path, is_vector};
+use shape::{is_consistent, is_path};
 #[cfg(test)]
-use vectors::{bt_search, unit};
+use vectors::bt_search;
 
 /// AR.26.1 — the ROW TYPES live in [`crate::registry`] now, because a generated library crate has to
 /// construct them and this module is private. Re-exported under their old names so the hand registry
@@ -840,8 +833,8 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         // `all_nonzero`/`abs`/`is_undef` ride in transitively through `is_vector`'s body — the
         // derived audit folds a dep's closure into the caller's guard set.
-        deps: &["is_vector", "is_finite", "is_nan", "all_nonzero"],
-        builtins: &["is_list", "len", "is_num", "norm", "abs", "is_undef"],
+        deps: &["is_vector", "is_finite", "is_nan"],
+        builtins: &["is_list", "len", "is_num", "norm", "is_undef"],
         func: generated::is_vnf,
     },
     // ── AR.17.2.3, the first MINT slice (fnliterals.scad verbatim) ───────────────────────────
@@ -971,22 +964,8 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         // The is_vector cone (+ det2's is_def and sum's _sum) rides in transitively — the
         // derived audit folds a dep's closure into the caller's guard set.
-        deps: &[
-            "det2",
-            "det3",
-            "det4",
-            "is_matrix",
-            "sum",
-            "_sum",
-            "is_def",
-            "is_vector",
-            "is_consistent",
-            "_list_pattern",
-            "is_finite",
-            "is_nan",
-            "all_nonzero",
-        ],
-        builtins: &["is_list", "len", "is_undef", "cross", "is_num", "abs", "norm"],
+        deps: &["det2", "det3", "det4", "is_matrix", "sum", "_sum", "is_def", "is_vector", "is_consistent", "_list_pattern", "is_finite", "is_nan"],
+        builtins: &["is_list", "len", "is_undef", "cross", "is_num", "norm"],
         func: generated::determinant,
     },
     Entry {
@@ -995,19 +974,8 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts: &[],
         consts_v: &[],
         // The is_vector cone + list_to_matrix's `default` ride in transitively.
-        deps: &[
-            "is_vector",
-            "is_matrix",
-            "flatten",
-            "list_to_matrix",
-            "default",
-            "is_consistent",
-            "_list_pattern",
-            "is_finite",
-            "is_nan",
-            "all_nonzero",
-        ],
-        builtins: &["is_num", "max", "min", "is_list", "len", "abs", "is_undef", "norm"],
+        deps: &["is_vector", "is_matrix", "flatten", "list_to_matrix", "default", "is_consistent", "_list_pattern", "is_finite", "is_nan"],
+        builtins: &["is_num", "max", "min", "is_list", "len", "is_undef", "norm"],
         func: generated::constrain,
     },
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
@@ -1093,8 +1061,8 @@ pub(super) static REGISTRY: &[Entry] = &[
     ) : false;",
         consts: &[("_EPSILON", 1e-9)],
         consts_v: &[],
-        deps: &["idx", "posmod", "is_finite", "is_nan"],
-        builtins: &["is_bool", "is_num", "abs", "is_list", "is_string", "len"],
+        deps: &[],
+        builtins: &["is_bool", "is_num", "abs", "is_list", "len"],
         func: generated::approx,
     },
     Entry {
@@ -1104,8 +1072,8 @@ pub(super) static REGISTRY: &[Entry] = &[
     (x%m+m)%m;",
         consts: &[],
         consts_v: &[],
-        deps: &["is_finite", "is_nan", "approx"],
-        builtins: &["is_num", "abs", "is_bool"],
+        deps: &["is_finite", "is_nan"],
+        builtins: &["is_num"],
         func: generated::posmod,
     },
     Entry {
@@ -1120,8 +1088,8 @@ pub(super) static REGISTRY: &[Entry] = &[
     ) [_s : step : _e];",
         consts: &[],
         consts_v: &[],
-        deps: &["posmod", "is_finite", "is_nan", "approx"],
-        builtins: &["is_list", "is_string", "len", "is_num", "abs", "is_bool"],
+        deps: &[],
+        builtins: &["is_list", "is_string", "len"],
         func: generated::idx,
     },
     Entry {
@@ -1131,8 +1099,8 @@ pub(super) static REGISTRY: &[Entry] = &[
     is_vector(x) && [for (xx=x) if(abs(xx)<eps) 1] == [];",
         consts: &[("_EPSILON", 1e-9)],
         consts_v: &[],
-        deps: &["is_finite", "is_nan", "is_vector"],
-        builtins: &["is_num", "abs", "is_list", "len", "is_undef", "norm"],
+        deps: &["is_finite", "is_nan"],
+        builtins: &["is_num", "abs"],
         func: generated::all_nonzero,
     },
     Entry {
@@ -1144,8 +1112,8 @@ pub(super) static REGISTRY: &[Entry] = &[
     && (!all_nonzero || all_nonzero(v)) ;",
         consts: &[("_EPSILON", 1e-9)],
         consts_v: &[],
-        deps: &["is_finite", "is_nan", "all_nonzero"],
-        builtins: &["is_list", "len", "is_undef", "is_num", "norm", "abs"],
+        deps: &["is_finite", "is_nan"],
+        builtins: &["is_list", "len", "is_undef", "is_num", "norm"],
         func: generated::is_vector,
     },
     // `is_vector(A[0],n)` is a fixed 2-arg call, so the zero/norm and all_nonzero branches are unreachable
@@ -1464,22 +1432,8 @@ pub(super) static REGISTRY: &[Entry] = &[
     pos[1]/pos[0]/4;",
         consts: &[("_EPSILON", 1e-9)],
         consts_v: &[],
-        deps: &[
-            "is_vnf",
-            "is_vector",
-            "is_finite",
-            "is_nan",
-            "sum",
-            "_sum",
-            "is_consistent",
-            "_list_pattern",
-            "approx",
-            "idx",
-            "posmod",
-        ],
-        builtins: &[
-            "len", "is_list", "is_undef", "is_num", "cross", "is_bool", "abs", "is_string",
-        ],
+        deps: &["is_vnf", "is_vector", "is_finite", "is_nan", "sum", "_sum", "is_consistent", "_list_pattern", "approx"],
+        builtins: &["len", "is_list", "is_undef", "is_num", "cross", "is_bool", "abs"],
         func: generated::_vnf_centroid,
     },
     // ── O.7, band 5 batch 2 (linalg/affine/geometry/lists/paths.scad) ───────────────────────────────────
@@ -1572,23 +1526,8 @@ pub(super) static REGISTRY: &[Entry] = &[
     wiskers==[] ? undef : [wiskers[0]];",
         consts: &[],
         consts_v: &[],
-        deps: &[
-            "_tri_class",
-            "_none_inside",
-            "_is_at_left",
-            "select",
-            "idx",
-            "posmod",
-            "approx",
-            "is_finite",
-            "is_nan",
-            "is_vector",
-            "is_range",
-        ],
-        builtins: &[
-            "len", "norm", "cross", "abs", "sign", "is_list", "is_string", "is_num", "is_undef",
-            "is_bool",
-        ],
+        deps: &["_tri_class", "_none_inside", "_is_at_left", "select", "idx", "is_finite", "is_nan", "is_vector", "is_range"],
+        builtins: &["len", "norm", "cross", "abs", "sign", "is_list", "is_string", "is_num", "is_undef"],
         func: generated::_get_ear,
     },
     Entry {
@@ -1777,35 +1716,8 @@ pub(super) static REGISTRY: &[Entry] = &[
     ];",
         consts: &[],
         consts_v: &[],
-        deps: &[
-            "is_vector",
-            "is_finite",
-            "is_nan",
-            "unit",
-            "point3d",
-            "point2d",
-            "approx",
-            "idx",
-            "posmod",
-            "affine3d_identity",
-            "ident",
-            "affine3d_zrot",
-            "v_theta",
-            "vector_axis",
-            "v_abs",
-            "vector_angle",
-            "same_shape",
-            "is_def",
-            "is_matrix",
-            "is_consistent",
-            "_list_pattern",
-            "constrain",
-            "all_nonzero",
-        ],
-        builtins: &[
-            "is_list", "len", "is_undef", "is_num", "norm", "abs", "cross", "atan2", "sin",
-            "cos", "acos", "min", "max", "is_bool", "is_string",
-        ],
+        deps: &["is_vector", "is_finite", "is_nan", "unit", "point3d", "point2d", "approx", "affine3d_identity", "ident", "affine3d_zrot", "v_theta", "vector_axis", "v_abs", "vector_angle", "same_shape", "is_def", "is_matrix", "is_consistent", "_list_pattern", "constrain"],
+        builtins: &["is_list", "len", "is_undef", "is_num", "norm", "abs", "cross", "atan2", "sin", "cos", "acos", "min", "max", "is_bool"],
         func: generated::affine3d_rot_from_to,
     },
     // ── O.9 tree 2a (transforms.scad) ────────────────────────────────────────────────────────────────────

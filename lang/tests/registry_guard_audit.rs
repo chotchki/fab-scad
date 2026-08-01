@@ -34,6 +34,41 @@ use fab_lib::library::Library;
 /// does (select drops `all_nonzero` AND therefore `all_nonzero`'s own `abs`). The direction
 /// matters: an over-approximation left in place would only make a guard CHECK MORE, never
 /// answer wrong; a name missing from DERIVED is a red test and an analyzer bug.
+/// Names a hand list deliberately omits because the native DISPATCHES to them rather than inlining
+/// them — AR.26.4.4's cycle routing, and a genuinely different KIND of exclusion from
+/// [`pruned_by_author`].
+///
+/// Every arm there prunes a name the author proved UNREACHABLE. These are very much reached, and
+/// still must not be deps: a dep pin exists to guard BAKED semantics, and a cycle-internal call
+/// bakes nothing. The emitter drops each subject's cycle group from its sibling table, so those
+/// calls compile to `fx.call_named` and resolve against whatever the running program defines —
+/// which is what the interpreter does, leaving no second implementation for a fingerprint to prove
+/// equal. Same argument AR.27 made for an out-of-batch callee; different cause.
+///
+/// The names here are the CYCLE-MATES only. Pruning a name prunes its whole subtree, which is how
+/// one entry covers the builtins that used to ride in underneath — exactly the closure the emitter
+/// computes.
+///
+/// TWO GROUPS in fab-lang's own batch: `approx` ↔ `idx` ↔ `posmod` (BOSL2's documented 3-cycle) and
+/// `is_vector` ↔ `all_nonzero`. The rest of the list is entries that merely CALL into one of those
+/// groups and therefore stopped inheriting what the group used to contribute.
+fn routed_through_dispatch(entry: &str) -> &'static [&'static str] {
+    match entry {
+        // The `approx` ↔ `idx` ↔ `posmod` group: its three members, plus `_get_ear`, which calls
+        // in and loses `approx` outright. Merged because the SETS are equal, not the reasons.
+        "approx" | "idx" | "posmod" | "_get_ear" => &["approx", "idx", "posmod"],
+        // The `is_vector` ↔ `all_nonzero` group, and the three entries that call into it. Same:
+        // one member and three callers, one set.
+        "is_vector" | "is_vnf" | "determinant" | "constrain" => &["all_nonzero"],
+        "all_nonzero" => &["is_vector"],
+        // `_vnf_centroid` still INLINES `approx` (and so still guards its `abs`/`is_bool`); it only
+        // stops inheriting what `approx` itself used to reach.
+        "_vnf_centroid" => &["idx", "posmod"],
+        "affine3d_rot_from_to" => &["all_nonzero", "idx", "posmod"],
+        _ => &[],
+    }
+}
+
 fn pruned_by_author(entry: &str) -> &'static [&'static str] {
     match entry {
         // ── AR.27: the OUTWARD call, and it is a different KIND of exclusion ─────────────────
@@ -125,7 +160,13 @@ fn derived_guards_contain_every_hand_list() {
     let (subjects, pins) = fab_lang::bootstrap_all();
     let mut deltas: Vec<String> = Vec::new();
     for entry in &subjects {
-        let allow = pruned_by_author(entry.name);
+        // Two exclusion reasons, kept SEPARATE in their sources and unioned only here: one prunes
+        // what the author proved unreachable, the other what the emitter routes through dispatch.
+        let allow: Vec<&str> = pruned_by_author(entry.name)
+            .iter()
+            .chain(routed_through_dispatch(entry.name))
+            .copied()
+            .collect();
         let resolve = |name: &str| -> Option<&'static str> {
             if allow.contains(&name) {
                 return None; // author-pruned: this entry never reaches it, subtree and all

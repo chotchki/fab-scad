@@ -18,7 +18,7 @@
     reason = "AR.5: the AR.6 codegen is the production consumer; the registry comparison test exercises it today"
 )]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use fab_lang::{Arg, Expr, ExprKind, Parameter, Stmt, StmtKind, parse};
@@ -2390,13 +2390,32 @@ type GuardClosures<'a> = std::collections::BTreeMap<&'a str, (Vec<String>, Vec<S
 fn guard_closures<'a>(subjects: &'a [Subject<'a>]) -> Result<GuardClosures<'a>, String> {
     use std::collections::{BTreeMap, BTreeSet};
     let in_batch: BTreeSet<&str> = subjects.iter().map(|s| s.name).collect();
+    // AR.26.4.4 — the cycle groups, so a CYCLE-MATE is excluded here exactly as it is from the
+    // sibling table. This is load-bearing, not tidiness: `deps` means "names whose semantics this
+    // native INLINED", and a cycle-mate is no longer inlined — the call dispatches. Pinning it
+    // would gate the native on a fingerprint it has no reason to care about, and (worse) claim an
+    // inlining that did not happen. Same reason AR.27 added the `pruned_by_author` arm for
+    // out-of-batch callees; this is the same exclusion with a different cause.
+    let analyzed: Vec<BTreeSet<String>> = subjects
+        .iter()
+        .map(|s| analyze_function(s.source).map(|a| a.deps))
+        .collect::<Result<_, _>>()?;
+    let graph: Vec<(&str, &BTreeSet<String>)> = subjects
+        .iter()
+        .zip(&analyzed)
+        .map(|(s, d)| (s.name, d))
+        .collect();
+    let cycles = cycle_groups(&graph);
+
     let mut one_hop: BTreeMap<&str, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
     for s in subjects {
         let a = analyze_function(s.source)?;
+        let mates = cycles.get(s.name);
         let deps = a
             .deps
             .into_iter()
             .filter(|d| in_batch.contains(d.as_str()))
+            .filter(|d| !mates.is_some_and(|m| m.contains(d.as_str())))
             .collect();
         one_hop.insert(s.name, (deps, a.builtins));
     }
@@ -2404,9 +2423,12 @@ fn guard_closures<'a>(subjects: &'a [Subject<'a>]) -> Result<GuardClosures<'a>, 
         one_hop.iter().map(|(k, (d, _))| (*k, d.clone())).collect();
     let mut builtins: BTreeMap<&str, BTreeSet<String>> =
         one_hop.iter().map(|(k, (_, b))| (*k, b.clone())).collect();
-    // Fixpoint rather than a topological walk: the dep graph has real CYCLES (approx <-> idx <->
-    // posmod is a 3-cycle in BOSL2), so no dependency order exists to resolve in. Bounded by the
-    // batch size, which is the longest a chain can be.
+    // Fixpoint rather than a topological walk. It was REQUIRED when the dep graph had real cycles
+    // (`approx` <-> `idx` <-> `posmod` is a 3-cycle in BOSL2) and there was no dependency order to
+    // resolve in; AR.26.4.4 excludes cycle-mates above, so what is left is a DAG and a topological
+    // walk would now do. Kept because it is correct either way and cheap at this size, and because
+    // the fixpoint cannot be wrong about a graph shape it does not assume. Bounded by the batch
+    // size, which is the longest a chain can be.
     for _ in 0..=subjects.len() {
         let (dsnap, bsnap) = (deps.clone(), builtins.clone());
         let mut changed = false;
@@ -2470,6 +2492,118 @@ pub struct FunctionBand<'a> {
     pub rounds: usize,
 }
 
+/// Which names sit in a CYCLE of the static call graph, mapped to their whole cycle group.
+///
+/// AR.26.4.4. A generated native calls an in-batch sibling with a plain Rust call, so the emitted
+/// call graph is a host-stack depth profile — and a CYCLE in it is unbounded depth, the exact class
+/// the interpreter designed out with its explicit stack. A DAG is not: its height is a build-time
+/// constant, which is a fact you can assert rather than a counter you have to tune.
+///
+/// Tarjan's SCCs, so the answer is the whole mutually-recursive GROUP rather than whichever node a
+/// DFS happened to close the loop on. An edge whose endpoints share a group is an edge that can
+/// participate in a cycle; every other edge stays a static call and costs nothing.
+///
+/// Self-loops count: a directly recursive function is a one-member group.
+fn cycle_groups<'a>(
+    live: &[(&'a str, &'a BTreeSet<String>)],
+) -> BTreeMap<&'a str, BTreeSet<&'a str>> {
+    let index_of: BTreeMap<&str, usize> = live
+        .iter()
+        .enumerate()
+        .map(|(i, (n, _))| (*n, i))
+        .collect();
+    let succ: Vec<Vec<usize>> = live
+        .iter()
+        .map(|(_, deps)| {
+            deps.iter()
+                .filter_map(|d| index_of.get(d.as_str()).copied())
+                .collect()
+        })
+        .collect();
+
+    // Tarjan, ITERATIVE. The recursive form's depth is the graph's, and this graph is the one thing
+    // in the build that is allowed to be deep — recursing over it to prove it does not recurse
+    // would be a joke with a stack overflow for a punchline.
+    let n = live.len();
+    let (mut index, mut low, mut on_stack) = (vec![usize::MAX; n], vec![0usize; n], vec![false; n]);
+    let mut stack: Vec<usize> = Vec::new();
+    let mut next = 0usize;
+    let mut groups: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for root in 0..n {
+        if index[root] != usize::MAX {
+            continue;
+        }
+        // (node, next successor to visit)
+        let mut work: Vec<(usize, usize)> = vec![(root, 0)];
+        while let Some(&mut (v, ref mut pos)) = work.last_mut() {
+            if *pos == 0 {
+                index[v] = next;
+                low[v] = next;
+                next += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+            if *pos < succ[v].len() {
+                let w = succ[v][*pos];
+                *pos += 1;
+                if index[w] == usize::MAX {
+                    work.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(parent, _)) = work.last() {
+                low[parent] = low[parent].min(low[v]);
+            }
+            if low[v] == index[v] {
+                let mut scc: Vec<usize> = Vec::new();
+                while let Some(w) = stack.pop() {
+                    on_stack[w] = false;
+                    scc.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                // A one-member SCC is only a cycle if it points at ITSELF.
+                let cyclic = scc.len() > 1 || succ[v].contains(&v);
+                if cyclic {
+                    let names: BTreeSet<&str> = scc.iter().map(|&i| live[i].0).collect();
+                    for &i in &scc {
+                        groups.insert(live[i].0, names.clone());
+                    }
+                }
+            }
+        }
+    }
+    groups
+}
+
+/// The sibling table `name` may compile STATIC Rust calls against: the whole batch, minus its own
+/// cycle group.
+///
+/// AR.26.4.4, and the ONE definition of the rule — `function_band` probes with it and
+/// `generate_batch` emits with it, and a batch whose two halves disagreed about who is a sibling
+/// would emit calls to functions that are not there. `Cow` because the overwhelming majority of
+/// subjects are in no cycle at all and must not pay a 1260-element clone to find that out.
+fn table_for<'s>(
+    name: &str,
+    siblings: &'s [Sibling],
+    cycles: &BTreeMap<&str, BTreeSet<&str>>,
+) -> std::borrow::Cow<'s, [Sibling]> {
+    match cycles.get(name) {
+        Some(mates) => std::borrow::Cow::Owned(
+            siblings
+                .iter()
+                .filter(|s| !mates.contains(s.name.as_str()))
+                .cloned()
+                .collect(),
+        ),
+        None => std::borrow::Cow::Borrowed(siblings),
+    }
+}
+
 /// THE FIXPOINT (AR.26.2): probe every function, DROP the decliners, REBUILD the sibling table from
 /// the survivors only, repeat until nothing more falls out.
 ///
@@ -2502,6 +2636,18 @@ pub fn function_band<'a>(
         .map(|f| bake_reads(&f.source, lib, &folded).unwrap_or_default())
         .collect();
 
+    // AR.26.4.4 — the USER-FUNCTION names each reference reaches, analyzed once. A function's deps
+    // are a property of its source, not of who else survived, so this is loop-invariant; only which
+    // of them are LIVE changes per round.
+    let deps: Vec<BTreeSet<String>> = fns
+        .iter()
+        .map(|f| {
+            analyze_function(&f.source)
+                .map(|a| a.deps)
+                .unwrap_or_default()
+        })
+        .collect();
+
     let mut live: Vec<bool> = vec![true; fns.len()];
     let mut rounds = 0_usize;
     let mut reasons: Vec<Option<String>> = vec![None; fns.len()];
@@ -2527,12 +2673,29 @@ pub fn function_band<'a>(
                 }
             }
         }
+        // AR.26.4.4 — the cycles in THIS round's live graph. Recomputed per round because dropping a
+        // function can break a cycle (or, by dropping a bridge, leave one intact and orphan the rest).
+        let live_graph: Vec<(&str, &BTreeSet<String>)> = fns
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| live[*i])
+            .map(|(i, f)| (f.name.as_str(), &deps[i]))
+            .collect();
+        let cycles = cycle_groups(&live_graph);
+
         let mut next = live.clone();
         for (i, f) in fns.iter().enumerate() {
             if !live[i] {
                 continue;
             }
-            if let Err(e) = generate_native(&f.source, &baked[i], &siblings) {
+            // A CYCLE-MATE IS NOT A SIBLING. Dropping it from this subject's table is the whole
+            // mechanism: AR.27 already routes a call to a name the table does not hold through
+            // `fx.call_named`, which lands in the LIVE evaluator with natives suppressed — one
+            // machine, one explicit stack, the AR.24 rule that `call_named_outward` already states
+            // in its own comment. So breaking the back-edges needs no new emission at all, only a
+            // smaller table, and the DAG keeps its plain Rust calls.
+            let table = table_for(&f.name, &siblings, &cycles);
+            if let Err(e) = generate_native(&f.source, &baked[i], &table) {
                 next[i] = false;
                 reasons[i] = Some(e);
             }
@@ -2640,13 +2803,26 @@ pub struct Subject<'a> {
 /// outside the emitter's subset — declines LOUDLY with the construct named, because a partial native
 /// would be a wrong native.
 pub fn generate_batch(subjects: &[Subject<'_>], declared: &[&str]) -> Result<String, String> {
-    // The sibling table FIRST, whole batch, self included: mutual recursion (approx ↔ idx ↔
-    // posmod is a real 3-cycle) forward-references freely in Rust, and named sibling arguments
-    // bind against these declared param lists at compile time.
+    // The sibling table FIRST, whole batch: a static call forward-references freely in Rust, and
+    // named sibling arguments bind against these declared param lists at compile time.
     let mut siblings: Vec<Sibling> = Vec::new();
     for subject in subjects {
         siblings.push(sibling_of(subject)?);
     }
+    // AR.26.4.4 — and then each subject compiles against the batch MINUS its own cycle group, so
+    // the static call graph is a DAG and its height is a build-time constant. Mutual recursion
+    // (`approx` ↔ `idx` ↔ `posmod` is a real 3-cycle) used to forward-reference freely here, which
+    // is precisely the problem: freely in Rust means freely on the HOST STACK.
+    let analyzed: Vec<BTreeSet<String>> = subjects
+        .iter()
+        .map(|s| analyze_function(s.source).map(|a| a.deps))
+        .collect::<Result<_, _>>()?;
+    let graph: Vec<(&str, &BTreeSet<String>)> = subjects
+        .iter()
+        .zip(&analyzed)
+        .map(|(s, d)| (s.name, d))
+        .collect();
+    let cycles = cycle_groups(&graph);
     // The AR.10 fallback program: every baked constant (deduped, conflicts LOUD) followed by the
     // verbatim references — one interpretable island whose bindings equal the bakes.
     let mut fallback_consts: std::collections::BTreeMap<String, String> =
@@ -2668,7 +2844,8 @@ pub fn generate_batch(subjects: &[Subject<'_>], declared: &[&str]) -> Result<Str
         fallback_refs.push_str(subject.source);
         fallback_refs.push('\n');
 
-        fns.push_str(&generate_native(subject.source, &subject.baked, &siblings)?);
+        let table = table_for(subject.name, &siblings, &cycles);
+        fns.push_str(&generate_native(subject.source, &subject.baked, &table)?);
         fns.push('\n');
     }
     let mut header = String::from(
@@ -3823,16 +4000,30 @@ mod tests {
         let band = super::function_band(&lib).expect("band computes");
         let in_batch: BTreeSet<&str> = band.subjects.iter().map(|s| s.name).collect();
 
-        // The edges a native turns into a STATIC Rust call: user-function deps that are also in the
-        // batch, which is exactly the filter `guard_closures` applies. An OVERESTIMATE, deliberately
-        // — AR.27 routes some of these through dispatch instead (a `$`-argument, an AN.10 shadow) —
-        // and overestimating is the safe direction for a bound on stack depth.
+        // The edges a native turns into a STATIC Rust call: in-batch user-function deps, minus the
+        // subject's own cycle group, which is exactly what `table_for` hands the emitter. An
+        // OVERESTIMATE otherwise — AR.27 routes some of the rest through dispatch too (a
+        // `$`-argument, an AN.10 shadow) — and overestimating is the safe direction for a bound on
+        // stack depth.
+        let analyzed: Vec<BTreeSet<String>> = band
+            .subjects
+            .iter()
+            .map(|s| super::analyze_function(s.source).expect("subject analyzes").deps)
+            .collect();
+        let graph: Vec<(&str, &BTreeSet<String>)> = band
+            .subjects
+            .iter()
+            .zip(&analyzed)
+            .map(|(s, d)| (s.name, d))
+            .collect();
+        let cycles = super::cycle_groups(&graph);
+
         let mut edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-        for s in &band.subjects {
-            let a = super::analyze_function(s.source).expect("subject analyzes");
-            let out = a
-                .deps
+        for (s, deps) in band.subjects.iter().zip(&analyzed) {
+            let mates = cycles.get(s.name);
+            let out = deps
                 .iter()
+                .filter(|d| !mates.is_some_and(|m| m.contains(d.as_str())))
                 .filter_map(|d| in_batch.get(d.as_str()).copied())
                 .collect();
             edges.insert(s.name, out);
@@ -3888,7 +4079,20 @@ mod tests {
             edges.values().map(BTreeSet::len).sum::<usize>()
         );
         println!("DAG height {} (tallest: {})", tallest.1, tallest.0);
-        println!("names on a cycle: {} {:?}", cyclic.len(), cyclic);
+        println!(
+            "names in a cycle group (ROUTED THROUGH DISPATCH): {} {:?}",
+            cycles.len(),
+            cycles.keys().collect::<Vec<_>>()
+        );
+
+        // THE POINT OF THE WHOLE CHANGE: with cycle-mates routed through the evaluator, the static
+        // graph has no back-edges left. `cyclic` here is what the height walk FOUND, so an empty set
+        // is the property under test rather than a restatement of the filter above.
+        assert!(
+            cyclic.is_empty(),
+            "the static call graph still has cycles after routing: {cyclic:?} — every one is \
+             unbounded host-stack recursion the depth counter can only notice after the fact"
+        );
 
         // THE HEIGHT IS A CEILING, not a target. Measured at ~28 KiB of release stack per level on
         // `window_light_blocker.scad`, so this number times that is the compiled tier's static

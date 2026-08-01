@@ -13,13 +13,25 @@ use std::rc::Rc;
 
 use crate::eval::value::Value;
 
-/// The native tier's recursion allowance. Frames here are HEAVY, and the AR.17.2 mint band made
-/// the worst case heavier still: a native→`call_value`→nested-machine→native LADDER (the
-/// BOSL2-idiomatic recursive fold) measured ~130 KiB of DEBUG stack per level — the skeptic pass
-/// reproduced a SIGABRT stack overflow at 64 levels on the 8 MiB default before the guard could
-/// decline. 32 bounds the debug worst case near 4 MiB with margin; everything past it runs on
-/// the interpreter's explicit stack (AR.24: the LIVE evaluator, one machine), so the budget is
-/// a speed knob, never an answer.
+/// The native tier's recursion allowance, and since AR.26.4.4 a BACKSTOP rather than the mechanism.
+///
+/// Frames here are HEAVY: a native→`call_value`→nested-machine→native ladder (the BOSL2-idiomatic
+/// recursive fold) measured ~200 KiB of DEBUG stack per level and ~28 KiB in release, on
+/// `window_light_blocker.scad`. A counter denominated in LEVELS cannot bound that on its own — what
+/// overflows is bytes, the per-level cost is a property of whatever the emitter wrote, and by the
+/// time the counter fires its frames are already spent.
+///
+/// WHAT ACTUALLY BOUNDS IT NOW is the shape of the emitted call graph. The emitter drops each
+/// subject's CYCLE GROUP from its sibling table, so a cycle-internal call compiles to
+/// `fx.call_named` and lands in the live evaluator's explicit stack instead of recursing here; what
+/// is left is a DAG whose height is a build-time constant, asserted at 22-of-24 by fab-lib's
+/// `the_static_call_graph_is_measured`. So the static worst case is known before the program runs.
+///
+/// This budget still guards what the DAG cannot: re-entry through a CLOSURE (`call_value`), where
+/// the ladder alternates tiers and its depth follows the user's data. 32 sits above the measured DAG
+/// height — below it and legitimate deep chains would decline for no reason — and everything past it
+/// runs on the interpreter (AR.24: the LIVE evaluator, one machine), so it stays a speed knob, never
+/// an answer.
 pub(super) const MAX_NATIVE_DEPTH: u32 = 32;
 
 /// One parsed island per distinct `FALLBACK_SOURCES` identity — keyed by the `&'static str`'s

@@ -747,8 +747,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function approx(a,b,eps=_EPSILON) =\n    a == b? is_bool(a) == is_bool(b) :\n    is_num(a) && is_num(b)? abs(a-b) <= eps :\n    is_list(a) && is_list(b) && len(a) == len(b)? (\n        [] == [\n            for (i=idx(a))\n            let(aa=a[i], bb=b[i])\n            if(\n                is_num(aa) && is_num(bb)? abs(aa-bb) > eps :\n                !approx(aa,bb,eps=eps)\n            ) 1\n        ]\n    ) : false;",
         consts: &[],
         consts_v: &[("_EPSILON", __bake__EPSILON)],
-        deps: &["idx", "is_finite", "is_nan", "posmod"],
-        builtins: &["abs", "is_bool", "is_list", "is_num", "is_string", "len"],
+        deps: &[],
+        builtins: &["abs", "is_bool", "is_list", "is_num", "len"],
         func: approx,
     },
     rt::Entry {
@@ -756,8 +756,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function posmod(x,m) =\n    assert( is_finite(x) && is_finite(m) && !approx(m,0) , \"\\nInput must be finite numbers. The divisor cannot be zero.\")\n    (x%m+m)%m;",
         consts: &[],
         consts_v: &[],
-        deps: &["approx", "idx", "is_finite", "is_nan"],
-        builtins: &["abs", "is_bool", "is_list", "is_num", "is_string", "len"],
+        deps: &["is_finite", "is_nan"],
+        builtins: &["is_num"],
         func: posmod,
     },
     rt::Entry {
@@ -765,8 +765,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function idx(list, s=0, e=-1, step=1) =\n    assert(is_list(list)||is_string(list), \"Invalid input.\" )\n    let( ll = len(list) )\n    ll == 0 ? [0:1:ll-1] :\n    let(\n        _s = posmod(s,ll),\n        _e = posmod(e,ll)\n    ) [_s : step : _e];",
         consts: &[],
         consts_v: &[],
-        deps: &["approx", "is_finite", "is_nan", "posmod"],
-        builtins: &["abs", "is_bool", "is_list", "is_num", "is_string", "len"],
+        deps: &[],
+        builtins: &["is_list", "is_string", "len"],
         func: idx,
     },
     rt::Entry {
@@ -963,8 +963,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function determinant(M) =\n    assert(is_list(M), \"Input must be a square matrix.\" )  \n    len(M)==1? M[0][0] :\n    len(M)==2? det2(M) :\n    len(M)==3? det3(M) :\n    len(M)==4? det4(M) :\n    assert(is_matrix(M, square=true), \"Input must be a square matrix.\" )    \n    sum(\n        [for (col=[0:1:len(M)-1])\n            ((col%2==0)? 1 : -1) *\n                M[col][0] *\n                determinant(\n                    [for (r=[1:1:len(M)-1])\n                        [for (c=[0:1:len(M)-1])\n                            if (c!=col) M[c][r]\n                        ]\n                    ]\n                )\n        ]\n    );",
         consts: &[],
         consts_v: &[],
-        deps: &["_list_pattern", "_sum", "all_nonzero", "det2", "det3", "det4", "is_consistent", "is_def", "is_finite", "is_matrix", "is_nan", "is_vector", "sum"],
-        builtins: &["abs", "cross", "is_list", "is_num", "is_undef", "len", "norm"],
+        deps: &["_list_pattern", "_sum", "det2", "det3", "det4", "is_consistent", "is_def", "is_finite", "is_matrix", "is_nan", "is_vector", "sum"],
+        builtins: &["cross", "is_list", "is_num", "is_undef", "len", "norm"],
         func: determinant,
     },
     rt::Entry {
@@ -972,8 +972,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function constrain(v, minval, maxval) =\n    is_num(v) ? max(minval, min(v, maxval))\n    : is_vector(v) ? [for(f=v) max(minval, min(f, maxval))]\n    : is_matrix(v) ? let( // for a matrix, this should be more efficient than indexing\n        mflat = flatten(v),\n        clamped = [ for(f=mflat) max(minval, min(f, maxval)) ] \n    ) list_to_matrix(clamped, len(v[0]), 0)\n    : is_list(v) ? [ for(vec=v) [ for(f=vec) max(minval, min(f, maxval)) ] ]\n    : assert(false, \"\\nIn constrain(), v must be a number, 1D vector, rectangular matrix, or list of vectors.\");",
         consts: &[],
         consts_v: &[],
-        deps: &["_list_pattern", "all_nonzero", "default", "flatten", "is_consistent", "is_finite", "is_matrix", "is_nan", "is_vector", "list_to_matrix"],
-        builtins: &["abs", "is_list", "is_num", "is_undef", "len", "max", "min", "norm"],
+        deps: &["_list_pattern", "default", "flatten", "is_consistent", "is_finite", "is_matrix", "is_nan", "is_vector", "list_to_matrix"],
+        builtins: &["is_list", "is_num", "is_undef", "len", "max", "min", "norm"],
         func: constrain,
     },
     rt::Entry {
@@ -981,8 +981,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function vector_angle(v1,v2,v3) =\n    assert( ( is_undef(v3) && ( is_undef(v2) || same_shape(v1,v2) ) )\n            || is_consistent([v1,v2,v3]) ,\n            \"\\nBad arguments.\")\n    assert( is_vector(v1) || is_consistent(v1), \"\\nBad arguments.\")\n    let( vecs = ! is_undef(v3) ? [v1-v2,v3-v2] :\n                ! is_undef(v2) ? [v1,v2] :\n                len(v1) == 3   ? [v1[0]-v1[1], v1[2]-v1[1]]\n                               : v1\n    )\n    assert(is_vector(vecs[0],2) || is_vector(vecs[0],3), \"\\nBad arguments.\")\n    let(\n        norm0 = norm(vecs[0]),\n        norm1 = norm(vecs[1])\n    )\n    assert(norm0>0 && norm1>0, \"\\nZero length vector.\")\n    // NOTE: constrain() corrects crazy FP rounding errors that exceed acos()'s domain.\n    acos(constrain((vecs[0]*vecs[1])/(norm0*norm1), -1, 1));",
         consts: &[],
         consts_v: &[],
-        deps: &["_list_pattern", "all_nonzero", "constrain", "default", "flatten", "is_consistent", "is_def", "is_finite", "is_matrix", "is_nan", "is_vector", "list_to_matrix", "same_shape"],
-        builtins: &["abs", "acos", "is_list", "is_num", "is_undef", "len", "max", "min", "norm"],
+        deps: &["_list_pattern", "constrain", "default", "flatten", "is_consistent", "is_def", "is_finite", "is_matrix", "is_nan", "is_vector", "list_to_matrix", "same_shape"],
+        builtins: &["acos", "is_list", "is_num", "is_undef", "len", "max", "min", "norm"],
         func: vector_angle,
     },
     rt::Entry {
@@ -990,8 +990,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function affine3d_rot_from_to(from, to) =\n    assert(is_vector(from))\n    assert(is_vector(to))\n    assert(len(from)==len(to))\n    let(\n        from = unit(point3d(from)),\n        to = unit(point3d(to))\n    ) approx(from,to)? affine3d_identity() :\n    from.z==0 && to.z==0 ?  affine3d_zrot(v_theta(point2d(to)) - v_theta(point2d(from)))\n    :\n    let(\n        u = vector_axis(from,to),\n        ang = vector_angle(from,to),\n        c = cos(ang),\n        c2 = 1-c,\n        s = sin(ang)\n    ) [\n        [u.x*u.x*c2+c    , u.x*u.y*c2-u.z*s, u.x*u.z*c2+u.y*s, 0],\n        [u.y*u.x*c2+u.z*s, u.y*u.y*c2+c    , u.y*u.z*c2-u.x*s, 0],\n        [u.z*u.x*c2-u.y*s, u.z*u.y*c2+u.x*s, u.z*u.z*c2+c    , 0],\n        [               0,                0,                0, 1]\n    ];",
         consts: &[],
         consts_v: &[],
-        deps: &["_list_pattern", "affine3d_identity", "affine3d_zrot", "all_nonzero", "approx", "constrain", "default", "flatten", "ident", "idx", "is_consistent", "is_def", "is_finite", "is_matrix", "is_nan", "is_vector", "list_to_matrix", "point2d", "point3d", "posmod", "same_shape", "unit", "v_abs", "v_theta", "vector_angle", "vector_axis"],
-        builtins: &["abs", "acos", "atan2", "cos", "cross", "is_bool", "is_list", "is_num", "is_string", "is_undef", "len", "max", "min", "norm", "sin"],
+        deps: &["_list_pattern", "affine3d_identity", "affine3d_zrot", "approx", "constrain", "default", "flatten", "ident", "is_consistent", "is_def", "is_finite", "is_matrix", "is_nan", "is_vector", "list_to_matrix", "point2d", "point3d", "same_shape", "unit", "v_abs", "v_theta", "vector_angle", "vector_axis"],
+        builtins: &["abs", "acos", "atan2", "cos", "cross", "is_bool", "is_list", "is_num", "is_undef", "len", "max", "min", "norm", "sin"],
         func: affine3d_rot_from_to,
     },
     rt::Entry {
@@ -1188,8 +1188,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON) =\n    is_list(v) && len(v)>0 && []==[for(vi=v) if(!is_finite(vi)) 0]\n    && (is_undef(length) || (assert(is_num(length))len(v)==length))\n    && (is_undef(zero) || ((norm(v) >= eps) == !zero))\n    && (!all_nonzero || all_nonzero(v)) ;",
         consts: &[],
         consts_v: &[("_EPSILON", __bake__EPSILON)],
-        deps: &["all_nonzero", "is_finite", "is_nan"],
-        builtins: &["abs", "is_list", "is_num", "is_undef", "len", "norm"],
+        deps: &["is_finite", "is_nan"],
+        builtins: &["is_list", "is_num", "is_undef", "len", "norm"],
         func: is_vector,
     },
     rt::Entry {
@@ -1197,8 +1197,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function all_nonzero(x, eps=_EPSILON) =\n    is_finite(x)? abs(x)>eps :\n    is_vector(x) && [for (xx=x) if(abs(xx)<eps) 1] == [];",
         consts: &[],
         consts_v: &[("_EPSILON", __bake__EPSILON)],
-        deps: &["is_finite", "is_nan", "is_vector"],
-        builtins: &["abs", "is_list", "is_num", "is_undef", "len", "norm"],
+        deps: &["is_finite", "is_nan"],
+        builtins: &["abs", "is_num"],
         func: all_nonzero,
     },
     rt::Entry {
@@ -1206,8 +1206,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function is_matrix(A,m,n,square=false) =\n   is_list(A)\n   && (( is_undef(m) && len(A) ) || len(A)==m)\n   && (!square || len(A) == len(A[0]))\n   && is_vector(A[0],n)\n   && is_consistent(A);",
         consts: &[],
         consts_v: &[],
-        deps: &["_list_pattern", "all_nonzero", "is_consistent", "is_finite", "is_nan", "is_vector"],
-        builtins: &["abs", "is_list", "is_num", "is_undef", "len", "norm"],
+        deps: &["_list_pattern", "is_consistent", "is_finite", "is_nan", "is_vector"],
+        builtins: &["is_list", "is_num", "is_undef", "len", "norm"],
         func: is_matrix,
     },
     rt::Entry {
@@ -1215,8 +1215,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function sum(v, dflt=0) =\n    v==[]? dflt :\n    assert(is_consistent(v), \"\\nInput to sum is non-numeric or inconsistent.\")\n    is_finite(v[0]) || is_vector(v[0]) ? [for(i=v) 1]*v :\n    _sum(v,v[0]*0);",
         consts: &[],
         consts_v: &[],
-        deps: &["_list_pattern", "_sum", "all_nonzero", "is_consistent", "is_finite", "is_nan", "is_vector"],
-        builtins: &["abs", "is_list", "is_num", "is_undef", "len", "norm"],
+        deps: &["_list_pattern", "_sum", "is_consistent", "is_finite", "is_nan", "is_vector"],
+        builtins: &["is_list", "is_num", "is_undef", "len", "norm"],
         func: sum,
     },
     rt::Entry {
@@ -1224,8 +1224,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function unit(v, error=[[[\"ASSERT\"]]]) =\n    assert(is_vector(v), \"\\nInvalid vector.\")\n    norm(v)<_EPSILON? (error==[[[\"ASSERT\"]]]? assert(norm(v)>=_EPSILON,\"\\nCannot normalize a zero vector.\") : error) :\n    v/norm(v);",
         consts: &[],
         consts_v: &[("_EPSILON", __bake__EPSILON)],
-        deps: &["all_nonzero", "is_finite", "is_nan", "is_vector"],
-        builtins: &["abs", "is_list", "is_num", "is_undef", "len", "norm"],
+        deps: &["is_finite", "is_nan", "is_vector"],
+        builtins: &["is_list", "is_num", "is_undef", "len", "norm"],
         func: unit,
     },
     rt::Entry {
@@ -1233,8 +1233,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function _apply(transform,points) =\n    assert(is_matrix(transform),\"Invalid transformation matrix\")\n    assert(is_matrix(points),\"Invalid points list\")\n    let(\n        tdim = len(transform[0])-1,\n        datadim = len(points[0])\n    )\n    assert(len(transform)==tdim || len(transform)-1==tdim, \"transform matrix height not compatible with width\")\n    assert(datadim==2 || datadim==3,\"Data must be 2D or 3D\")\n    let(\n        scale = len(transform)==tdim ? 1 : transform[tdim][tdim],\n        matrix = [for(i=[0:1:tdim]) [for(j=[0:1:datadim-1]) transform[j][i]]] / scale\n    )\n    tdim==datadim ? [for(p=points) concat(p,1)] * matrix\n  : tdim == 3 && datadim == 2 ?\n            assert(is_2d_transform(transform), str(\"Transforms is 3D and acts on Z, but points are 2D\"))\n            [for(p=points) concat(p,[0,1])]*matrix\n  : assert(false, str(\"Unsupported combination: \",len(transform),\"x\",len(transform[0]),\" transform (dimension \",tdim,\n                          \"), data of dimension \",datadim));",
         consts: &[],
         consts_v: &[],
-        deps: &["_list_pattern", "all_nonzero", "is_2d_transform", "is_consistent", "is_finite", "is_matrix", "is_nan", "is_vector"],
-        builtins: &["abs", "concat", "is_list", "is_num", "is_undef", "len", "norm", "str"],
+        deps: &["_list_pattern", "is_2d_transform", "is_consistent", "is_finite", "is_matrix", "is_nan", "is_vector"],
+        builtins: &["concat", "is_list", "is_num", "is_undef", "len", "norm", "str"],
         func: _apply,
     },
     rt::Entry {
@@ -1242,8 +1242,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function _bt_search(query, r, points, tree) =\n    assert( is_list(tree)\n            && (   ( len(tree)==1 && is_list(tree[0]) )\n                || ( len(tree)==4 && is_num(tree[0]) && is_num(tree[1]) ) ),\n            \"\\nThe tree is invalid.\")\n    len(tree)==1\n    ?   assert( tree[0]==[] || is_vector(tree[0]), \"\\nThe tree is invalid.\" )\n        [for(i=tree[0]) if(norm(points[i]-query)<=r) i ]\n    :   norm(query-points[tree[0]]) > r+tree[1] ? [] :\n        concat(\n            [ if(norm(query-points[tree[0]])<=r) tree[0] ],\n            _bt_search(query, r, points, tree[2]),\n            _bt_search(query, r, points, tree[3]) ) ;",
         consts: &[],
         consts_v: &[],
-        deps: &["all_nonzero", "is_finite", "is_nan", "is_vector"],
-        builtins: &["abs", "concat", "is_list", "is_num", "is_undef", "len", "norm"],
+        deps: &["is_finite", "is_nan", "is_vector"],
+        builtins: &["concat", "is_list", "is_num", "is_undef", "len", "norm"],
         func: _bt_search,
     },
     rt::Entry {
@@ -1251,8 +1251,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function is_path(list, dim=[2,3], fast=false) =\n    fast\n    ?   is_list(list) && is_vector(list[0])\n    :   is_matrix(list)\n        && len(list)>1\n        && len(list[0])>0\n        && (is_undef(dim) || in_list(len(list[0]), force_list(dim)));",
         consts: &[],
         consts_v: &[],
-        deps: &["_list_pattern", "all_nonzero", "force_list", "in_list", "is_consistent", "is_def", "is_finite", "is_matrix", "is_nan", "is_vector"],
-        builtins: &["abs", "is_list", "is_num", "is_undef", "len", "norm", "search"],
+        deps: &["_list_pattern", "force_list", "in_list", "is_consistent", "is_def", "is_finite", "is_matrix", "is_nan", "is_vector"],
+        builtins: &["is_list", "is_num", "is_undef", "len", "norm", "search"],
         func: is_path,
     },
     rt::Entry {
@@ -1260,7 +1260,7 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function v_abs(v) =\n    assert( is_vector(v), \"\\nInvalid vector.\" )\n    [for (x=v) abs(x)];",
         consts: &[],
         consts_v: &[],
-        deps: &["all_nonzero", "is_finite", "is_nan", "is_vector"],
+        deps: &["is_finite", "is_nan", "is_vector"],
         builtins: &["abs", "is_list", "is_num", "is_undef", "len", "norm"],
         func: v_abs,
     },
@@ -1269,8 +1269,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function v_theta(v) =\n    assert( is_vector(v,2) || is_vector(v,3) , \"\\nInvalid vector.\")\n    atan2(v.y,v.x);",
         consts: &[],
         consts_v: &[],
-        deps: &["all_nonzero", "is_finite", "is_nan", "is_vector"],
-        builtins: &["abs", "atan2", "is_list", "is_num", "is_undef", "len", "norm"],
+        deps: &["is_finite", "is_nan", "is_vector"],
+        builtins: &["atan2", "is_list", "is_num", "is_undef", "len", "norm"],
         func: v_theta,
     },
     rt::Entry {
@@ -1278,7 +1278,7 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function vector_axis(v1,v2=undef,v3=undef) =\n    is_vector(v3)\n    ?   assert(is_consistent([v3,v2,v1]), \"\\nBad arguments.\")\n        vector_axis(v1-v2, v3-v2)\n    :   assert( is_undef(v3), \"\\nBad arguments.\")\n        is_undef(v2)\n        ?   assert( is_list(v1), \"\\nBad arguments.\")\n            len(v1) == 2\n            ?   vector_axis(v1[0],v1[1])\n            :   vector_axis(v1[0],v1[1],v1[2])\n        :   assert( is_vector(v1,zero=false) && is_vector(v2,zero=false) && is_consistent([v1,v2])\n                    , \"\\nBad arguments.\")\n            let(\n              eps = 1e-6,\n              w1 = point3d(v1/norm(v1)),\n              w2 = point3d(v2/norm(v2)),\n              w3 = (norm(w1-w2) > eps && norm(w1+w2) > eps) ? w2\n                   : (norm(v_abs(w2)-UP) > eps)? UP\n                   : RIGHT\n            ) unit(cross(w1,w3));",
         consts: &[],
         consts_v: &[("UP", __bake_UP), ("RIGHT", __bake_RIGHT)],
-        deps: &["_list_pattern", "all_nonzero", "is_consistent", "is_finite", "is_nan", "is_vector", "point3d", "unit", "v_abs"],
+        deps: &["_list_pattern", "is_consistent", "is_finite", "is_nan", "is_vector", "point3d", "unit", "v_abs"],
         builtins: &["abs", "cross", "is_list", "is_num", "is_undef", "len", "norm"],
         func: vector_axis,
     },
@@ -1287,8 +1287,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function affine3d_rot_by_axis(u=UP, ang=0) =\n    assert(is_finite(ang))\n    assert(is_vector(u,3))\n    approx(ang,0)? affine3d_identity() :\n    let(\n        u = unit(u),\n        c = cos(ang),\n        c2 = 1-c,\n        s = sin(ang)\n    ) [\n        [u.x*u.x*c2+c    , u.x*u.y*c2-u.z*s, u.x*u.z*c2+u.y*s, 0],\n        [u.y*u.x*c2+u.z*s, u.y*u.y*c2+c    , u.y*u.z*c2-u.x*s, 0],\n        [u.z*u.x*c2-u.y*s, u.z*u.y*c2+u.x*s, u.z*u.z*c2+c    , 0],\n        [               0,                0,                0, 1]\n    ];",
         consts: &[],
         consts_v: &[("UP", __bake_UP)],
-        deps: &["affine3d_identity", "all_nonzero", "approx", "ident", "idx", "is_finite", "is_nan", "is_vector", "posmod", "unit"],
-        builtins: &["abs", "cos", "is_bool", "is_list", "is_num", "is_string", "is_undef", "len", "norm", "sin"],
+        deps: &["affine3d_identity", "approx", "ident", "is_finite", "is_nan", "is_vector", "unit"],
+        builtins: &["abs", "cos", "is_bool", "is_list", "is_num", "is_undef", "len", "norm", "sin"],
         func: affine3d_rot_by_axis,
     },
     rt::Entry {
@@ -1305,8 +1305,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function is_vnf(x) =\n    is_list(x) &&\n    len(x)==2 &&\n    is_list(x[0]) &&\n    is_list(x[1]) &&\n    (x[0]==[] || (len(x[0])>=3 && is_vector(x[0][0],3))) &&\n    (x[1]==[] || is_vector(x[1][0]));",
         consts: &[],
         consts_v: &[],
-        deps: &["all_nonzero", "is_finite", "is_nan", "is_vector"],
-        builtins: &["abs", "is_list", "is_num", "is_undef", "len", "norm"],
+        deps: &["is_finite", "is_nan", "is_vector"],
+        builtins: &["is_list", "is_num", "is_undef", "len", "norm"],
         func: is_vnf,
     },
     rt::Entry {
@@ -1314,8 +1314,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function select(list, start, end) = assert( is_list(list) || is_string(list), \"Invalid list.\") let(l=len(list)) l==0 ? [] : end==undef ? is_num(start) ? list[ (start%l+l)%l ] : assert( start==[] || is_vector(start) || is_range(start), \"Invalid start parameter\") [for (i=start) list[ (i%l+l)%l ] ] : assert(is_finite(start), \"When `end` is given, `start` parameter should be a number.\") assert(is_finite(end), \"Invalid end parameter.\") let( s = (start%l+l)%l, e = (end%l+l)%l ) (s <= e) ? [ for (i = [s:1:e])   list[i] ] : [ for (i = [s:1:l-1]) list[i], for (i = [0:1:e])   list[i] ] ;",
         consts: &[],
         consts_v: &[],
-        deps: &["all_nonzero", "is_finite", "is_nan", "is_range", "is_vector"],
-        builtins: &["abs", "is_list", "is_num", "is_string", "is_undef", "len", "norm"],
+        deps: &["is_finite", "is_nan", "is_range", "is_vector"],
+        builtins: &["is_list", "is_num", "is_string", "is_undef", "len", "norm"],
         func: select,
     },
     rt::Entry {
@@ -1323,7 +1323,7 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function _none_inside(idxs,poly,p0,p1,p2,eps,i=0) =\n    i>=len(idxs) ? true :\n    let(\n        vert      = poly[idxs[i]],\n        prev_vert = poly[select(idxs,i-1)],\n        next_vert = poly[select(idxs,i+1)]\n    )\n    // check if vert prevent [p0,p1,p2] to be an ear\n    // this conditions might have a simpler expression\n    _tri_class([prev_vert, vert, next_vert],eps) <= 0  // reflex condition\n    &&  (  // vert is a cw reflex poly vertex inside the triangle [p0,p1,p2]\n          ( _tri_class([p0,p1,vert],eps)>0 &&\n            _tri_class([p1,p2,vert],eps)>0 &&\n            _tri_class([p2,p0,vert],eps)>=0  )\n          // or it is equal to p1 and some of its adjacent edges cross the open segment (p0,p2)\n          ||  ( norm(vert-p1) < eps\n                && _is_at_left(p0,[prev_vert,p1],eps) && _is_at_left(p2,[p1,prev_vert],eps)\n                && _is_at_left(p2,[p1,next_vert],eps) && _is_at_left(p0,[next_vert,p1],eps)\n              )\n        )\n    ?   false\n    :   _none_inside(idxs,poly,p0,p1,p2,eps,i=i+1);",
         consts: &[],
         consts_v: &[],
-        deps: &["_is_at_left", "_tri_class", "all_nonzero", "is_finite", "is_nan", "is_range", "is_vector", "select"],
+        deps: &["_is_at_left", "_tri_class", "is_finite", "is_nan", "is_range", "is_vector", "select"],
         builtins: &["abs", "cross", "is_list", "is_num", "is_string", "is_undef", "len", "norm", "sign"],
         func: _none_inside,
     },
@@ -1332,8 +1332,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function _point_dist(path,pathseg_unit,pathseg_len,pt) =\n    min([\n        for(i=[0:len(pathseg_unit)-1]) let(\n            v = pt-path[i],\n            projection = v*pathseg_unit[i],\n            segdist = projection < 0? norm(pt-path[i]) :\n                projection > pathseg_len[i]? norm(pt-select(path,i+1)) :\n                norm(v-projection*pathseg_unit[i])\n        ) segdist\n    ]);",
         consts: &[],
         consts_v: &[],
-        deps: &["all_nonzero", "is_finite", "is_nan", "is_range", "is_vector", "select"],
-        builtins: &["abs", "is_list", "is_num", "is_string", "is_undef", "len", "min", "norm"],
+        deps: &["is_finite", "is_nan", "is_range", "is_vector", "select"],
+        builtins: &["is_list", "is_num", "is_string", "is_undef", "len", "min", "norm"],
         func: _point_dist,
     },
     rt::Entry {
@@ -1341,8 +1341,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function _get_ear(poly, ind,  eps, _i=0) =\n    let( lind = len(ind) )\n    lind==3 ? 0 :\n    let( // the _i-th ear candidate\n        p0 = poly[ind[_i]],\n        p1 = poly[ind[(_i+1)%lind]],\n        p2 = poly[ind[(_i+2)%lind]]\n    )\n    // if vertex p1 is a convex candidate to be an ear,\n    // check if the triangle [p0,p1,p2] contains any other point\n    // except possibly p0 and p2\n    // exclude the ear candidate central vertex p1 from the verts to check\n    _tri_class([p0,p1,p2],eps) > 0\n    &&  _none_inside(select(ind,_i+2, _i),poly,p0,p1,p2,eps) ? _i : // found an ear\n    // otherwise check the next ear candidate\n    _i<lind-1 ?  _get_ear(poly, ind,  eps, _i=_i+1) :\n    // poly has no ears, look for wiskers\n    let( wiskers = [for(j=idx(ind)) if(norm(poly[ind[j]]-poly[ind[(j+2)%lind]])<eps) j ] )\n    wiskers==[] ? undef : [wiskers[0]];",
         consts: &[],
         consts_v: &[],
-        deps: &["_is_at_left", "_none_inside", "_tri_class", "all_nonzero", "approx", "idx", "is_finite", "is_nan", "is_range", "is_vector", "posmod", "select"],
-        builtins: &["abs", "cross", "is_bool", "is_list", "is_num", "is_string", "is_undef", "len", "norm", "sign"],
+        deps: &["_is_at_left", "_none_inside", "_tri_class", "idx", "is_finite", "is_nan", "is_range", "is_vector", "select"],
+        builtins: &["abs", "cross", "is_list", "is_num", "is_string", "is_undef", "len", "norm", "sign"],
         func: _get_ear,
     },
     rt::Entry {
@@ -1350,8 +1350,8 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         reference: "function _vnf_centroid(vnf,eps=_EPSILON) =\n    assert(is_vnf(vnf) && len(vnf[0])!=0 && len(vnf[1])!=0,\"\\nInvalid or empty VNF given to centroid.\")\n    let(\n        verts = vnf[0],\n        pos = sum([\n            for(face=vnf[1], j=[1:1:len(face)-2]) let(\n                v0  = verts[face[0]],\n                v1  = verts[face[j]],\n                v2  = verts[face[j+1]],\n                vol = cross(v2,v1)*v0\n            )\n            [ vol, (v0+v1+v2)*vol ]\n        ])\n    )\n    assert(!approx(pos[0],0, eps), \"\\nThe vnf has self-intersections.\")\n    pos[1]/pos[0]/4;",
         consts: &[],
         consts_v: &[("_EPSILON", __bake__EPSILON)],
-        deps: &["_list_pattern", "_sum", "all_nonzero", "approx", "idx", "is_consistent", "is_finite", "is_nan", "is_vector", "is_vnf", "posmod", "sum"],
-        builtins: &["abs", "cross", "is_bool", "is_list", "is_num", "is_string", "is_undef", "len", "norm"],
+        deps: &["_list_pattern", "_sum", "approx", "is_consistent", "is_finite", "is_nan", "is_vector", "is_vnf", "sum"],
+        builtins: &["abs", "cross", "is_bool", "is_list", "is_num", "is_undef", "len", "norm"],
         func: _vnf_centroid,
     },
 ];
@@ -1567,7 +1567,7 @@ pub(super) fn approx(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
     let p_a = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_b = args.get(1).cloned().unwrap_or(rt::Value::Undef);
     let p_eps = args.get(2).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
-    let out = if rt::binary(fx, rt::BinOp::Eq, p_a.clone(), p_b.clone()).is_truthy() { rt::binary(fx, rt::BinOp::Eq, rt::bi::is_bool(&[p_a.clone()]), rt::bi::is_bool(&[p_b.clone()])) } else { if rt::Value::Bool(rt::bi::is_num(&[p_a.clone()]).is_truthy() && rt::bi::is_num(&[p_b.clone()]).is_truthy()).is_truthy() { rt::binary(fx, rt::BinOp::Le, rt::bi::abs(&[rt::binary(fx, rt::BinOp::Sub, p_a.clone(), p_b.clone())]), p_eps.clone()) } else { if rt::Value::Bool(rt::Value::Bool(rt::bi::is_list(&[p_a.clone()]).is_truthy() && rt::bi::is_list(&[p_b.clone()]).is_truthy()).is_truthy() && rt::binary(fx, rt::BinOp::Eq, rt::bi::len(&[p_a.clone()]), rt::bi::len(&[p_b.clone()])).is_truthy()).is_truthy() { rt::binary(fx, rt::BinOp::Eq, rt::build_vector(vec![]), { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_warned(fx, &idx(fx, &[p_a.clone()])?) { { let l2_aa = rt::index(p_a.clone(), &l1_i.clone()); let l3_bb = rt::index(p_b.clone(), &l1_i.clone()); if (if rt::Value::Bool(rt::bi::is_num(&[l2_aa.clone()]).is_truthy() && rt::bi::is_num(&[l3_bb.clone()]).is_truthy()).is_truthy() { rt::binary(fx, rt::BinOp::Gt, rt::bi::abs(&[rt::binary(fx, rt::BinOp::Sub, l2_aa.clone(), l3_bb.clone())]), p_eps.clone()) } else { rt::unary(fx, rt::UnOp::Not, approx(fx, &[l2_aa.clone(), l3_bb.clone(), p_eps.clone()])?) }).is_truthy() { l0_acc.push(rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    let out = if rt::binary(fx, rt::BinOp::Eq, p_a.clone(), p_b.clone()).is_truthy() { rt::binary(fx, rt::BinOp::Eq, rt::bi::is_bool(&[p_a.clone()]), rt::bi::is_bool(&[p_b.clone()])) } else { if rt::Value::Bool(rt::bi::is_num(&[p_a.clone()]).is_truthy() && rt::bi::is_num(&[p_b.clone()]).is_truthy()).is_truthy() { rt::binary(fx, rt::BinOp::Le, rt::bi::abs(&[rt::binary(fx, rt::BinOp::Sub, p_a.clone(), p_b.clone())]), p_eps.clone()) } else { if rt::Value::Bool(rt::Value::Bool(rt::bi::is_list(&[p_a.clone()]).is_truthy() && rt::bi::is_list(&[p_b.clone()]).is_truthy()).is_truthy() && rt::binary(fx, rt::BinOp::Eq, rt::bi::len(&[p_a.clone()]), rt::bi::len(&[p_b.clone()])).is_truthy()).is_truthy() { rt::binary(fx, rt::BinOp::Eq, rt::build_vector(vec![]), { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_warned(fx, &fx.call_named("approx", "idx", &[(None, p_a.clone())])?) { { let l2_aa = rt::index(p_a.clone(), &l1_i.clone()); let l3_bb = rt::index(p_b.clone(), &l1_i.clone()); if (if rt::Value::Bool(rt::bi::is_num(&[l2_aa.clone()]).is_truthy() && rt::bi::is_num(&[l3_bb.clone()]).is_truthy()).is_truthy() { rt::binary(fx, rt::BinOp::Gt, rt::bi::abs(&[rt::binary(fx, rt::BinOp::Sub, l2_aa.clone(), l3_bb.clone())]), p_eps.clone()) } else { rt::unary(fx, rt::UnOp::Not, fx.call_named("approx", "approx", &[(None, l2_aa.clone()), (None, l3_bb.clone()), (Some("eps"), p_eps.clone())])?) }).is_truthy() { l0_acc.push(rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
          }  } } rt::build_vector(l0_acc) }) } else { rt::Value::Bool(false) } } };
     Ok(out)
 }
@@ -1583,7 +1583,7 @@ pub(super) fn posmod(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::V
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_m = args.get(1).cloned().unwrap_or(rt::Value::Undef);
-    let out = { if !(rt::Value::Bool(rt::Value::Bool(is_finite(fx, &[p_x.clone()])?.is_truthy() && is_finite(fx, &[p_m.clone()])?.is_truthy()).is_truthy() && rt::unary(fx, rt::UnOp::Not, approx(fx, &[p_m.clone(), rt::Value::Num(f64::from_bits(0x0_u64))])?).is_truthy())).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("\nInput must be finite numbers. The divisor cannot be zero.")), "((is_finite(x) && is_finite(m)) && (!approx(m, 0)))")); } rt::binary(fx, rt::BinOp::Mod, rt::binary(fx, rt::BinOp::Add, rt::binary(fx, rt::BinOp::Mod, p_x.clone(), p_m.clone()), p_m.clone()), p_m.clone()) };
+    let out = { if !(rt::Value::Bool(rt::Value::Bool(is_finite(fx, &[p_x.clone()])?.is_truthy() && is_finite(fx, &[p_m.clone()])?.is_truthy()).is_truthy() && rt::unary(fx, rt::UnOp::Not, fx.call_named("posmod", "approx", &[(None, p_m.clone()), (None, rt::Value::Num(f64::from_bits(0x0_u64)))])?).is_truthy())).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("\nInput must be finite numbers. The divisor cannot be zero.")), "((is_finite(x) && is_finite(m)) && (!approx(m, 0)))")); } rt::binary(fx, rt::BinOp::Mod, rt::binary(fx, rt::BinOp::Add, rt::binary(fx, rt::BinOp::Mod, p_x.clone(), p_m.clone()), p_m.clone()), p_m.clone()) };
     Ok(out)
 }
 
@@ -1600,7 +1600,7 @@ pub(super) fn idx(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Valu
     let p_s = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
     let p_e = args.get(2).cloned().unwrap_or_else(|| rt::unary(fx, rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
     let p_step = args.get(3).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
-    let out = { if !(rt::Value::Bool(rt::bi::is_list(&[p_list.clone()]).is_truthy() || rt::bi::is_string(&[p_list.clone()]).is_truthy())).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("Invalid input.")), "(is_list(list) || is_string(list))")); } { let l0_ll = rt::bi::len(&[p_list.clone()]); if rt::binary(fx, rt::BinOp::Eq, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() { rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::binary(fx, rt::BinOp::Sub, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) } else { { let l1_s = posmod(fx, &[p_s.clone(), l0_ll.clone()])?; let l2_e = posmod(fx, &[p_e.clone(), l0_ll.clone()])?; rt::build_range(&l1_s.clone(), &p_step.clone(), &l2_e.clone()) } } } };
+    let out = { if !(rt::Value::Bool(rt::bi::is_list(&[p_list.clone()]).is_truthy() || rt::bi::is_string(&[p_list.clone()]).is_truthy())).is_truthy() { return Err(rt::assert_failed(Some(&rt::Value::string("Invalid input.")), "(is_list(list) || is_string(list))")); } { let l0_ll = rt::bi::len(&[p_list.clone()]); if rt::binary(fx, rt::BinOp::Eq, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() { rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::binary(fx, rt::BinOp::Sub, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) } else { { let l1_s = fx.call_named("idx", "posmod", &[(None, p_s.clone()), (None, l0_ll.clone())])?; let l2_e = fx.call_named("idx", "posmod", &[(None, p_e.clone()), (None, l0_ll.clone())])?; rt::build_range(&l1_s.clone(), &p_step.clone(), &l2_e.clone()) } } } };
     Ok(out)
 }
 
@@ -2321,7 +2321,7 @@ pub(super) fn is_vector(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt
     let p_all_nonzero = args.get(3).cloned().unwrap_or_else(|| rt::Value::Bool(false));
     let p_eps = args.get(4).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
     let out = rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::bi::is_list(&[p_v.clone()]).is_truthy() && rt::binary(fx, rt::BinOp::Gt, rt::bi::len(&[p_v.clone()]), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() && rt::binary(fx, rt::BinOp::Eq, rt::build_vector(vec![]), { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_vi in rt::iter_values_warned(fx, &p_v.clone()) { if (rt::unary(fx, rt::UnOp::Not, is_finite(fx, &[l1_vi.clone()])?)).is_truthy() { l0_acc.push(rt::Value::Num(f64::from_bits(0x0_u64)));
-         } } rt::build_vector(l0_acc) }).is_truthy()).is_truthy() && rt::Value::Bool(rt::bi::is_undef(&[p_length.clone()]).is_truthy() || { if !(rt::bi::is_num(&[p_length.clone()])).is_truthy() { return Err(rt::assert_failed(None, "is_num(length)")); } rt::binary(fx, rt::BinOp::Eq, rt::bi::len(&[p_v.clone()]), p_length.clone()) }.is_truthy()).is_truthy()).is_truthy() && rt::Value::Bool(rt::bi::is_undef(&[p_zero.clone()]).is_truthy() || rt::binary(fx, rt::BinOp::Eq, rt::binary(fx, rt::BinOp::Ge, rt::bi::norm(&[p_v.clone()]), p_eps.clone()), rt::unary(fx, rt::UnOp::Not, p_zero.clone())).is_truthy()).is_truthy()).is_truthy() && rt::Value::Bool(rt::unary(fx, rt::UnOp::Not, p_all_nonzero.clone()).is_truthy() || { let l2_cal = &p_all_nonzero; if matches!(l2_cal, rt::Value::Function { .. }) { fx.call_value(l2_cal, &[(None, p_v.clone())])? } else { all_nonzero(fx, &[p_v.clone()])? } }.is_truthy()).is_truthy());
+         } } rt::build_vector(l0_acc) }).is_truthy()).is_truthy() && rt::Value::Bool(rt::bi::is_undef(&[p_length.clone()]).is_truthy() || { if !(rt::bi::is_num(&[p_length.clone()])).is_truthy() { return Err(rt::assert_failed(None, "is_num(length)")); } rt::binary(fx, rt::BinOp::Eq, rt::bi::len(&[p_v.clone()]), p_length.clone()) }.is_truthy()).is_truthy()).is_truthy() && rt::Value::Bool(rt::bi::is_undef(&[p_zero.clone()]).is_truthy() || rt::binary(fx, rt::BinOp::Eq, rt::binary(fx, rt::BinOp::Ge, rt::bi::norm(&[p_v.clone()]), p_eps.clone()), rt::unary(fx, rt::UnOp::Not, p_zero.clone())).is_truthy()).is_truthy()).is_truthy() && rt::Value::Bool(rt::unary(fx, rt::UnOp::Not, p_all_nonzero.clone()).is_truthy() || { let l2_cal = &p_all_nonzero; if matches!(l2_cal, rt::Value::Function { .. }) { fx.call_value(l2_cal, &[(None, p_v.clone())])? } else { fx.call_named("is_vector", "all_nonzero", &[(None, p_v.clone())])? } }.is_truthy()).is_truthy());
     Ok(out)
 }
 
@@ -2336,7 +2336,7 @@ pub(super) fn all_nonzero(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_eps = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
-    let out = if is_finite(fx, &[p_x.clone()])?.is_truthy() { rt::binary(fx, rt::BinOp::Gt, rt::bi::abs(&[p_x.clone()]), p_eps.clone()) } else { rt::Value::Bool(is_vector(fx, &[p_x.clone()])?.is_truthy() && rt::binary(fx, rt::BinOp::Eq, { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_xx in rt::iter_values_warned(fx, &p_x.clone()) { if (rt::binary(fx, rt::BinOp::Lt, rt::bi::abs(&[l1_xx.clone()]), p_eps.clone())).is_truthy() { l0_acc.push(rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    let out = if is_finite(fx, &[p_x.clone()])?.is_truthy() { rt::binary(fx, rt::BinOp::Gt, rt::bi::abs(&[p_x.clone()]), p_eps.clone()) } else { rt::Value::Bool(fx.call_named("all_nonzero", "is_vector", &[(None, p_x.clone())])?.is_truthy() && rt::binary(fx, rt::BinOp::Eq, { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_xx in rt::iter_values_warned(fx, &p_x.clone()) { if (rt::binary(fx, rt::BinOp::Lt, rt::bi::abs(&[l1_xx.clone()]), p_eps.clone())).is_truthy() { l0_acc.push(rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
          } } rt::build_vector(l0_acc) }, rt::build_vector(vec![])).is_truthy()) };
     Ok(out)
 }

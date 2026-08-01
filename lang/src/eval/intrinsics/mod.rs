@@ -2272,11 +2272,14 @@ pub(super) fn all_reference_sources() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// Test-only shim. See [`crate::registry::Registry::anchor_fp`].
+/// Test-only shim. See [`crate::registry::Registry::anchor_fp`], which takes the asking ROW —
+/// unambiguous here because the builtin registry holds exactly one library's functions, which is the
+/// assumption that stops being safe the moment a consumer accumulates a second one.
 #[cfg(test)]
 #[must_use]
 pub(super) fn anchor_fp(asking: &str, dep: &str) -> Option<crate::surface::Fingerprint> {
-    crate::registry::Registry::builtin().anchor_fp(asking, dep)
+    let reg = crate::registry::Registry::builtin();
+    reg.anchor_fp(reg.entry_by_name(asking)?, dep)
 }
 
 /// Test-only shim. See [`crate::registry::Registry::resolve`].

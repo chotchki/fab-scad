@@ -80,7 +80,7 @@ pub use eval::{
     NumericJit, NumericJitFactory, RANGE_MAX, RangeIter, Resolution, Scope, Shape2D, SourceNeed,
     Value, bench_intrinsic, eval_expr, eval_program, eval_program_with_registry,
     evaluate_geometry_metered, fragments,
-    interpret_fn, range_iter, range_len,
+    interpret_fn, range_iter, range_len, wired_count,
 };
 /// AR.14.3 — a function's structural identity, for tools that need to ask "is this the same
 /// function" the way dispatch asks it. Spans excluded, so reformatting survives.

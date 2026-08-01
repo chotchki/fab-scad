@@ -1126,6 +1126,7 @@ impl<'a> FnOracle<'a> {
         for (name, func) in arm_guarded_intrinsics(&ctx) {
             ctx.intrinsics.insert(name, func);
         }
+        record_wired(ctx.intrinsics.len());
         Ok(Self {
             ctx,
             global: scope,
@@ -3169,6 +3170,7 @@ fn resolve_source<'a>(
     for (name, func) in arm_guarded_intrinsics(&ctx) {
         ctx.intrinsics.insert(name, func);
     }
+    record_wired(ctx.intrinsics.len());
     redundancy::reset(); // dev probe: fresh count per run so the import fixpoint's partial runs don't bleed in
     mod_redundancy::reset(); // dev probe (J.5.1): fresh module-call ceiling per run (FAB_CSG_REDUNDANCY)
     mod_cache::reset_thread_state(); // a panic-unwound PRIOR eval on a reused thread must not leak captures
@@ -3367,12 +3369,38 @@ impl FpMemo {
     }
 }
 
+/// How many registry natives WIRED on the last evaluation this process finished arming.
+///
+/// The instrument for the one failure a library-per-crate topology makes easy and invisible:
+/// accumulating a second library can only ADD dispatch, so a count that DROPS when one is handed in
+/// means somebody's guards started declining — which costs a speedup, prints nothing, and passes
+/// every differential in the tree, because a declining native and a firing one compute the same
+/// answer. AR.26.2 measured exactly that at 591 of 866 and it took a bespoke probe to see.
+///
+/// A LAST-VALUE, not a running total, and process-global: two concurrent evaluations race and the
+/// loser's number is lost. Sound for the sequential A/B a gate wants, useless for anything else, and
+/// deliberately not worth a thread-local — the same trade [`crate::registry::build_count`] makes.
+#[doc(hidden)]
+#[must_use]
+pub fn wired_count() -> usize {
+    WIRED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn record_wired(n: usize) {
+    WIRED.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+static WIRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn needs_post_hoist(registry: &Registry, entry: &intrinsics::Entry) -> bool {
     !entry.consts.is_empty()
         || !entry.consts_v.is_empty()
+        // `dep_row`, not `entry_by_name` (AR.26.4.1): the question is whether the dep row THIS
+        // entry's library declared bakes a constant, because that is the one whose semantics the
+        // native inlined. Another library's row of the same name is a different function.
         || entry.deps.iter().any(|&dep| {
             registry
-                .entry_by_name(dep)
+                .dep_row(entry, dep)
                 .is_some_and(|d| !d.consts.is_empty() || !d.consts_v.is_empty())
         })
 }
@@ -3387,7 +3415,7 @@ fn guard_veto<'a>(
         let Some(&((p, b), _)) = functions.get(dep) else {
             return Some(format!("dep `{dep}` is not defined in this program"));
         };
-        if registry.anchor_fp(entry.name, dep) != Some(memo.of(p, b)) {
+        if registry.anchor_fp(entry, dep) != Some(memo.of(p, b)) {
             return Some(format!(
                 "dep `{dep}` drifted from its pinned reference (or is anchored in another library)"
             ));
@@ -3531,7 +3559,16 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
         // but if a dep ever grows deps of its own this needs to go transitive.
         let dep_const_veto = entry.deps.iter().find_map(|&dep| {
             let &((p, b), dep_home) = ctx.functions.get(dep)?;
-            let dep_entry = ctx.registry.resolve_fp(dep, memo.of(p, b))?;
+            // AR.26.4.1: the dep row from `entry`'S OWN LIBRARY, then confirmed against the running
+            // body. `resolve_fp` here would take the first library whose reference matched, which
+            // for a name two libraries declare is not necessarily the one whose constants this
+            // native baked. `guard_veto` above has already anchored the same pair, so the
+            // fingerprint check is a restatement — kept because dropping it would make this arm's
+            // correctness depend on the ORDER of two passes rather than on what it checks.
+            let dep_entry = ctx.registry.dep_row(entry, dep)?;
+            if ctx.registry.anchor_fp(entry, dep) != Some(memo.of(p, b)) {
+                return None;
+            }
             let dep_scope = globals.get(dep_home)?;
             let bad = dep_entry.consts.iter().any(|&(cname, expected)| {
                 !matches!(dep_scope.lookup_opt(cname), Some(Value::Num(n)) if n.to_bits() == expected.to_bits())

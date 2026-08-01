@@ -141,9 +141,13 @@ pub struct Rows {
 /// [`Registry::faults`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
-    /// Two rows claim the same function name. The FIRST is kept: a later row silently winning is the
-    /// last-wins trap that already cost a bug upstream (`_sort_vectors`), and there is no principled
-    /// way to pick, since which body a program gets depends on ITS include graph and not on ours.
+    /// ONE library declares the same function name twice. The FIRST is kept: a later row silently
+    /// winning is the last-wins trap that already cost a bug upstream (`_sort_vectors`), and within a
+    /// single library there is no principled way to pick — a library that cannot say which of two
+    /// rows implements a name has an authoring bug, not a topology.
+    ///
+    /// WITHIN a library, deliberately. Two DIFFERENT libraries declaring the same name is normal and
+    /// is not a fault — see [`Registry::eclipsed`].
     DuplicateFunction {
         /// The library that lost the collision.
         library: &'static str,
@@ -151,29 +155,24 @@ pub enum Fault {
         name: &'static str,
     },
     /// Two rows claim the same module name. First wins, same reasoning.
+    ///
+    /// Still cross-library, unlike [`Fault::DuplicateFunction`]: a module native has no fingerprint
+    /// SELECTION step to disambiguate with — [`Registry::resolve_module`] fetches one row by name and
+    /// then checks it — so two libraries claiming one module name really is unresolvable here.
     DuplicateModule {
         /// The library that lost the collision.
         library: &'static str,
         /// The colliding name.
         name: &'static str,
     },
-    /// Two libraries pin the same name. First wins, same reasoning.
+    /// ONE library pins the same name twice. First wins, same reasoning as
+    /// [`Fault::DuplicateFunction`]; pins are library-local, so two libraries pinning one name is
+    /// not a collision at all.
     DuplicatePin {
         /// The library that lost the collision.
         library: &'static str,
         /// The colliding name.
         name: &'static str,
-    },
-    /// Another library already claims this function-namespace name, so this row is DROPPED rather
-    /// than allowed to answer a dep anchor the first library's rows are gated on. See
-    /// `Registry::claim` for the wrong-answer this prevents.
-    ForeignShadow {
-        /// The library whose row was dropped.
-        library: &'static str,
-        /// The contested name.
-        name: &'static str,
-        /// The library that claimed it first.
-        owner: &'static str,
     },
     /// A `reference` did not parse to exactly one function (or module) definition, so there is
     /// nothing to fingerprint and the row can never wire. An authoring bug in the emitting library.
@@ -238,21 +237,35 @@ pub struct Registry {
     modules: OnceLock<ModuleIndex>,
 }
 
-/// The lazily-built function half: rows, pins, and who claimed each name.
+/// One library's claim on a function name: the fingerprint its `reference` hashes to, WHICH row set
+/// handed it over, and the row.
+///
+/// The library index is the load-bearing field. A dep name is not a global address — it names a
+/// function the ASKING library declared or pinned, whose semantics its native inlined — so every
+/// anchor question is answered inside one row set and never across the accumulated index.
+#[derive(Clone, Copy)]
+struct Cand {
+    fp: Fingerprint,
+    lib: usize,
+    entry: &'static Entry,
+}
+
+/// The lazily-built function half: rows keyed by name AND fingerprint, plus library-local pins.
+///
+/// A NAME MAPS TO A LIST, and that is the whole AR.26.4.1 change. Two libraries declaring `is_def`
+/// is the normal case, not a collision: the program defines exactly one `is_def`, and the
+/// fingerprint gate already decides which reference that body matches. Keying on the name alone
+/// forced a choice between them at ACCUMULATION time — before the program that settles it even
+/// exists — and dropping the loser took its library's dependents down with it, since a row whose own
+/// library's dep vanished from the index can never anchor.
 #[derive(Default)]
 struct FnIndex {
-    map: BTreeMap<&'static str, (Fingerprint, &'static Entry)>,
-    pins: BTreeMap<&'static str, Fingerprint>,
-    /// Which library owns each FUNCTION-NAMESPACE name (rows and pins share one namespace, as they
-    /// must — [`Registry::anchor_fp`] resolves a dep against either), as the INDEX of the [`Rows`]
-    /// that claimed it.
-    ///
-    /// The index, not `Rows::name`: a library is one hand-over, and two consumers that both left the
-    /// name blank — or picked the same one — are still two libraries. Keying on the string made
-    /// `Rows::default()`'s empty name collapse every anonymous library into one, which is a gate that
-    /// silently stops gating. The name stays for the fault MESSAGE, where being wrong is only
-    /// confusing.
-    owners: BTreeMap<&'static str, usize>,
+    /// name → every library's candidate, in accumulation order. Dispatch takes the first whose
+    /// fingerprint matches the running body; anchoring takes the one from its own library.
+    map: BTreeMap<&'static str, Vec<Cand>>,
+    /// `(row set, name)` → pinned reference fingerprint. LIBRARY-LOCAL, because a pin exists for one
+    /// library's rows to anchor against and means nothing to anyone else's.
+    pins: BTreeMap<(usize, &'static str), Fingerprint>,
     faults: Vec<Fault>,
 }
 
@@ -309,12 +322,8 @@ impl Registry {
     fn fn_index(&self) -> &FnIndex {
         self.fns.get_or_init(|| {
             let mut idx = FnIndex::default();
-            let names: Vec<&'static str> = self.rows.iter().map(|r| r.name).collect();
             for (lib, rows) in self.rows.iter().enumerate() {
                 for entry in rows.functions {
-                    if claim(&mut idx, lib, rows.name, &names, entry.name).is_err() {
-                        continue;
-                    }
                     let Some(fp) = function_fingerprint(entry.reference) else {
                         idx.faults.push(Fault::UnparseableReference {
                             library: rows.name,
@@ -322,19 +331,20 @@ impl Registry {
                         });
                         continue;
                     };
-                    if idx.map.contains_key(entry.name) {
+                    let cands = idx.map.entry(entry.name).or_default();
+                    // WITHIN this row set only. A candidate from another library is a coexisting
+                    // claim, not a duplicate — and it must stay in the list even when it can never
+                    // be selected, because its own library's rows anchor their deps against it.
+                    if cands.iter().any(|c| c.lib == lib) {
                         idx.faults.push(Fault::DuplicateFunction {
                             library: rows.name,
                             name: entry.name,
                         });
                         continue;
                     }
-                    idx.map.insert(entry.name, (fp, entry));
+                    cands.push(Cand { fp, lib, entry });
                 }
                 for &(name, reference) in rows.pins {
-                    if claim(&mut idx, lib, rows.name, &names, name).is_err() {
-                        continue;
-                    }
                     let Some(fp) = function_fingerprint(reference) else {
                         idx.faults.push(Fault::UnparseableReference {
                             library: rows.name,
@@ -342,14 +352,16 @@ impl Registry {
                         });
                         continue;
                     };
-                    if idx.pins.contains_key(name) {
+                    // `contains_key` then insert, never `insert().is_some()` — the latter keeps the
+                    // LAST pin, which is the trap this fault is named after.
+                    if idx.pins.contains_key(&(lib, name)) {
                         idx.faults.push(Fault::DuplicatePin {
                             library: rows.name,
                             name,
                         });
                         continue;
                     }
-                    idx.pins.insert(name, fp);
+                    idx.pins.insert((lib, name), fp);
                 }
             }
             idx
@@ -433,13 +445,48 @@ impl Registry {
     /// the repeated walks measured at +55 ms per evaluation. The caller memoizes and hands the hash
     /// in. Nothing about the GATE changes — the fingerprint is still ours, computed by our parser
     /// from the program's own body — only how many times we compute it.
+    ///
+    /// FIRST MATCH among the libraries that declare `name`. A tie means two libraries transcribed
+    /// the same upstream source — each row was proved against the SAME body by the same gate, so
+    /// either answers correctly and the tie-break is arbitrary rather than a loss. Accumulation
+    /// order settles it deterministically; [`Registry::eclipsed`] names the ones it passed over.
     #[must_use]
     pub fn resolve_fp(&self, name: &str, fp: Fingerprint) -> Option<&'static Entry> {
         self.fn_index()
             .map
-            .get(name)
-            .filter(|(f, _)| *f == fp)
-            .map(|(_, e)| *e)
+            .get(name)?
+            .iter()
+            .find(|c| c.fp == fp)
+            .map(|c| c.entry)
+    }
+
+    /// Which row set handed over this row. `None` for a row no registry indexed (a caller holding an
+    /// `Entry` from somewhere else entirely), which makes every library-scoped question below answer
+    /// `None` — decline, never a guess.
+    fn lib_of(&self, entry: &Entry) -> Option<usize> {
+        self.fn_index()
+            .map
+            .get(entry.name)?
+            .iter()
+            .find(|c| std::ptr::eq(c.entry, entry))
+            .map(|c| c.lib)
+    }
+
+    /// The row `asking`'s OWN LIBRARY declares for `dep` — the row whose semantics `asking`'s native
+    /// inlined, which is the only one any guard question about `dep` is about.
+    ///
+    /// `None` if that library declares no row for the name (it may still PIN it — see
+    /// [`Registry::anchor_fp`] — and a pin has no consts to check, so `None` is the right answer for
+    /// the const guards that call this).
+    #[must_use]
+    pub fn dep_row(&self, asking: &Entry, dep: &str) -> Option<&'static Entry> {
+        let lib = self.lib_of(asking)?;
+        self.fn_index()
+            .map
+            .get(dep)?
+            .iter()
+            .find(|c| c.lib == lib)
+            .map(|c| c.entry)
     }
 
     /// A registry row by NAME alone — no fingerprint, no program.
@@ -448,9 +495,13 @@ impl Registry {
     /// shape ("does this dep bake a constant?"), not about a particular program's definitions, and it is
     /// asked in `build_intrinsics` before any island scope exists to check a constant against (AN.17's
     /// `needs_post_hoist`). A name is unique in the registry even though fingerprints are not.
+    ///
+    /// The FIRST library's row when several declare the name — which makes it a question about the
+    /// index's shape and not about any one library's semantics. Guard code wants
+    /// [`Registry::dep_row`] instead, which asks the library that actually inlined the dep.
     #[must_use]
     pub fn entry_by_name(&self, name: &str) -> Option<&'static Entry> {
-        self.fn_index().map.get(name).map(|(_, e)| *e)
+        self.fn_index().map.get(name)?.first().map(|c| c.entry)
     }
 
     /// The reference fingerprint a DEP name must match to satisfy `asking`'s dep pin: the dep's own
@@ -463,26 +514,29 @@ impl Registry {
     /// the native on a function nobody proved it equivalent to — the same wrong ANSWER the
     /// fingerprint gate exists to prevent, one hop out. Unanchored-in-my-library therefore means
     /// `None` (decline → interpret), never "try the neighbours".
+    ///
+    /// TAKES THE ROW, NOT ITS NAME (AR.26.4.1). With several libraries free to declare one name, a
+    /// name no longer identifies a library — and the caller has always held the row.
     #[must_use]
-    pub fn anchor_fp(&self, asking: &str, dep: &str) -> Option<Fingerprint> {
+    pub fn anchor_fp(&self, asking: &Entry, dep: &str) -> Option<Fingerprint> {
         let idx = self.fn_index();
-        let lib = *idx.owners.get(asking)?;
-        if idx.owners.get(dep) != Some(&lib) {
-            return None;
-        }
+        let lib = self.lib_of(asking)?;
         idx.map
             .get(dep)
-            .map(|(fp, _)| *fp)
-            .or_else(|| idx.pins.get(dep).copied())
+            .and_then(|cs| cs.iter().find(|c| c.lib == lib).map(|c| c.fp))
+            .or_else(|| idx.pins.get(&(lib, dep)).copied())
     }
 
     /// The registered REFERENCE fingerprint for `name` — the hash a running function must match to WIRE — or
     /// `None` if nothing is registered under that name. Feeds the EXPLAIN DRIFT diagnostic, which prints it
     /// next to the running function's own fingerprint so an author can SEE how the two differ (stale reference
     /// vs a genuinely different library version).
+    ///
+    /// The FIRST library's, when several declare the name — a diagnostic, so "one of the references
+    /// this name could have matched" is the useful answer and a list would only bury it.
     #[must_use]
     pub fn reference_fp(&self, name: &str) -> Option<Fingerprint> {
-        self.fn_index().map.get(name).map(|(fp, _)| *fp)
+        self.fn_index().map.get(name)?.first().map(|c| c.fp)
     }
 
     /// Classify a defined function against the registry (O.3 EXPLAIN). Pure + testable; the `FAB_EXPLAIN`
@@ -508,11 +562,38 @@ impl Registry {
     /// defines it, so upstream parity doesn't apply and it's excluded.
     pub fn matrix_targets(&self) -> impl Iterator<Item = (&'static str, Fingerprint, bool)> + '_ {
         let idx = self.fn_index();
+        // DEDUPED on `(name, fingerprint)`: two libraries transcribing one upstream function is one
+        // parity question, and auditing it twice would inflate every count the matrix reports.
+        let mut seen = std::collections::BTreeSet::new();
         idx.map
             .values()
-            .filter(|(_, e)| !e.name.starts_with("_fab_"))
-            .map(|(fp, e)| (e.name, *fp, false))
-            .chain(idx.pins.iter().map(|(&n, &fp)| (n, fp, true)))
+            .flatten()
+            .filter(|c| !c.entry.name.starts_with("_fab_"))
+            .map(|c| (c.entry.name, c.fp, false))
+            .chain(idx.pins.iter().map(|(&(_, n), &fp)| (n, fp, true)))
+            .filter(move |&(n, fp, is_pin)| seen.insert((n, fp, is_pin)))
+    }
+
+    /// Rows that can never be SELECTED: a candidate whose fingerprint an earlier library already
+    /// answers for, as `(library, name)`.
+    ///
+    /// NOT a fault, and the distinction is the point. An eclipsed row is one whose reference is
+    /// STRUCTURALLY IDENTICAL to a live one — same body, same gate, same verdict for any program —
+    /// so nothing was lost by passing over it. It stays in the index, because its own library's rows
+    /// anchor their deps against it; only dispatch passes it by. A test asserts the identity holds,
+    /// which is what makes "eclipsed is safe" a checked claim rather than this paragraph.
+    #[must_use]
+    pub fn eclipsed(&self) -> Vec<(&'static str, &'static str)> {
+        let idx = self.fn_index();
+        let mut out = Vec::new();
+        for cands in idx.map.values() {
+            for (i, c) in cands.iter().enumerate() {
+                if cands[..i].iter().any(|e| e.fp == c.fp) {
+                    out.push((self.rows[c.lib].name, c.entry.name));
+                }
+            }
+        }
+        out
     }
 
     /// The compiled module for `name`, IFF one is registered, the definition in this program
@@ -546,11 +627,12 @@ impl Registry {
             .then_some(entry.func)
     }
 
-    /// How many function rows are indexed. The counterpart to [`Registry::faults`] for the
-    /// every-shipped-row-is-accepted gate.
+    /// How many function ROWS are indexed — candidates, not distinct names, so a registry that
+    /// accepted every row it was handed reports exactly the length of what it was handed. The
+    /// counterpart to [`Registry::faults`] for the every-shipped-row-is-accepted gate.
     #[must_use]
     pub fn function_count(&self) -> usize {
-        self.fn_index().map.len()
+        self.fn_index().map.values().map(Vec::len).sum()
     }
 
     /// How many pins are indexed.
@@ -592,47 +674,6 @@ impl std::ops::Deref for RegistryRef<'_> {
 
     fn deref(&self) -> &Registry {
         self.0
-    }
-}
-
-/// Record `library` (row set `lib`) as the owner of function-namespace `name`, or refuse because
-/// ANOTHER row set already owns it.
-///
-/// This is the cross-library half of the never-silently-wrong contract, and it only becomes
-/// reachable once registries accumulate — which is exactly what this phase built. A row's `deps` are
-/// anchored by [`Registry::anchor_fp`], which searches rows then pins; so a second library shipping a
-/// row named `column` where the first merely PINNED `column` would put a second claimant on the name
-/// its dep guards resolve through. Same name, different function, no error — the exact shape the
-/// fingerprint gate exists to prevent.
-///
-/// Rows and pins share ONE namespace here on purpose, because `anchor_fp` does. Within a single
-/// [`Rows`] a name may legitimately appear as both (fab-lang declares nine that way — a row for
-/// dispatch and a pin for other rows to anchor against), so the check is BETWEEN row sets only.
-///
-/// Keyed on the row-set INDEX, never `Rows::name`: two consumers that both leave the name blank are
-/// still two libraries, and a string key made `Rows::default()` collapse every anonymous one into a
-/// single owner — a gate that quietly stops gating.
-fn claim(
-    idx: &mut FnIndex,
-    lib: usize,
-    library: &'static str,
-    owner_names: &[&'static str],
-    name: &'static str,
-) -> Result<(), ()> {
-    match idx.owners.get(name) {
-        Some(&owner) if owner != lib => {
-            idx.faults.push(Fault::ForeignShadow {
-                library,
-                name,
-                owner: owner_names.get(owner).copied().unwrap_or(""),
-            });
-            Err(())
-        }
-        Some(_) => Ok(()),
-        None => {
-            idx.owners.insert(name, lib);
-            Ok(())
-        }
     }
 }
 
@@ -687,7 +728,7 @@ fn module_fingerprint(params: &[Parameter], body: &crate::Stmt) -> Fingerprint {
               fallible native ABI"
 )]
 mod tests {
-    use super::{Entry, Fault, Registry, Rows};
+    use super::{Entry, Fault, Registry, Rows, function_fingerprint};
     use crate::Value;
 
     fn probe(_fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
@@ -807,12 +848,17 @@ mod tests {
         assert_eq!(reg.function_count(), 0);
     }
 
-    /// THE CROSS-LIBRARY GATE, both halves. Library A pins `_reg_probe` as a dep anchor; library B
-    /// then ships a ROW under that name. Two things must hold, and the second is the one that is easy
-    /// to miss: B's row is DROPPED and recorded, AND B's other rows do not then anchor onto A's
-    /// fingerprint. Without the scoping, B's native — which inlined B's `_reg_probe` — would gate on
-    /// A's version and wire against a function nobody proved it equivalent to. A wrong ANSWER, not a
-    /// missed speedup.
+    /// THE CROSS-LIBRARY GATE. Library A pins `_reg_probe` as a dep anchor; library B then ships a
+    /// ROW under that name, with a DIFFERENT body. Each library's rows must anchor against their
+    /// OWN `_reg_probe` and never the neighbour's — otherwise B's native, which inlined B's version,
+    /// would gate on A's and wire against a function nobody proved it equivalent to. A wrong ANSWER,
+    /// not a missed speedup.
+    ///
+    /// AR.26.4.1 STRENGTHENED THIS RATHER THAN RELAXING IT. B's row used to be DROPPED on the theory
+    /// that a contested name had to have one owner; that cost B its whole dependent cone, since a row
+    /// whose own library's dep is not in the index can never anchor. Both rows are indexed now and
+    /// the anchors stay library-local, which is the property that was ever load-bearing — the
+    /// ownership claim was one implementation of it, and a lossy one.
     #[test]
     fn a_foreign_library_cannot_shadow_a_pinned_name() {
         static PINS: &[(&str, &str)] = &[("_reg_probe", "function _reg_probe(x) = x + 1;")];
@@ -852,53 +898,129 @@ mod tests {
             pins: PINS,
             ..Rows::default()
         };
-        let both = Registry::new()
-            .with(a_rows)
-            .with(probe_rows("B", B_ROWS));
+        let both = Registry::new().with(a_rows).with(probe_rows("B", B_ROWS));
         assert_eq!(
             both.faults(),
-            vec![Fault::ForeignShadow {
-                library: "B",
-                name: "_reg_probe",
-                owner: "A",
-            }]
+            Vec::new(),
+            "two libraries declaring one name is a topology, not a fault"
         );
         assert!(
-            both.entry_by_name("_reg_probe").is_none(),
-            "B's shadowing row must not be dispatchable"
+            both.entry_by_name("_reg_probe").is_some(),
+            "B's row is dispatchable — the program's own body decides whether it fires"
         );
+
         let alone = Registry::new().with(a_rows);
+        let a = &A_ROWS[0];
         assert_eq!(
-            both.anchor_fp("_reg_a", "_reg_probe"),
-            alone.anchor_fp("_reg_a", "_reg_probe"),
-            "A's anchor must still answer with A's own fingerprint"
+            both.anchor_fp(a, "_reg_probe"),
+            alone.anchor_fp(a, "_reg_probe"),
+            "A's anchor must answer with A's own fingerprint, B present or not"
+        );
+        // THE CORE ASSERTION: the two anchors DIFFER. Equal would mean one library's guard is
+        // checking the other's function, which is the wrong answer this scoping exists to prevent.
+        let b = &B_ROWS[1];
+        assert_eq!(
+            both.anchor_fp(b, "_reg_probe"),
+            Some(function_fingerprint("function _reg_probe(x) = x + 99;").expect("parses")),
+            "B anchors on B's own row"
+        );
+        assert_ne!(both.anchor_fp(a, "_reg_probe"), both.anchor_fp(b, "_reg_probe"));
+        assert_eq!(
+            both.dep_row(a, "_reg_probe").map(|e| e.reference),
+            None,
+            "A only PINS the name, so it has no dep ROW for it — a pin has no consts to guard"
         );
         assert_eq!(
-            both.anchor_fp("_reg_b", "_reg_probe"),
-            None,
-            "B lost the name, so B has NO anchor for it — decline, never A's fingerprint"
+            both.dep_row(b, "_reg_probe").map(|e| e.reference),
+            Some("function _reg_probe(x) = x + 99;"),
+            "B's dep row is B's own"
         );
     }
 
-    /// TWO ANONYMOUS LIBRARIES ARE STILL TWO LIBRARIES. Ownership keys on the row-set INDEX rather
+    /// TWO ANONYMOUS LIBRARIES ARE STILL TWO LIBRARIES. Scoping keys on the row-set INDEX rather
     /// than `Rows::name`, because `Rows::default()` leaves the name empty and a string key collapsed
     /// every unnamed library into one — a gate that silently stops gating, which is worse than not
-    /// having it.
+    /// having it. Asserted through ANCHORING now that a shared name is no longer a fault: two
+    /// unnamed libraries with different sources must still answer their own fingerprints.
     #[test]
-    fn ownership_keys_on_the_hand_over_not_the_name() {
+    fn scoping_keys_on_the_hand_over_not_the_name() {
+        static X_ROWS: &[Entry] = &[
+            Entry {
+                name: "_reg_leaf",
+                reference: "function _reg_leaf(x) = x + 7;",
+                consts: &[],
+                consts_v: &[],
+                deps: &[],
+                builtins: &[],
+                func: probe,
+            },
+            Entry {
+                name: "_reg_root",
+                reference: "function _reg_root(x) = _reg_leaf(x);",
+                consts: &[],
+                consts_v: &[],
+                deps: &["_reg_leaf"],
+                builtins: &[],
+                func: probe,
+            },
+        ];
+        static Y_ROWS: &[Entry] = &[
+            Entry {
+                name: "_reg_leaf",
+                reference: "function _reg_leaf(x) = x + 8;",
+                consts: &[],
+                consts_v: &[],
+                deps: &[],
+                builtins: &[],
+                func: probe,
+            },
+            Entry {
+                name: "_reg_root",
+                reference: "function _reg_root(x) = _reg_leaf(x) * 2;",
+                consts: &[],
+                consts_v: &[],
+                deps: &["_reg_leaf"],
+                builtins: &[],
+                func: probe,
+            },
+        ];
         let both = Registry::new()
-            .with(probe_rows("", PROBE))
-            .with(probe_rows("", PROBE));
-        assert_eq!(
-            both.faults(),
-            vec![Fault::ForeignShadow {
-                library: "",
-                name: "_reg_probe",
-                owner: "",
-            }],
+            .with(probe_rows("", X_ROWS))
+            .with(probe_rows("", Y_ROWS));
+        assert_eq!(both.faults(), Vec::new());
+        assert_eq!(both.function_count(), 4, "every row is indexed");
+        assert_ne!(
+            both.anchor_fp(&X_ROWS[1], "_reg_leaf"),
+            both.anchor_fp(&Y_ROWS[1], "_reg_leaf"),
             "the second hand-over is a different library even with the same (empty) name"
         );
-        assert_eq!(both.function_count(), 1);
+    }
+
+    /// AN ECLIPSED ROW IS SAFE BECAUSE ITS TWIN IS IDENTICAL, and that is the claim under test —
+    /// not that eclipsing happens, but that what it passes over could never have answered
+    /// differently. Two libraries transcribing one upstream function is the normal case (fab-lang
+    /// and fab-bosl2 overlap on 66 names); the second is unreachable for dispatch and still fully
+    /// present for its own library's anchors, which is what keeps its dependent cone alive.
+    #[test]
+    fn an_eclipsed_row_has_an_identical_live_twin() {
+        let both = Registry::new()
+            .with(probe_rows("first", PROBE))
+            .with(probe_rows("second", PROBE));
+        assert_eq!(both.faults(), Vec::new(), "a shared name is not a fault");
+        assert_eq!(both.function_count(), 2, "both rows are indexed");
+        assert_eq!(both.eclipsed(), vec![("second", "_reg_probe")]);
+        // The invariant that makes it safe: same fingerprint as the row that shadowed it.
+        let fp = both.reference_fp("_reg_probe").expect("indexed");
+        assert_eq!(
+            fp,
+            function_fingerprint(PROBE[0].reference).expect("parses"),
+            "the eclipsed row's reference hashes to exactly what dispatch resolves"
+        );
+        // Anchoring still answers. (Both hand-overs share one static slice here, so the row is
+        // literally the same address in both libraries — the aliasing is benign precisely because
+        // the two claims are the same claim. `scoping_keys_on_the_hand_over_not_the_name` is where
+        // two DISTINCT rows prove the scoping.)
+        assert_eq!(both.anchor_fp(&PROBE[0], "_reg_probe"), Some(fp));
     }
 
     /// Adding rows after a question has been asked REBUILDS rather than serving a stale index. The

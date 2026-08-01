@@ -1394,7 +1394,7 @@ pub(super) fn _fab_poc_outward(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Re
         return fx.reinterpret("_fab_poc_outward", FALLBACK_SOURCES, args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
-    let out = rt::binary(fx, rt::BinOp::Add, fx.call_named("_fab_poc_absent", &[p_x.clone()])?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    let out = rt::binary(fx, rt::BinOp::Add, fx.call_named("_fab_poc_absent", &[(None, p_x.clone())])?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
     Ok(out)
 }
 

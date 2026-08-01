@@ -369,10 +369,21 @@ pub trait FnCtx: Warn {
     /// function 'name'` and answer `undef`, which is what OpenSCAD does and what a corpus naming a
     /// newer-BOSL2 function depends on to render the rest.
     ///
+    /// ARGUMENTS ARRIVE AS WRITTEN, names attached, and slot matching happens HERE against whatever
+    /// the name actually resolved to. Positionalising at compile time would mean matching against
+    /// the LIBRARY's parameter list for a callee that resolves against the USER's program — AN.10
+    /// wearing a function's hat, and the same hazard AR.20.8 found and removed on the module side.
+    /// The fix there was the same one: stop making a claim about the callee, and there is nothing
+    /// left to violate.
+    ///
     /// # Errors
     /// Whatever the callee's body raises. A decline (`Unimplemented`) where no evaluator exists
     /// ([`NoClosures`]) — the whole call re-interprets, so the gap costs speed, never an answer.
-    fn call_named(&self, name: &str, args: &[Value]) -> crate::Result<Value>;
+    fn call_named(
+        &self,
+        name: &str,
+        args: &[(Option<&'static str>, Value)],
+    ) -> crate::Result<Value>;
 }
 
 /// The [`FnCtx`] for call sites with NO evaluator — benches, oracles, value-level batteries. It
@@ -419,7 +430,11 @@ impl FnCtx for NoClosures {
         crate::rt::run_interpreted(fallback_sources, name, args)
     }
 
-    fn call_named(&self, _name: &str, _args: &[Value]) -> crate::Result<Value> {
+    fn call_named(
+        &self,
+        _name: &str,
+        _args: &[(Option<&'static str>, Value)],
+    ) -> crate::Result<Value> {
         // No program, so no definition to resolve against — and unlike `reinterpret` there is no
         // batch-local island to fall back to, because the whole point of this capability is that
         // the callee is NOT in the batch. Refuses rather than answering `undef`, which would be

@@ -972,7 +972,11 @@ impl crate::surface::FnCtx for NativeFnCtx<'_, '_> {
         reinterpret_named(self.ctx, &self.caller, name, args)
     }
 
-    fn call_named(&self, name: &str, args: &[Value]) -> crate::Result<Value> {
+    fn call_named(
+        &self,
+        name: &str,
+        args: &[(Option<&'static str>, Value)],
+    ) -> crate::Result<Value> {
         call_named_outward(self.ctx, &self.caller, name, args)
     }
 
@@ -1066,16 +1070,40 @@ pub(super) fn call_named_outward(
     ctx: &super::Ctx<'_>,
     caller: &Scope,
     name: &str,
-    args: &[Value],
+    args: &[(Option<&'static str>, Value)],
 ) -> crate::Result<Value> {
-    if ctx.functions.contains_key(name) {
-        return reinterpret_named(ctx, caller, name, args);
+    if let Some(&((params, body), home)) = ctx.functions.get(name) {
+        // The interpreted twin's own recursion verdict, NAME-FUL — this is a named call.
+        let depth = ctx.live_calls.get() + 1;
+        if depth > super::MAX_CALL_DEPTH {
+            return Err(crate::Error::Eval(format!(
+                "Recursion detected calling function '{name}'"
+            )));
+        }
+        ctx.live_calls.set(depth);
+        let _live = LiveCallTicket(ctx);
+        // Same reasoning as the depth decline (AR.24): one machine, one explicit stack. A native
+        // re-entered per level down an interpreted chain would grow the Rust stack per level,
+        // which is the class the interpreter designed out.
+        let _quiet = SuppressIntrinsics::enter(ctx);
+        let base = ctx.island_globals.borrow()[home].clone();
+        let owned: Vec<(Option<std::rc::Rc<str>>, Value)> = args
+            .iter()
+            .map(|(n, v)| (n.map(std::rc::Rc::from), v.clone()))
+            .collect();
+        let (slots, dollars, diagnostics) =
+            super::fill_slots(params, owned.iter().map(|(n, v)| (n.as_ref(), v.clone())));
+        // Upstream's own arg diagnostics, for free — the interpreter emits these and a compiled
+        // caller that swallowed them would be a console divergence.
+        for d in diagnostics {
+            ctx.warn(d);
+        }
+        let call = bind_values(params, &slots, &dollars, caller, &base, ctx)?;
+        return super::eval_with_ctx(body, &call, ctx);
     }
     let bound = caller.lookup(name);
     if matches!(bound, Value::Function { .. }) {
-        let named: Vec<(Option<&'static str>, Value)> =
-            args.iter().map(|v| (None, v.clone())).collect();
-        return invoke_function_value(ctx, caller, &bound, &named);
+        return invoke_function_value(ctx, caller, &bound, args);
     }
     ctx.warn(format!("Ignoring unknown function '{name}'"));
     Ok(Value::Undef)

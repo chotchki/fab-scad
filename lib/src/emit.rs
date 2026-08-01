@@ -1061,22 +1061,26 @@ impl Emitter<'_, '_> {
             // static sibling call means a decliner takes every one of its callers with it and only
             // ~88 of the 463 dropped had a reason of their own.
             //
-            // ALL-POSITIONAL ONLY. A named argument has to be matched against the callee's declared
-            // parameter list, and the whole premise here is that we do not have one — the callee is
-            // outside the batch. Guessing a slot is the AN-family failure this codebase keeps
-            // finding, so a named arg still declines by name.
-            if args.iter().all(|a| a.name.is_none()) {
-                let emitted: Vec<String> = args
-                    .iter()
-                    .map(|a| self.expr(&a.value))
-                    .collect::<Result<_, _>>()?;
-                return Ok(format!(
-                    "fx.call_named({name:?}, &[{}])?",
-                    emitted.join(", ")
-                ));
-            }
-            return Err(format!(
-                "named arg to out-of-batch callee `{name}` (cannot positionalise without its params)"
+            // ARGUMENTS GO OVER AS WRITTEN, names attached, and the runtime matches slots against
+            // whatever the name actually resolved to. Positionalising here would mean matching
+            // against the LIBRARY's parameter list for a callee that resolves against the USER's
+            // program — AN.10 wearing a function's hat. AR.20.8 found and removed exactly that
+            // hazard on the module side, and the fix is the same: make no claim about the callee
+            // and there is nothing left to violate. It also costs nothing in coverage, where
+            // declining named args cost ~60 functions.
+            let emitted: Vec<String> = args
+                .iter()
+                .map(|a| {
+                    let v = self.expr(&a.value)?;
+                    Ok(match &a.name {
+                        Some(n) => format!("(Some({:?}), {v})", &**n),
+                        None => format!("(None, {v})"),
+                    })
+                })
+                .collect::<Result<_, String>>()?;
+            return Ok(format!(
+                "fx.call_named({name:?}, &[{}])?",
+                emitted.join(", ")
             ));
         };
         // A generated sibling: everything is static, so the FULL binding rules run at COMPILE
@@ -3765,7 +3769,19 @@ mod tests {
         /// is dynamic, it reaches every callee rather than the lexical children — and the function
         /// side simply never had the check. Found the only way this class ever gets found: by
         /// building the band.
-        const FLOOR: usize = 1139;
+        ///
+        /// 1217 once `call_named` carried the argument NAMES over instead of positionalising them
+        /// (91.5%). Declining named args to an out-of-batch callee was costing 78 functions for a
+        /// caution that turned out to be unnecessary: matching slots at RUNTIME against whatever the
+        /// name resolved to is not merely as safe as compile-time positionalising, it is safer —
+        /// positionalising matches against the LIBRARY's parameter list for a callee that resolves
+        /// against the USER's program, which is AN.10 wearing a function's hat. AR.20.8 found and
+        /// removed exactly that hazard on the module side; this is the same fix.
+        ///
+        /// The tail is now constructs and nothing else: free reads 36, echo-in-function 29,
+        /// C-style comprehension 11, `rands` 8, `$`-args in sibling calls ~11, duplicate parameter
+        /// 5 (a CORRECT decline), range form 2.
+        const FLOOR: usize = 1217;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

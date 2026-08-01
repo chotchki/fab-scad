@@ -1055,7 +1055,16 @@ impl Emitter<'_, '_> {
                 .collect::<Result<_, _>>()?;
             return Ok(format!("rt::bi::{name}(&[{}])", emitted.join(", ")));
         }
-        let Some(sib) = self.siblings.iter().find(|s| s.name == name) else {
+        // A `$`-ARGUMENT sets a DYNAMIC binding for the callee, which a static Rust call has no
+        // frame to carry — so route the whole call through dispatch instead of declining it. The
+        // runtime's `fill_slots` already separates `$`-args from positional slots and `bind_values`
+        // binds them into the call frame's dynamic parent, exactly as the interpreter does. Costs a
+        // dispatch where a static call would have done, buys the calls back.
+        let dynamic_arg = args
+            .iter()
+            .any(|a| a.name.as_deref().is_some_and(|n| n.starts_with('$')));
+        let Some(sib) = self.siblings.iter().find(|s| s.name == name).filter(|_| !dynamic_arg)
+        else {
             // AR.27 — the callee is not in this batch, so DISPATCH instead of declining. Measured:
             // this is the difference between 866 and 1162 of BOSL2's 1329 functions, because a
             // static sibling call means a decliner takes every one of its callers with it and only
@@ -1094,6 +1103,8 @@ impl Emitter<'_, '_> {
             let v = self.expr(&a.value)?;
             let slot = if let Some(n) = &a.name {
                 if n.starts_with('$') {
+                    // Unreachable: `dynamic_arg` above routes such a call to dispatch. Belt, and
+                    // it would be a DECLINE rather than a wrong answer if the guard ever moved.
                     return Err(format!("$-arg in sibling call `{name}`"));
                 }
                 let Some(i) = params.iter().position(|p| p == &**n) else {
@@ -3781,7 +3792,13 @@ mod tests {
         /// The tail is now constructs and nothing else: free reads 36, echo-in-function 29,
         /// C-style comprehension 11, `rands` 8, `$`-args in sibling calls ~11, duplicate parameter
         /// 5 (a CORRECT decline), range form 2.
-        const FLOOR: usize = 1217;
+        ///
+        /// 1233 (92.7%) once a `$`-ARGUMENT routed a sibling call through dispatch too. A `$`-arg
+        /// sets a DYNAMIC binding for the callee and a static Rust call has no frame to carry one,
+        /// so the call declined — but `fill_slots` already separates `$`-args and `bind_values`
+        /// already binds them into the call frame's dynamic parent, so the runtime path needed
+        /// nothing new at all. Costs a dispatch where a static call would have done.
+        const FLOOR: usize = 1233;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

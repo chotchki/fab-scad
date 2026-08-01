@@ -522,8 +522,18 @@ pub fn generate_native(
                 .map_err(|e| format!("{name}: default of `{}`: {e}", p.name))?,
         };
         // A cheap default binds eagerly (`unwrap_or`); a constructing one stays lazy.
+        //
+        // A FALLIBLE default gets a `match` rather than `unwrap_or_else`, because a `?` inside a
+        // closure returning `Value` does not type-check — the closure would have to return
+        // `Result`, and `unwrap_or_else` does not want one. BOSL2's `binsearch(…, cmp=f_cmp())`
+        // is the live case: its default CALLS a sibling. Found by a skeptic compiling the whole
+        // 866-function band, which is a thing no gate could do until AR.26.2 could emit one.
         let bind = if default == "rt::Value::Undef" {
             format!("{getter}.cloned().unwrap_or(rt::Value::Undef)")
+        } else if default.contains('?') {
+            format!(
+                "match {getter}.cloned() {{ Some(v) => v, None => {default} }}"
+            )
         } else {
             format!("{getter}.cloned().unwrap_or_else(|| {default})")
         };
@@ -1854,7 +1864,12 @@ pub fn generate_module(entry_names: &[&str]) -> Result<String, String> {
             baked: bake_bootstrap(b, &mut sink)?,
         });
     }
-    generate_batch(&subjects)
+    // The bootstrap path's LIBRARY is the hand registry, so that is what declares the surface.
+    // `bootstrap_all` is the only remaining reader of the hand table from here, and AR.26.3 deletes
+    // it along with the path.
+    let (all, _pins) = fab_lang::bootstrap_all();
+    let declared: Vec<&str> = all.iter().map(|b| b.source).collect();
+    generate_batch(&subjects, &declared)
 }
 
 /// AR.20.8 — the generated file of MODULE natives, from their verbatim references.
@@ -2053,23 +2068,30 @@ struct ModuleSubject<'a> {
     baked: Vec<(&'a str, Baked)>,
 }
 
-/// The generated fn ident for a module name: raw-escaped when the name is a Rust KEYWORD (BOSL2
-/// has `module move()`), declined for the few names a raw identifier cannot spell. The fingerprint
-/// gate keys on the scad NAME, so the Rust ident is free to differ.
+/// The generated fn ident for a library name: raw-escaped when the name is a Rust KEYWORD (BOSL2
+/// has `module move()` and `function typeof()`), declined for the few names a raw identifier
+/// cannot spell. The fingerprint gate keys on the scad NAME, so the Rust ident is free to differ.
+///
+/// BOTH keyword classes, and the second one is not pedantry: RESERVED words are not usable as
+/// identifiers either, and BOSL2 declares `typeof`. It emitted bare in three positions — the fn
+/// definition, the registry row's `func`, and every sibling call site — and none of them parse.
+/// Found by compiling the whole band; no substring assertion could have.
 ///
 /// # Errors
 /// `crate`/`self`/`super`/`Self`, which `r#` cannot escape.
 fn rust_fn_ident(name: &str) -> Result<String, String> {
     match name {
         "crate" | "self" | "super" | "Self" => {
-            Err(format!("module name `{name}` cannot be a Rust identifier"))
+            Err(format!("name `{name}` cannot be a Rust identifier"))
         }
+        // Strict keywords.
         "as" | "async" | "await" | "break" | "const" | "continue" | "dyn" | "else" | "enum"
         | "extern" | "false" | "fn" | "for" | "gen" | "if" | "impl" | "in" | "let" | "loop"
         | "match" | "mod" | "move" | "mut" | "pub" | "ref" | "return" | "static" | "struct"
-        | "trait" | "true" | "try" | "type" | "unsafe" | "use" | "where" | "while" => {
-            Ok(format!("r#{name}"))
-        }
+        | "trait" | "true" | "try" | "type" | "unsafe" | "use" | "where" | "while"
+        // Reserved for future use — equally unusable as a bare identifier.
+        | "abstract" | "become" | "box" | "do" | "final" | "macro" | "override" | "priv"
+        | "typeof" | "unsized" | "virtual" | "yield" => Ok(format!("r#{name}")),
         _ => Ok(name.to_string()),
     }
 }
@@ -2193,7 +2215,232 @@ pub fn generate_from_library(
             baked: bake_reads(&f.source, lib, &folded)?,
         });
     }
-    generate_batch(&subjects)
+    // The whole library DECLARES; only `names` compile. Two lists, two lengths, on purpose.
+    let declared: Vec<&str> = lib.functions.values().map(|f| f.source.as_str()).collect();
+    generate_batch(&subjects, &declared)
+}
+
+/// How many `#` a raw string literal needs to hold `content` — one more than the longest run of
+/// `#` that follows a `"` inside it, and at least one.
+///
+/// `r#"…"#` cannot contain `"#`; `r##"…"##` cannot contain `"##`. Scanning for the worst case is
+/// three lines and removes a whole class of "this library happens to contain the wrong bytes"
+/// failure, which at library scale is not hypothetical: BOSL2 has exactly one such function and it
+/// took the other 865 down with it.
+fn raw_string_hashes(content: &str) -> usize {
+    let mut worst = 0;
+    let bytes = content.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b'"' {
+            continue;
+        }
+        let run = bytes[i + 1..].iter().take_while(|&&c| c == b'#').count();
+        worst = worst.max(run);
+    }
+    worst + 1
+}
+
+/// A batch's guard lists: name → (transitive deps, transitive builtins). See [`guard_closures`].
+type GuardClosures<'a> = std::collections::BTreeMap<&'a str, (Vec<String>, Vec<String>)>;
+
+/// The TRANSITIVE dep and builtin closures over an emitted batch (AR.26.2) — what each row's
+/// `deps`/`builtins` guard lists have to carry.
+///
+/// TRANSITIVE, not one hop, and that is forced rather than chosen. A generated native calls its
+/// siblings with STATIC Rust calls, so it INLINES them: it bakes the callee's semantics, the
+/// callee's callee's semantics, and so on down. `guard_veto` checks each listed dep once and does
+/// not recurse, so anything the list omits is a piece of baked semantics nobody proved. The
+/// hand-written lists say the same thing in their doc — "TRANSITIVELY CLOSED by the author" — and
+/// this is that sentence made mechanical.
+///
+/// TWO CONSEQUENCES WORTH KNOWING. It is STRICTER than the hand lists, never weaker: an author
+/// could prune a branch no accepted argument shape reaches, and the closure cannot, so a generated
+/// row guards on deps a hand row would have dropped. More guards means more declines, which is the
+/// safe direction. And it closes the documented ONE HOP hole in the const guard for free —
+/// `needs_post_hoist` and `dep_const_veto` walk `entry.deps` exactly one level, so a list that is
+/// already the full closure makes that one level the whole graph.
+///
+/// Names outside the batch are excluded: by construction a live subject only calls live siblings
+/// (that is what the [`function_band`] fixpoint establishes), so a name that is not a subject is a
+/// BUILTIN or an emitter-internal call, neither of which belongs in `deps`.
+fn guard_closures<'a>(subjects: &'a [Subject<'a>]) -> Result<GuardClosures<'a>, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let in_batch: BTreeSet<&str> = subjects.iter().map(|s| s.name).collect();
+    let mut one_hop: BTreeMap<&str, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
+    for s in subjects {
+        let a = analyze_function(s.source)?;
+        let deps = a
+            .deps
+            .into_iter()
+            .filter(|d| in_batch.contains(d.as_str()))
+            .collect();
+        one_hop.insert(s.name, (deps, a.builtins));
+    }
+    let mut deps: BTreeMap<&str, BTreeSet<String>> =
+        one_hop.iter().map(|(k, (d, _))| (*k, d.clone())).collect();
+    let mut builtins: BTreeMap<&str, BTreeSet<String>> =
+        one_hop.iter().map(|(k, (_, b))| (*k, b.clone())).collect();
+    // Fixpoint rather than a topological walk: the dep graph has real CYCLES (approx <-> idx <->
+    // posmod is a 3-cycle in BOSL2), so no dependency order exists to resolve in. Bounded by the
+    // batch size, which is the longest a chain can be.
+    for _ in 0..=subjects.len() {
+        let (dsnap, bsnap) = (deps.clone(), builtins.clone());
+        let mut changed = false;
+        for (name, (own, _)) in &one_hop {
+            let mut d = dsnap[name].clone();
+            let mut b = bsnap[name].clone();
+            for dep in own {
+                if let Some(x) = dsnap.get(dep.as_str()) {
+                    d.extend(x.iter().cloned());
+                }
+                if let Some(x) = bsnap.get(dep.as_str()) {
+                    b.extend(x.iter().cloned());
+                }
+            }
+            if d != dsnap[name] {
+                deps.insert(name, d);
+                changed = true;
+            }
+            if b != bsnap[name] {
+                builtins.insert(name, b);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(subjects
+        .iter()
+        .map(|s| {
+            (
+                s.name,
+                (
+                    // A row never pins ITSELF: `guard_veto` would compare the running function
+                    // against its own anchor, which is the fingerprint check `resolve` already
+                    // made. Harmless but noise, and it doubles a self-recursive row's list.
+                    deps[s.name]
+                        .iter()
+                        .filter(|d| d.as_str() != s.name)
+                        .cloned()
+                        .collect(),
+                    builtins[s.name].iter().cloned().collect(),
+                ),
+            )
+        })
+        .collect())
+}
+
+/// A library's functions that actually COMPILE TOGETHER, and why the rest do not.
+///
+/// The unit `generate_batch` should be handed at library scale. See [`function_band`].
+pub struct FunctionBand<'a> {
+    /// The survivors, name-ordered — every one emits against a sibling table containing only
+    /// other survivors.
+    pub subjects: Vec<Subject<'a>>,
+    /// `(name, reason)` for every function that does not, name-ordered. The histogram's raw
+    /// material, and the reason a coverage number can be a GATE rather than a vanity metric.
+    pub declined: Vec<(&'a str, String)>,
+    /// How many rounds the fixpoint took. Diagnostic: a jump means the emitted call graph got
+    /// deeper, which is the shape of a regression that does not otherwise announce itself.
+    pub rounds: usize,
+}
+
+/// THE FIXPOINT (AR.26.2): probe every function, DROP the decliners, REBUILD the sibling table from
+/// the survivors only, repeat until nothing more falls out.
+///
+/// WHY IT CANNOT BE ONE PASS, which is the whole finding. A generated function calls a sibling with
+/// a STATIC Rust call — a bare ident naming another generated fn. Probe a function against a sibling
+/// table built from the WHOLE library and it happily emits a call to a function that itself declined
+/// and therefore does not exist in the output. That is not a coverage overcount, it is a file that
+/// does not compile; and because a decliner takes its callers with it, the loss cascades.
+///
+/// MEASURED on the pinned BOSL2: the single-pass probe reports 1197 of 1329, the fixpoint converges
+/// at 866 after 9 rounds. Of the 463 dropped, only about 62 decline for their own reasons — free
+/// reads, echo-in-function, C-style comprehensions, `rands`. The rest is cascade, which is where the
+/// coverage lever now lives: the MODULE side has no such problem because a module resolves its
+/// callees at RUNTIME through dispatch, so a function whose callee declined could do the same rather
+/// than dropping. That is a separate item and a large one; this function's job is to make the
+/// present design's output CORRECT and its number HONEST.
+///
+/// Monotone: the live set only ever shrinks, so it terminates in at most one round per function.
+///
+/// # Errors
+/// Only a bake failure that is not a decline — a library whose constants cannot be folded at all.
+pub fn function_band<'a>(
+    lib: &'a crate::library::Library,
+) -> Result<FunctionBand<'a>, String> {
+    let folded = lib.fold_constants();
+    let fns: Vec<&'a crate::library::LibFn> = lib.functions.values().collect();
+    // Bakes are a property of the FUNCTION and its library, never of the live set, so they are
+    // computed once rather than per round. A bake failure is a decline like any other.
+    let baked: Vec<Vec<(&'a str, Baked)>> = fns
+        .iter()
+        .map(|f| bake_reads(&f.source, lib, &folded).unwrap_or_default())
+        .collect();
+
+    let mut live: Vec<bool> = vec![true; fns.len()];
+    let mut rounds = 0_usize;
+    let mut reasons: Vec<Option<String>> = vec![None; fns.len()];
+    loop {
+        rounds += 1;
+        // The sibling table IS the live set — a function that cannot even produce a `Sibling`
+        // (its signature does not analyze) is not live, so the two can never disagree about who
+        // exists.
+        let mut siblings: Vec<Sibling> = Vec::with_capacity(fns.len());
+        for (i, f) in fns.iter().enumerate() {
+            if !live[i] {
+                continue;
+            }
+            match sibling_of(&Subject {
+                name: &f.name,
+                source: &f.source,
+                baked: baked[i].clone(),
+            }) {
+                Ok(sib) => siblings.push(sib),
+                Err(e) => {
+                    live[i] = false;
+                    reasons[i] = Some(e);
+                }
+            }
+        }
+        let mut next = live.clone();
+        for (i, f) in fns.iter().enumerate() {
+            if !live[i] {
+                continue;
+            }
+            if let Err(e) = generate_native(&f.source, &baked[i], &siblings) {
+                next[i] = false;
+                reasons[i] = Some(e);
+            }
+        }
+        if next == live {
+            break;
+        }
+        live = next;
+    }
+
+    let mut subjects = Vec::new();
+    let mut declined = Vec::new();
+    for (i, f) in fns.iter().enumerate() {
+        if live[i] {
+            subjects.push(Subject {
+                name: &f.name,
+                source: &f.source,
+                baked: baked[i].clone(),
+            });
+        } else {
+            declined.push((
+                f.name.as_str(),
+                reasons[i].clone().unwrap_or_else(|| "declined".to_string()),
+            ));
+        }
+    }
+    Ok(FunctionBand {
+        subjects,
+        declined,
+        rounds,
+    })
 }
 
 /// AR.16 — the constants THIS function reads, folded and paired with the library's own source.
@@ -2256,13 +2503,20 @@ pub struct Subject<'a> {
 }
 
 /// The whole generated FILE for a batch of subjects, header + imports included.
-/// Deterministic: same subjects → same bytes (the regen test's contract).
+/// Deterministic: same inputs → same bytes (the regen test's contract).
+///
+/// `declared` is the library's DECLARATION — the verbatim reference of every function it hosts,
+/// which the `SURFACE` table is derived from. Deliberately a separate list from `subjects` and
+/// deliberately a different LENGTH: a library declares more than it compiles (BOSL2 declares 1329
+/// and the emitter compiles 866), and `LibrarySurface` splits those two questions for exactly that
+/// reason. Passing the subjects here instead would quietly assert they are the same set, which is
+/// the drift this phase exists to kill.
 ///
 /// # Errors
 /// A subject whose source does not parse to a single function definition, or that uses a construct
 /// outside the emitter's subset — declines LOUDLY with the construct named, because a partial native
 /// would be a wrong native.
-pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
+pub fn generate_batch(subjects: &[Subject<'_>], declared: &[&str]) -> Result<String, String> {
     // The sibling table FIRST, whole batch, self included: mutual recursion (approx ↔ idx ↔
     // posmod is a real 3-cycle) forward-references freely in Rust, and named sibling arguments
     // bind against these declared param lists at compile time.
@@ -2278,7 +2532,6 @@ pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
 
     let mut fns = String::new();
     for subject in subjects {
-        let name = subject.name;
         for (n, b) in &subject.baked {
             let scad = b.scad.clone();
             if let Some(prev) = fallback_consts.insert((*n).to_string(), scad.clone())
@@ -2288,11 +2541,6 @@ pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
                     "const `{n}` baked differently across the batch ({prev} vs {scad})"
                 ));
             }
-        }
-        if subject.source.contains("\"#") {
-            return Err(format!(
-                "{name}: reference contains `\"#` — raw string emission breaks"
-            ));
         }
         fallback_refs.push_str(subject.source);
         fallback_refs.push('\n');
@@ -2335,28 +2583,39 @@ pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
     );
     // The AR.10 fallback program: baked constants then verbatim references, one island whose
     // bindings equal the bakes — what a declining native interprets instead of recursing.
-    header.push_str(
+    //
+    // The raw-string HASH LEVEL is computed from the content, not fixed at one. BOSL2's
+    // `phillips_depth` carries a `"#` in a string literal, and at library scale that one reference
+    // aborted the entire batch — which is the wrong answer twice over: the function is perfectly
+    // compilable, and refusing 866 functions over one delimiter is not a decline, it is an outage.
+    let mut island = String::new();
+    for (n, scad) in &fallback_consts {
+        let _ = writeln!(island, "{n} = {scad};");
+    }
+    island.push_str(&fallback_refs);
+    let hashes = "#".repeat(raw_string_hashes(&island));
+    let _ = write!(
+        header,
         "/// Every baked constant + the batch's verbatim references as ONE interpretable program —\n\
          /// the AR.10 depth fallback's target (see `native_rt`). Constants print via Rust's\n\
          /// roundtrip-exact float formatting, so the interpreted bindings equal the bakes bit-for-bit.\n\
-         pub(super) const FALLBACK_SOURCES: &str = r#\"\n",
+         pub(super) const FALLBACK_SOURCES: &str = r{hashes}\"\n{island}\"{hashes};\n\n"
     );
-    for (n, scad) in &fallback_consts {
-        let _ = writeln!(header, "{n} = {scad};");
-    }
-    header.push_str(&fallback_refs);
-    header.push_str("\"#;\n\n");
 
-    // AR.14.5 — the registry's declared SURFACE as static data: the same derivation
+    // AR.14.5 — the library's declared SURFACE as static data: the same derivation
     // `native_surface()` ran at every process start (parse each reference, walk its body for
     // type evidence, widest-wins per parameter), run ONCE here instead. The fuzzer's decl table
     // stops being derived-then-leaked and becomes bytes the regen gate pins; the equivalence
     // test in fab-lang keeps the runtime derivation as the oracle so the two cannot drift.
-    // Sorted by name — order is part of the seed-stability contract.
-    let (all_subjects, _pins) = fab_lang::bootstrap_all();
-    let mut surface: Vec<(String, String)> = all_subjects
+    // Sorted by name — order is part of the seed-stability contract, because the generator
+    // INDEXES this table with the RNG and a reordering silently re-points every accumulated corpus.
+    //
+    // AR.26.2: from `declared`, NOT from `fab_lang::bootstrap_all()`. Reading the hand registry
+    // here meant a library-sourced batch carried the HAND registry's surface no matter which
+    // library it had actually been given — a generated crate describing somebody else's functions.
+    let mut surface: Vec<(String, String)> = declared
         .iter()
-        .filter_map(|s| fab_lang::SurfaceFn::from_reference(s.source))
+        .filter_map(|src| fab_lang::SurfaceFn::from_reference(src))
         .map(|f| {
             let params: Vec<String> = f
                 .params
@@ -2379,6 +2638,10 @@ pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
         })
         .collect();
     surface.sort_by(|a, b| a.0.cmp(&b.0));
+    // A library may declare a name twice (BOSL2 does); the surface is a SET, first-wins, matching
+    // the registry's own collision rule. Without this a duplicate would emit two `Decl` rows and
+    // the fuzzer would draw the same function under two indices.
+    surface.dedup_by(|a, b| a.0 == b.0);
     let mut table = String::from(
         "/// The registry's declared surface (AR.14.5) — what `native_surface()` derived at every\n\
          /// process start, as STATIC data. `names_bind: true` throughout: these stand in for BOSL2\n\
@@ -2391,7 +2654,97 @@ pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
     }
     table.push_str("];\n\n");
 
-    Ok(header + &table + &fns)
+    // AR.26.2 — the REGISTRY ROWS, emitted beside the natives they name. Until now the function
+    // side's rows were hand-written in fab-lang while the module band generated its own, which put
+    // the two halves of one contract in two places maintained by different means. A generated
+    // library now hands over its own dispatch table, which is the only shape that works once the
+    // library lives in a crate fab-lang cannot see.
+    let closures = guard_closures(subjects)?;
+    // Bake EXPECTATIONS, deduped batch-wide with conflicts LOUD — the same cross-batch rule the
+    // fallback island enforces above, one level down. ALL bakes go through `consts_v` rather than
+    // splitting numbers into `consts`: the two fields differ only in how the arm step spells the
+    // comparison (`to_bits` vs `value_bits_eq`, which does `to_bits` on a `Num`), and one
+    // mechanism is one thing to get right.
+    let mut expectations: std::collections::BTreeMap<&str, &Baked> =
+        std::collections::BTreeMap::new();
+    for subject in subjects {
+        for (n, b) in &subject.baked {
+            if let Some(prev) = expectations.insert(n, b)
+                && prev.value != b.value
+            {
+                return Err(format!("const `{n}` baked differently across the batch"));
+            }
+        }
+    }
+    let mut rows = String::new();
+    if !expectations.is_empty() {
+        rows.push_str(
+            "/// Bake EXPECTATIONS — what each guarded registry row hands the arm-time const guard.\n\
+             /// The guard compares the program's own top-level binding against this value BIT-exactly\n\
+             /// before the native may wire, because the fingerprint proves the FUNCTION and never the\n\
+             /// constants it names; a rebound constant interprets instead.\n",
+        );
+        for (n, b) in &expectations {
+            let _ = write!(rows, "fn __bake_{n}() -> rt::Value {{\n    {}\n}}\n", b.emit()?);
+        }
+        rows.push('\n');
+    }
+    rows.push_str(
+        "/// This batch's registry rows. The VERBATIM reference is the fingerprint gate's ground\n\
+         /// truth — a program whose definition drifted from the pinned library interprets instead of\n\
+         /// wiring — and `deps`/`builtins` are TRANSITIVE closures over the batch, because a static\n\
+         /// sibling call inlines the callee's semantics and the callee's own gate is never consulted\n\
+         /// at dispatch.\n\
+         ///\n\
+         /// NOT WIRED YET (AR.26.2). These rows and fab-lang's hand table name the SAME functions,\n\
+         /// so registering both would claim every name twice; the swap is AR.21's, when the hand\n\
+         /// table goes. Until then they are held to the hand table by\n\
+         /// `the_emitted_rows_agree_with_the_hand_registry`, which is what makes the swap safe.\n\
+         #[allow(dead_code, reason = \"see the note above — checked by test, wired at AR.21\")]\n\
+         pub(super) static REGISTRY: &[rt::Entry] = &[\n",
+    );
+    for subject in subjects {
+        let (deps, builtins) = &closures[subject.name];
+        let consts_v = if subject.baked.is_empty() {
+            "&[]".to_string()
+        } else {
+            format!(
+                "&[{}]",
+                subject
+                    .baked
+                    .iter()
+                    .map(|(n, _)| format!("({n:?}, __bake_{n})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let list = |xs: &[String]| {
+            if xs.is_empty() {
+                "&[]".to_string()
+            } else {
+                format!(
+                    "&[{}]",
+                    xs.iter()
+                        .map(|x| format!("{x:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        };
+        let _ = write!(
+            rows,
+            "    rt::Entry {{\n        name: {:?},\n        reference: {:?},\n        consts: &[],\n        consts_v: {},\n        deps: {},\n        builtins: {},\n        func: {},\n    }},\n",
+            subject.name,
+            subject.source,
+            consts_v,
+            list(deps),
+            list(builtins),
+            rust_fn_ident(subject.name)?,
+        );
+    }
+    rows.push_str("];\n\n");
+
+    Ok(header + &table + &rows + &fns)
 }
 
 /// The entries the generated module currently covers, in DEPENDENCY order (a sibling call may
@@ -3338,10 +3691,27 @@ mod tests {
         /// 1206 at AR.17.2: function LITERALS emit as `fx.mint_fn` calls — the evaluator
         /// constructs the closure from a path-addressed node of the fingerprint-proven def, so
         /// the whole 107-strong literal band collapsed in one move (fnliterals.scad essentially
-        /// whole). The tail is now free reads (36), echo-in-function (28), C-style
-        /// comprehensions (11), `rands` (8), `$`-args in sibling calls (~15), and the
-        /// param-held-callee shape (12) whose conditional emission has no static else-half.
-        const FLOOR: usize = 1206;
+        /// whole). The tail was free reads (36), echo-in-function (28), C-style comprehensions
+        /// (11), `rands` (8), `$`-args in sibling calls (~15), and the param-held-callee shape
+        /// (12) whose conditional emission has no static else-half.
+        ///
+        /// LOWERED 1206 -> 866 at AR.26.2, and this one is a MEASUREMENT CORRECTION rather than a
+        /// regression — the third time this phase has found a ratchet counting a transpiler nobody
+        /// runs (AR.16's empty bakes, AR.20.9's empty siblings, AR.22's $-mirage). Every number
+        /// above was produced by probing each function against a sibling table built from the WHOLE
+        /// library, including functions that decline. A generated sibling call is a STATIC Rust call
+        /// to a bare ident, so those emissions named functions that do not exist in the output: the
+        /// file does not compile, and a decliner takes its callers down with it. `function_band`
+        /// runs the drop-and-rebuild to a FIXPOINT — 9 rounds — and 866 is what survives.
+        ///
+        /// WHERE THE 463 WENT, and it is the roadmap: only about 62 decline for their own reasons
+        /// (free read 25, echo-in-function 23, C-style comprehension 8, `rands` 6). The rest is
+        /// CASCADE, and the histogram names each victim's callee — `move` alone takes 24 with it,
+        /// `sort` 15, `rot` 14. Two levers, both worth more than any remaining construct band:
+        /// clear the high-fan-in root declines, or let a call to a non-emitting sibling dispatch
+        /// through the evaluator the way a MODULE call already does (which is exactly why the
+        /// module side has no cascade at all).
+        const FLOOR: usize = 866;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -3351,86 +3721,26 @@ mod tests {
             eprintln!("skipping: libs/BOSL2 submodule not checked out");
             return;
         }
-        let mut files: Vec<_> = std::fs::read_dir(&root)
-            .expect("BOSL2 checked out")
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "scad"))
-            .collect();
-        files.sort();
-
-        // Pass 1: every function in the library, so a sibling call resolves library-wide.
-        let mut sources: Vec<(String, String)> = Vec::new(); // (file, text)
-        for f in &files {
-            let text = std::fs::read_to_string(f).expect("readable");
-            sources.push((f.file_name().expect("named").to_string_lossy().into(), text));
-        }
-        let mut refs: Vec<(String, String, String)> = Vec::new(); // (file, name, source)
-        let mut unparsed_files = 0_usize;
-        for (file, text) in &sources {
-            let Ok(prog) = fab_lang::parse(text) else {
-                unparsed_files += 1;
-                continue;
-            };
-            for stmt in &prog.stmts {
-                if let fab_lang::StmtKind::FunctionDef {
-                    name,
-                    params,
-                    body: _,
-                } = &stmt.kind
-                {
-                    let _ = params;
-                    refs.push((
-                        file.clone(),
-                        name.clone(),
-                        text[stmt.span.clone()].to_string(),
-                    ));
-                }
-            }
-        }
-
-        // Pass 2: try to emit each one, WITH the constants it reads baked — the same path
-        // `generate_from_library` takes. Probing with empty bakes measured a transpiler nobody
-        // runs, and would have shown AR.16 as no change at all.
         let lib = crate::library::Library::read(&root).expect("BOSL2 reads");
-        let folded = lib.fold_constants();
-        // The sibling table needs each callee's BAKED defaults (AR.18), so it is built the same
-        // way `generate_batch` builds it — through `sibling_of`, with that subject's own bakes.
-        let siblings: Vec<super::Sibling> = refs
-            .iter()
-            .filter_map(|(_, _, src)| {
-                let baked = super::bake_reads(src, &lib, &folded).unwrap_or_default();
-                super::sibling_of(&super::Subject {
-                    name: "",
-                    source: src,
-                    baked,
-                })
-                .ok()
-            })
-            .collect();
-        let mut ok = 0_usize;
+        let band = super::function_band(&lib).expect("band computes");
+        let total = lib.functions.len();
+        let ok = band.subjects.len();
+
         let mut by_reason: BTreeMap<String, (usize, String)> = BTreeMap::new();
-        for (file, name, src) in &refs {
-            let baked = super::bake_reads(src, &lib, &folded).unwrap_or_default();
-            match super::generate_native(src, &baked, &siblings) {
-                Ok(_) => ok += 1,
-                Err(e) => {
-                    let reason = classify(&e);
-                    let slot = by_reason.entry(reason).or_insert((0, String::new()));
-                    slot.0 += 1;
-                    if slot.1.is_empty() {
-                        slot.1 = format!("{file}:{name}");
-                    }
-                }
+        for (name, reason) in &band.declined {
+            let slot = by_reason.entry(classify(reason)).or_insert((0, String::new()));
+            slot.0 += 1;
+            if slot.1.is_empty() {
+                slot.1 = (*name).to_string();
             }
         }
-
-        let total = refs.len();
         let mut hist: Vec<_> = by_reason.into_iter().collect();
         hist.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
         println!("\n=== BOSL2 codegen coverage ===");
         println!(
-            "files {} ({unparsed_files} unparsed), functions {total}",
-            files.len()
+            "functions {total} ({} unparsed files), fixpoint rounds {}",
+            lib.unparsed.len(),
+            band.rounds
         );
         // Integer tenths-of-a-percent: no usize→f64 cast to justify for one printed number.
         let tenths = ok * 1000 / total.max(1);
@@ -3441,10 +3751,44 @@ mod tests {
         );
         // FIRST-DECLINE-WINS, so every count is a LOWER bound on that construct's real prevalence:
         // a function that trips on a free read may hold three strings behind it. Ranking is still
-        // sound — clearing a band re-runs the survivors against whatever they hit next.
+        // sound — clearing a band re-runs the survivors against whatever they hit next. And the
+        // dominant bucket is now CASCADE ("call to X, not a builtin or generated sibling"), which
+        // names the caller's victim rather than a construct: those functions are compilable and are
+        // waiting on whatever their callee tripped on.
         for (reason, (n, ex)) in &hist {
             println!("  {n:5}  {reason}   e.g. {ex}");
         }
+
+        // CASCADE ROOTS, ranked by blast radius. The histogram above names each victim's missing
+        // CALLEE, which is the wrong half of the story on its own — the actionable question is what
+        // that callee itself tripped on, because clearing ONE root recovers everyone waiting on it.
+        // This is the roadmap the flat histogram cannot be.
+        let own: BTreeMap<&str, &str> = band
+            .declined
+            .iter()
+            .map(|(n, r)| (*n, r.as_str()))
+            .collect();
+        let mut roots: Vec<(usize, &str, String)> = Vec::new();
+        for (reason, (n, _)) in &hist {
+            let Some(rest) = reason.strip_prefix("other — call to `") else {
+                continue;
+            };
+            let Some(callee) = rest.split('`').next() else {
+                continue;
+            };
+            let Some(own_reason) = own.get(callee) else {
+                continue; // not a declining library function — a name nothing declares
+            };
+            roots.push((*n, callee, classify(own_reason)));
+        }
+        roots.sort_by_key(|(n, name, _)| (std::cmp::Reverse(*n), *name));
+        if !roots.is_empty() {
+            println!("--- cascade ROOTS (clear one, recover its column) ---");
+            for (n, callee, why) in roots.iter().take(15) {
+                println!("  {n:5}  {callee} declines on: {why}");
+            }
+        }
+
         assert!(
             ok >= FLOOR,
             "codegen coverage REGRESSED: {ok} functions emit, floor is {FLOOR}. \
@@ -3452,9 +3796,95 @@ mod tests {
              its own, it just falls back to interpreting, which is why this number is a gate."
         );
         assert!(
-            unparsed_files == 0,
-            "{unparsed_files} BOSL2 files no longer parse — that is a PARSER regression, not a \
-             codegen one, and it silently shrinks every count in this report"
+            lib.unparsed.is_empty(),
+            "{} BOSL2 files no longer parse — that is a PARSER regression, not a codegen one, and \
+             it silently shrinks every count in this report: {:?}",
+            lib.unparsed.len(),
+            lib.unparsed
+        );
+    }
+
+
+
+    /// AR.26.2 — the three emitter bugs a library-scale batch exposed, pinned so they cannot
+    /// reopen. All three were invisible for months for one reason: nothing had ever COMPILED a
+    /// batch this wide, and every gate the emitter had asserted on substrings of its own output.
+    /// Substrings prove the emitter ran; they do not prove what it wrote would build.
+    #[test]
+    fn the_library_scale_emitter_bugs_stay_closed() {
+        // (1) RESERVED keywords, not just strict ones. BOSL2 declares `function typeof(...)`,
+        // which emitted bare in three positions and parsed in none of them.
+        for kw in [
+            "move", "type", "fn", "loop", // strict
+            "typeof", "become", "box", "priv", "yield", "macro", "abstract", "do", "final",
+            "override", "unsized", "virtual", // reserved
+        ] {
+            assert_eq!(
+                super::rust_fn_ident(kw).as_deref(),
+                Ok(format!("r#{kw}").as_str()),
+                "`{kw}` must be raw-escaped — a bare keyword is a parse error, not a warning"
+            );
+        }
+        for bad in ["crate", "self", "super", "Self"] {
+            assert!(
+                super::rust_fn_ident(bad).is_err(),
+                "`{bad}` cannot be spelled even raw, so it must decline"
+            );
+        }
+        assert_eq!(super::rust_fn_ident("cuboid").as_deref(), Ok("cuboid"));
+
+        // (2) A FALLIBLE parameter default cannot live in a closure returning `Value`. BOSL2's
+        // `binsearch(key, list, idx, cmp=f_cmp())` defaults by CALLING a sibling.
+        let sib = super::sibling_of(&super::Subject {
+            name: "callee",
+            source: "function callee() = 1;",
+            baked: Vec::new(),
+        })
+        .expect("sibling analyzes");
+        let text = super::generate_native(
+            "function withdefault(a, b=callee()) = a + b;",
+            &[],
+            std::slice::from_ref(&sib),
+        )
+        .expect("emits");
+        assert!(
+            text.contains("match args.get(1).cloned()"),
+            "a fallible default must bind through a `match`, not `unwrap_or_else` — got:\n{text}"
+        );
+        assert!(
+            !text.contains("unwrap_or_else(|| callee"),
+            "a `?` inside a closure returning Value does not type-check"
+        );
+        // and a CHEAP default still takes the eager path
+        let plain = super::generate_native("function plain(a, b=2) = a + b;", &[], &[])
+            .expect("emits");
+        assert!(
+            plain.contains("unwrap_or_else"),
+            "a constant default should stay lazy-but-infallible"
+        );
+
+        // (3) The FALLBACK_SOURCES raw string widens to fit its content. BOSL2's `phillips_depth`
+        // carries a `\"#`, and the old fixed `r#\"…\"#` aborted the whole 866-function batch over it.
+        assert_eq!(super::raw_string_hashes("nothing special"), 1);
+        assert_eq!(super::raw_string_hashes("a \"# b"), 2);
+        assert_eq!(super::raw_string_hashes("a \"## b"), 3);
+        assert_eq!(
+            super::raw_string_hashes("a \" b # c"),
+            1,
+            "a quote and a hash that are not adjacent do not close anything"
+        );
+        let with_hash = super::generate_batch(
+            &[super::Subject {
+                name: "q",
+                source: "function q() = \"#\";",
+                baked: Vec::new(),
+            }],
+            &["function q() = \"#\";"],
+        )
+        .expect("a `\"#` in a reference must not abort the batch");
+        assert!(
+            with_hash.contains("r##\""),
+            "the island must open with enough hashes to hold its content"
         );
     }
 
@@ -3696,10 +4126,14 @@ mod tests {
         let from_library =
             super::generate_from_library(&lib, &names).expect("library path generates");
 
-        // Past the fallback island — see the doc above.
+        // From the first native onward — past the fallback island (see the doc above) AND past the
+        // SURFACE table, which the two paths now DELIBERATELY disagree about: AR.26.2 made the
+        // surface the LIBRARY's declaration, so the registry path declares the hand table's 83
+        // names and the library path declares BOSL2's 1329. That difference is the decoupling
+        // working; the natives below it are what this test is about.
         let natives = |text: &str| {
-            text.rsplit_once("\"#;")
-                .map_or_else(|| text.to_string(), |(_, tail)| tail.to_string())
+            text.find("pub(super) fn ")
+                .map_or_else(String::new, |i| text[i..].to_string())
         };
         assert_eq!(
             natives(&from_registry),

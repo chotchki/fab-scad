@@ -5344,3 +5344,105 @@ fn a_sibling_call_with_a_hole_takes_the_callees_default() {
         }
     }
 }
+
+/// AR.26.2 — THE EMITTED REGISTRY ROWS AGREE WITH THE HAND-WRITTEN ONES.
+///
+/// The emitter now writes `Entry` rows beside the natives it generates, which is what lets a
+/// library crate hand over its own dispatch table. That table is only worth having if it says the
+/// same thing the hand table has been saying: rows whose guard lists were written, audited and
+/// corrected by hand over the whole phase (AR.5a found three wrong), against rows derived
+/// mechanically. Any disagreement is either an emitter bug or a hand-list bug, and both are worth
+/// knowing about before AR.21 deletes the side that has been checked.
+///
+/// DIRECTIONAL on the guard sets, not equal: the emitted lists are the full TRANSITIVE closure over
+/// the batch while a hand list is author-PRUNED (a branch no accepted argument shape can reach is
+/// deliberately left out — `select`'s `all_nonzero` is the recorded example). So the emitted set
+/// must CONTAIN the hand set. A superset means more guards, more declines, and a missed speedup;
+/// the other direction would be a native standing on semantics nobody proved, which is the one
+/// outcome this whole tier exists to prevent.
+#[test]
+fn the_emitted_rows_agree_with_the_hand_registry() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let hand: BTreeMap<&str, &super::Entry> =
+        super::REGISTRY.iter().map(|e| (e.name, e)).collect();
+    let mut checked = 0_usize;
+    for row in super::generated::REGISTRY {
+        let Some(h) = hand.get(row.name) else {
+            continue; // generated but not registered by hand — nothing to compare against
+        };
+        checked += 1;
+        assert_eq!(
+            row.reference, h.reference,
+            "`{}`: the emitted row and the hand row describe different source",
+            row.name
+        );
+
+        let emitted_deps: BTreeSet<&str> = row.deps.iter().copied().collect();
+        let hand_deps: BTreeSet<&str> = h.deps.iter().copied().collect();
+        assert!(
+            hand_deps.is_subset(&emitted_deps),
+            "`{}`: the hand row guards deps the emitted closure does not — {:?}. The emitted row \
+             would wire on semantics nobody proved.",
+            row.name,
+            hand_deps.difference(&emitted_deps).collect::<Vec<_>>()
+        );
+
+        let emitted_b: BTreeSet<&str> = row.builtins.iter().copied().collect();
+        let hand_b: BTreeSet<&str> = h.builtins.iter().copied().collect();
+        assert!(
+            hand_b.is_subset(&emitted_b),
+            "`{}`: the hand row guards builtins the emitted closure does not — {:?}",
+            row.name,
+            hand_b.difference(&emitted_b).collect::<Vec<_>>()
+        );
+
+        // CONSTANTS compare as an EQUALITY, names and bits, because a bake is not a guard that can
+        // safely be widened: a native either compiled that value in or it did not, and the two
+        // tables have to agree about which.
+        let emitted_c: BTreeSet<&str> = row.consts_v.iter().map(|&(n, _)| n).collect();
+        let hand_c: BTreeSet<&str> = h
+            .consts
+            .iter()
+            .map(|&(n, _)| n)
+            .chain(h.consts_v.iter().map(|&(n, _)| n))
+            .collect();
+        assert_eq!(
+            emitted_c, hand_c,
+            "`{}`: the two rows disagree about which constants the native baked",
+            row.name
+        );
+        for &(name, build) in row.consts_v {
+            let want = h
+                .consts
+                .iter()
+                .find(|&&(n, _)| n == name)
+                .map(|&(_, x)| Value::Num(x))
+                .or_else(|| {
+                    h.consts_v
+                        .iter()
+                        .find(|&&(n, _)| n == name)
+                        .map(|&(_, b)| b())
+                })
+                .expect("the name sets already compared equal");
+            assert!(
+                super::value_bits_eq(&build(), &want),
+                "`{}`: baked `{name}` differs between the emitted and hand rows — {:?} vs {:?}. \
+                 That is a native answering with a different constant, a wrong ANSWER rather than \
+                 a missed compilation.",
+                row.name,
+                build(),
+                want
+            );
+        }
+    }
+    // The AR.14.3 lesson, made a gate: an audit that silently checks NOTHING passes just as
+    // cheerfully as one that checks everything, and a routing bug did exactly that once. The floor
+    // is MEASURED (the two tables overlap on 79 of the emitted 80) rather than nominal, so a row
+    // quietly falling out of one side fails here instead of shrinking the audit in silence.
+    assert!(
+        checked >= 79,
+        "only {checked} rows compared — the emitted registry and the hand registry stopped \
+         overlapping, so this test is no longer checking anything"
+    );
+}

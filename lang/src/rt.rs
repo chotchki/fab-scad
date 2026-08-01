@@ -42,3 +42,7 @@ pub use crate::surface::{
     ChildThunk, Children, Decl, Domain, FnCall, FnCtx, Kind, ModuleCall, ModuleCtx, NoClosures,
     Param,
 };
+/// The REGISTRY ROWS a generated library declares (AR.26.2). Emitted as static struct literals
+/// beside the natives they name, so a generated crate hands over its own dispatch table rather
+/// than having one hand-written for it somewhere else.
+pub use crate::registry::{Entry, ModuleEntry, Rows};

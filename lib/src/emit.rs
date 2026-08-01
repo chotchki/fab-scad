@@ -505,6 +505,18 @@ pub fn generate_native(
                 p.name
             ));
         }
+        // A `$`-named PARAMETER is no more a Rust local than a `$`-named `let` binder is — and it
+        // matters MORE here, because `function_band`'s fixpoint uses `generate_native` returning
+        // `Ok` as its liveness probe: an emitted `let p_$fn = …` stays LIVE in the batch and takes
+        // the whole generated crate down with it. AR.27 closed the binder half and left this one;
+        // the module emitter has declined `$`-params since AR.22. No BOSL2 function declares one
+        // today, which is exactly the kind of latency that makes it worth a check rather than luck.
+        if p.name.starts_with('$') {
+            return Err(format!(
+                "{name}: a `$`-named parameter (`{}`), which is dynamic rather than a local",
+                p.name
+            ));
+        }
         let getter = if i == 0 {
             "args.first()".to_string()
         } else {
@@ -1011,11 +1023,6 @@ impl Emitter<'_, '_> {
         // Emit-time declines remain only for shapes `call_fn` hands straight back to the
         // interpreter — arming a module that declines on its every call would be noise.
         if self.in_module {
-            // The file-value builtins resolve paths off the calling FILE's directory binding —
-            // not in `BUILTIN_SURFACE` (they are expression forms of statements), matched by name.
-            if matches!(name, "import" | "dxf_dim" | "dxf_cross") {
-                return Err(format!("a call to the file-reading builtin `{name}`"));
-            }
             let mut pairs: Vec<String> = Vec::with_capacity(args.len());
             for a in args {
                 let v = self.expr(&a.value)?;
@@ -1037,6 +1044,22 @@ impl Emitter<'_, '_> {
     /// call, or a generated sibling with the compile-time binding rules. What runs when no local
     /// binding shadows the name — or when one does and holds a non-function at runtime (AD.1/p8).
     fn static_call(&mut self, name: &str, args: &[Arg]) -> Result<String, String> {
+        // The FILE-VALUE builtins resolve paths off the calling FILE's directory binding and are
+        // NOT in `BUILTIN_SURFACE` (they are expression forms of statements), so `is_builtin` is
+        // false for them and they fall past every builtin arm below. Before AR.27 they then hit the
+        // no-sibling DECLINE; after it they hit dispatch, and `call_named_outward` has no rung for
+        // them — the interpreter resolves these BEFORE builtins — so a compiled `import(f)` answered
+        // warn-and-`undef` where the interpreter read the file. A regression from missed speedup to
+        // wrong ANSWER, and the missing-import-is-silent class besides.
+        //
+        // HERE rather than at the top of `call`, which is where it was first put and one branch too
+        // late: the AN.10 lexical-shadow arm calls `static_call` for its else-half, so a body with a
+        // local literally named `import` would have walked straight past a guard placed earlier.
+        // `static_call` is the single funnel. (The module emitter keeps its own copy: it declines
+        // before reaching here at all.)
+        if matches!(name, "import" | "dxf_dim" | "dxf_cross") {
+            return Err(format!("a call to the file-reading builtin `{name}`"));
+        }
         if fab_lang::is_builtin(name) {
             // The capability lives in the DECLARATION (AS.2/AS.4): only a `Pure` builtin has an
             // `rt::bi` function to call. A context builtin (argument names, the rand stream, the
@@ -1079,6 +1102,26 @@ impl Emitter<'_, '_> {
             // hazard on the module side, and the fix is the same: make no claim about the callee
             // and there is nothing left to violate. It also costs nothing in coverage, where
             // declining named args cost ~60 functions.
+            // ARGUMENTS EVALUATE EAGERLY HERE, and the interpreter does not always evaluate
+            // them at all: an UNKNOWN callee's args are never scheduled (`Task::Const(Undef)`
+            // straight away), and `fill_arg_slots` drops a duplicated name or a surplus positional
+            // UNEVALUATED — a rule this codebase states at the intrinsic gate for exactly this
+            // reason. Where the argument is pure that difference is unobservable; where it ECHOES
+            // or ASSERTS it is a console line the interpreter never prints, or a run-killing error
+            // where the twin merely warns. Refuse those rather than fire them.
+            //
+            // The residue, stated rather than hidden: an arithmetic type error inside a dropped
+            // argument still warns compiled and not interpreted. It needs an unknown-or-overflowing
+            // callee AND a mistyped argument, and closing it properly means handing the runtime
+            // THUNKS instead of values — a real ABI change, not a patch.
+            for a in args {
+                if has_side_effect(&a.value) {
+                    return Err(format!(
+                        "a side-effecting argument to the dispatched callee `{name}` (the \
+                         interpreter may never evaluate it)"
+                    ));
+                }
+            }
             let emitted: Vec<String> = args
                 .iter()
                 .map(|a| {
@@ -1089,8 +1132,13 @@ impl Emitter<'_, '_> {
                     })
                 })
                 .collect::<Result<_, String>>()?;
+            // The CALLING def's own name goes over too: the runtime resolves a bound callee in
+            // THIS function's lexical base, which is the only chain the interpreted twin walks.
+            let def = self
+                .def_name
+                .ok_or("an outward call from a body with no definition name")?;
             return Ok(format!(
-                "fx.call_named({name:?}, &[{}])?",
+                "fx.call_named({def:?}, {name:?}, &[{}])?",
                 emitted.join(", ")
             ));
         };
@@ -1521,13 +1569,13 @@ impl Emitter<'_, '_> {
                         let _ = writeln!(out, "    let {save} = fx.dollar({bn:?});");
                         let ident = self.fresh_ident("dv")?;
                         let _ =
-                            writeln!(out, "    for {ident} in rt::iter_values_native(&{iter}) {{");
+                            writeln!(out, "    for {ident} in rt::iter_values_warned(fx, &{iter}) {{");
                         let _ = writeln!(out, "    fx.set_dollar({bn:?}, {ident}.clone());");
                         restores = format!("    fx.set_dollar({bn:?}, {save});\n{restores}");
                     } else {
                         let ident = self.fresh_ident(bn)?;
                         let _ =
-                            writeln!(out, "    for {ident} in rt::iter_values_native(&{iter}) {{");
+                            writeln!(out, "    for {ident} in rt::iter_values_warned(fx, &{iter}) {{");
                         self.locals.push((bn.to_string(), ident));
                     }
                     depth += 1;
@@ -1743,7 +1791,7 @@ impl Emitter<'_, '_> {
                     // iterable sees the earlier binders — the interpreter's nesting order.
                     let iter = self.expr(&b.value)?;
                     let ident = self.fresh_ident(bn)?;
-                    let _ = write!(open, "for {ident} in rt::iter_values_native(&{iter}) {{ ");
+                    let _ = write!(open, "for {ident} in rt::iter_values_warned(fx, &{iter}) {{ ");
                     self.locals.push((bn.to_string(), ident));
                     depth += 1;
                 }
@@ -1769,7 +1817,7 @@ impl Emitter<'_, '_> {
                 let v = self.expr(inner)?;
                 let each = self.fresh_ident("each")?;
                 Ok(format!(
-                    "for {each} in rt::iter_values_native(&{v}) {{ {acc}.push({each}); }} "
+                    "for {each} in rt::iter_values_warned(fx, &{v}) {{ {acc}.push({each}); }} "
                 ))
             }
             // an element-position `let` (approx's `let(aa=…, bb=…) if(…) 1`)
@@ -2292,6 +2340,27 @@ fn raw_string_hashes(content: &str) -> usize {
     worst + 1
 }
 
+/// Does this expression OBSERVABLY do something when evaluated, beyond producing a value?
+///
+/// `echo` and `assert` only — the two constructs whose evaluation a user can SEE (a console line, a
+/// raised error). Used where the compiled tier would evaluate an argument the interpreter might
+/// drop; a pure argument evaluated needlessly costs nothing anybody can detect.
+fn has_side_effect(e: &Expr) -> bool {
+    if matches!(e.kind, ExprKind::Echo { .. } | ExprKind::Assert { .. }) {
+        return true;
+    }
+    // Explicit work stack rather than recursion: house doctrine, and an argument expression is
+    // user-supplied depth.
+    let mut stack = vec![e];
+    while let Some(n) = stack.pop() {
+        if matches!(n.kind, ExprKind::Echo { .. } | ExprKind::Assert { .. }) {
+            return true;
+        }
+        stack.extend(fab_lang::expr_children(n));
+    }
+    false
+}
+
 /// A batch's guard lists: name → (transitive deps, transitive builtins). See [`guard_closures`].
 type GuardClosures<'a> = std::collections::BTreeMap<&'a str, (Vec<String>, Vec<String>)>;
 
@@ -2407,13 +2476,12 @@ pub struct FunctionBand<'a> {
 /// and therefore does not exist in the output. That is not a coverage overcount, it is a file that
 /// does not compile; and because a decliner takes its callers with it, the loss cascades.
 ///
-/// MEASURED on the pinned BOSL2: the single-pass probe reports 1197 of 1329, the fixpoint converges
-/// at 866 after 9 rounds. Of the 463 dropped, only about 62 decline for their own reasons — free
-/// reads, echo-in-function, C-style comprehensions, `rands`. The rest is cascade, which is where the
-/// coverage lever now lives: the MODULE side has no such problem because a module resolves its
-/// callees at RUNTIME through dispatch, so a function whose callee declined could do the same rather
-/// than dropping. That is a separate item and a large one; this function's job is to make the
-/// present design's output CORRECT and its number HONEST.
+/// MEASURED on the pinned BOSL2: the single-pass probe reported 1197 of 1329 and the fixpoint
+/// converged at 866 after 9 rounds — 463 dropped, of which only ~88 declined for their own reasons
+/// and the rest was CASCADE. AR.27 then pulled the lever that cascade pointed at (a call to a
+/// non-emitting sibling DISPATCHES rather than declining, the way a module call always has), and
+/// the fixpoint now converges at 1260 in 2 rounds. The loop still matters and always will: whatever
+/// the emitter cannot compile still takes its static callers with it.
 ///
 /// Monotone: the live set only ever shrinks, so it terminates in at most one round per function.
 ///
@@ -2750,11 +2818,14 @@ pub fn generate_batch(subjects: &[Subject<'_>], declared: &[&str]) -> Result<Str
          /// sibling call inlines the callee's semantics and the callee's own gate is never consulted\n\
          /// at dispatch.\n\
          ///\n\
-         /// NOT WIRED YET (AR.26.2). These rows and fab-lang's hand table name the SAME functions,\n\
-         /// so registering both would claim every name twice; the swap is AR.21's, when the hand\n\
-         /// table goes. Until then they are held to the hand table by\n\
-         /// `the_emitted_rows_agree_with_the_hand_registry`, which is what makes the swap safe.\n\
-         #[allow(dead_code, reason = \"see the note above — checked by test, wired at AR.21\")]\n\
+         /// WHETHER THESE ARE LIVE DEPENDS ON THE CRATE. A generated LIBRARY crate serves them\n\
+         /// from its `LibrarySurface::rows`, and they are its dispatch table. fab-lang's own\n\
+         /// checked-in copy is NOT wired: these rows and its hand table name the same functions,\n\
+         /// and one name cannot have two owning libraries, so the swap waits for AR.21 to delete\n\
+         /// the hand table. There they are held to it by\n\
+         /// `the_emitted_rows_agree_with_the_hand_registry`, which is what makes that swap safe.\n\
+         /// The emitter cannot tell which consumer it is writing for, hence the condition.\n\
+         #[allow(dead_code, reason = \"live in a library crate; awaiting AR.21 in fab-lang\")]\n\
          pub(super) static REGISTRY: &[rt::Entry] = &[\n",
     );
     for subject in subjects {
@@ -3811,6 +3882,14 @@ mod tests {
         ///
         /// The tail is 37 free reads, 11 C-style comprehensions, 8 `rands`, 5 duplicate parameters
         /// (a CORRECT decline), 3 range forms, and a handful of singletons.
+        ///
+        /// WHAT THIS NUMBER IS AND IS NOT, because four corrections came from getting it wrong.
+        /// This test PROBES the emitter; it does not COMPILE what the emitter writes, and every
+        /// overcount in the history above was a construct that emitted text rustc would refuse.
+        /// The compile gate is `fab-bosl2`: it is a workspace member, so an ordinary
+        /// `cargo check --workspace` builds all 1260 of these natives. THE TWO GATES ARE A PAIR —
+        /// if fab-bosl2 ever leaves the workspace, this number silently goes back to being a
+        /// measure of the emitter's optimism.
         const FLOOR: usize = 1260;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3985,6 +4064,61 @@ mod tests {
         assert!(
             with_hash.contains("r##\""),
             "the island must open with enough hashes to hold its content"
+        );
+    }
+
+
+    /// AR.27 SKEPTIC ROUND — two shapes the emitter must keep DECLINING, because dispatching them
+    /// would answer where the interpreter reads a file, or fire a side effect the interpreter never
+    /// reaches. Both were regressions the cascade lever introduced, and both are emit-time refusals, so
+    /// this pins the emitter rather than a tier comparison.
+    #[test]
+    fn the_outward_call_declines_what_it_must() {
+        // FILE-VALUE BUILTINS. Not in `BUILTIN_SURFACE`, so `is_builtin` is false and they fall past
+        // every builtin arm; the interpreter resolves them BEFORE builtins and `call_named` has no rung
+        // for them, so dispatching answered `undef` where the interpreter read the file.
+        for src in [
+            "function _p(f) = import(f);",
+            "function _p(f) = dxf_dim(file=f, name=\"d\");",
+            "function _p(f) = dxf_cross(file=f, layer=\"l\");",
+            // Through the AN.10 shadow arm too: its else-half funnels into the same call path, which
+            // is why the guard sits in `static_call` rather than earlier.
+            "function _p(import, f) = import(f);",
+            "function _p(f) = let(import = 1) import(f);",
+        ] {
+            let out = super::generate_native(src, &[], &[]);
+            assert!(
+                out.is_err(),
+                "a file-reading builtin must decline, not dispatch: {src} emitted {out:?}"
+            );
+        }
+    
+        // A SIDE-EFFECTING ARGUMENT to a dispatched callee. The interpreter never evaluates an unknown
+        // callee's arguments, and drops a duplicated name or a surplus positional unevaluated — so an
+        // echo would print where it should not, and an assert would KILL a render the interpreter
+        // merely warns through.
+        for src in [
+            "function _p(x) = _absent(echo(\"fired\") x);",
+            "function _p(x) = _absent(assert(false, \"boom\") x);",
+        ] {
+            let out = super::generate_native(src, &[], &[]);
+            assert!(
+                out.is_err(),
+                "a side-effecting argument must decline: {src} emitted {out:?}"
+            );
+        }
+        // A PURE argument still dispatches — the decline is about observability, not about arguments.
+        assert!(
+            super::generate_native("function _p(x) = _absent(x + 1);", &[], &[]).is_ok(),
+            "a pure argument to an out-of-batch callee must still compile"
+        );
+    
+        // A `$`-NAMED PARAMETER is not a Rust local, and `function_band`'s liveness probe is
+        // `generate_native` returning Ok — so emitting one would keep the function in the batch and
+        // break the whole generated crate rather than just itself.
+        assert!(
+            super::generate_native("function _p(x, $fn = 8) = x * 2;", &[], &[]).is_err(),
+            "a `$`-named parameter must decline"
         );
     }
 
@@ -4499,7 +4633,7 @@ mod tests {
             (
                 "statement for (69 modules)",
                 "module m(n) { for (i = [0:n]) children(i); }",
-                "_i in rt::iter_values_native(",
+                "_i in rt::iter_values_warned(fx, ",
             ),
             (
                 "statement let (8 modules)",
@@ -4524,7 +4658,7 @@ mod tests {
             (
                 "nested for, inner iterable sees the outer binder",
                 "module m(n) { for (i = [0:n], j = [0:i]) children(j); }",
-                "_j in rt::iter_values_native(",
+                "_j in rt::iter_values_warned(fx, ",
             ),
             (
                 "children(i) selects rather than rendering all",

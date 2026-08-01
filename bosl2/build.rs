@@ -7,8 +7,8 @@
 //! which is a test rather than an artifact.
 //!
 //! DECLINES ARE NOT FAILURES. `function_band` drops what the emitter cannot compile and says so;
-//! this script writes the survivors and reports the rest. A library the transpiler covers 65% of is
-//! a library that works — the other 35% interprets, which is what all of it did before any of this
+//! this script writes the survivors and reports the rest. A library the transpiler covers PART of is
+//! a library that works — the remainder interprets, which is what all of it did before any of this
 //! existed. The build fails only when the emitter cannot produce a file at all.
 
 use std::fmt::Write as _;
@@ -102,7 +102,11 @@ fn main() {
             .strip_prefix("mod ")
             .and_then(|r| r.strip_suffix(';'))
         {
-            let path = module_dir.join(format!("{}.rs", ident.trim_start_matches("r#")));
+            // The FILE is named for the ident VERBATIM — `r#move.rs` when the source stem is a
+            // Rust keyword — so the path must not strip the escape. Stripping it worked only
+            // because no BOSL2 source is named after a keyword today, and `scad_mod_ident`'s whole
+            // promise is that an upstream RENAME cannot produce an unbuildable regen.
+            let path = module_dir.join(format!("{ident}.rs"));
             let _ = writeln!(fixed, "#[path = {:?}] mod {ident};", path.display().to_string());
         } else {
             fixed.push_str(line);

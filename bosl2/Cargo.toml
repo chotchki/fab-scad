@@ -14,6 +14,7 @@ fab-lang = { path = "../lang" }
 
 [build-dependencies]
 # The TRANSPILER, host-side. A build dependency rather than a normal one: nothing at runtime needs
-# a code generator, and keeping it here means a consumer of fab-bosl2 never links one.
+# a code generator, and keeping it here means a consumer of fab-bosl2 never links one. fab-lang is
+# NOT here — the build script never names it; the generated TEXT does, which the normal dependency
+# above serves.
 fab-lib = { path = "../lib" }
-fab-lang = { path = "../lang" }

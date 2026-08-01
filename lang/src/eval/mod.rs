@@ -1257,9 +1257,16 @@ fn eval_with_global<'a>(
                 // pop order: rhs was pushed after lhs, so it's on top.
                 let rhs = values.pop().unwrap_or(Value::Undef);
                 let lhs = values.pop().unwrap_or(Value::Undef);
-                // The ONE warning seam (SV): upstream warns per top-level operation, so the traced
-                // variant lives here and nowhere else — intrinsics and element-wise recursion stay
-                // silent through the pure `apply_binary`.
+                // A warning seam (SV): upstream warns per top-level operation, so the traced
+                // variant is reached here and element-wise recursion stays silent through the pure
+                // `apply_binary`.
+                //
+                // NOT "the ONE seam" any more, and the correction matters because this comment sits
+                // where a future reader looks first: since AR.27 generated code reaches the traced
+                // pair too, through `ops::binary`/`ops::unary`. The silence WAS the bug — a native
+                // computing `undef * undef` answered correctly and said nothing while the
+                // interpreted twin printed `undefined operation`, live since AR.6 and invisible to
+                // every mesh comparison because the value was never wrong.
                 let mut warn = None;
                 values.push(ops::apply_binary_traced(op, lhs, rhs, &mut warn));
                 if let Some(w) = warn {
@@ -2738,10 +2745,10 @@ fn iter_values(v: &Value, ctx: &Ctx) -> Vec<Value> {
     iter_values_native(v)
 }
 
-/// [`iter_values`]'s pure core — every arm lives HERE so the two cannot drift; the ctx wrapper
-/// above adds only the too-many-elements WARNING. This is the seam GENERATED natives iterate
-/// through (AR.9): they have no ctx, and the native tier not warning is the standing contract
-/// (no hand native warns either) — the too-many case still yields nothing, so values agree.
+/// [`iter_values`]'s pure core — every arm lives HERE so the two cannot drift; the ctx wrappers
+/// add only the too-many-elements WARNING. Kept public for the builtins' (`chr`/`lookup`/`search`)
+/// expansion seam, which is not a "for statement" context upstream and so genuinely takes the plain
+/// `RANGE_MAX`-capped expansion with no diagnostic.
 pub fn iter_values_native(v: &Value) -> Vec<Value> {
     match v {
         Value::NumList(xs) => xs.iter().map(|&x| Value::Num(x)).collect(),
@@ -2758,6 +2765,29 @@ pub fn iter_values_native(v: &Value) -> Vec<Value> {
         Value::Object(o) => o.keys().map(|k| Value::Str(Rc::clone(k))).collect(),
         other => vec![other.clone()],
     }
+}
+
+/// [`iter_values_native`] for GENERATED code: same elements, and the too-many-elements warning goes
+/// to the run's console instead of the floor.
+///
+/// The old contract was "the native tier does not warn (no hand native warns either)", and AR.27
+/// retired it: a compiled `[for (i = [1:1:5000000000]) …]` yielded nothing SILENTLY while the
+/// interpreted twin printed `Bad range parameter in for statement`. Reproduced on the shipped
+/// `force_list` native, so it was live, not theoretical — and invisible to every value comparison,
+/// because both tiers correctly produce an empty list. `fx` is in scope at every emitted loop, so
+/// there was never a reason but the contract.
+#[must_use]
+pub fn iter_values_warned<W: crate::surface::Console + ?Sized>(fx: &W, v: &Value) -> Vec<Value> {
+    if let Value::Range { start, step, end } = v
+        && range_len(*start, *step, *end) >= RANGE_TOO_MANY
+    {
+        fx.warn(format!(
+            "Bad range parameter in for statement: too many elements ({})",
+            range_len(*start, *step, *end)
+        ));
+        return Vec::new();
+    }
+    iter_values_native(v)
 }
 
 /// [`iter_values`] minus the too-many-elements warning — the builtins' (`chr`/`lookup`/`search`) and
@@ -3306,6 +3336,37 @@ fn tagged_globals<'a>(islands: &loader::Islands<'a>) -> BTreeMap<&'a str, &'a Ex
 ///
 /// ONE HOP, matching the dep-fingerprint pin and the dep-const check themselves — a dep-of-a-dep's
 /// constants stay unchecked. Sound while deps are leaf predicates; revisit together if that stops holding.
+/// AR.19 — a per-phase FINGERPRINT MEMO, keyed on the body's address.
+///
+/// Arming a library re-fingerprints the same bodies over and over: once for each function's own
+/// `resolve`, again for every ROW that names it as a dep (`guard_veto` hashes the dep's body per
+/// depending row), and again in the post-hoist arm. At 85 hand rows that is invisible; at 1260 it
+/// is roughly 12,800 full AST walks per evaluation, and it MEASURED at +55 ms — more than the whole
+/// render it was supposed to accelerate. Memoizing collapses it to one walk per distinct body.
+///
+/// THE ADDRESS IS A LEGITIMATE KEY HERE, which is not true everywhere (the CSG memo's ABA trap was
+/// exactly a pointer key whose target could be freed and readdressed). These bodies are `&'a Expr`
+/// borrowed from the PROGRAM AST, which outlives every phase that consults this map, so no entry
+/// can be freed while the memo lives and no two live bodies can share an address. The memo is also
+/// per-phase and thrown away, so it cannot outlive the borrow it keys on.
+///
+/// A `BTreeMap` because the house lint bans `HashMap` — nondeterministic iteration order leaking
+/// into output. This map is never ITERATED, only probed, so the rationale does not bite; complying
+/// anyway costs a log-n lookup over ~1300 entries and keeps the rule free of exceptions to argue
+/// about.
+#[derive(Default)]
+struct FpMemo(BTreeMap<usize, crate::surface::Fingerprint>);
+
+impl FpMemo {
+    fn of(&mut self, params: &[Parameter], body: &Expr) -> crate::surface::Fingerprint {
+        let key = std::ptr::from_ref(body) as usize;
+        *self
+            .0
+            .entry(key)
+            .or_insert_with(|| intrinsics::fingerprint(params, body))
+    }
+}
+
 fn needs_post_hoist(registry: &Registry, entry: &intrinsics::Entry) -> bool {
     !entry.consts.is_empty()
         || !entry.consts_v.is_empty()
@@ -3320,12 +3381,13 @@ fn guard_veto<'a>(
     registry: &Registry,
     entry: &intrinsics::Entry,
     functions: &BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
+    memo: &mut FpMemo,
 ) -> Option<String> {
     for &dep in entry.deps {
         let Some(&((p, b), _)) = functions.get(dep) else {
             return Some(format!("dep `{dep}` is not defined in this program"));
         };
-        if registry.anchor_fp(entry.name, dep) != Some(intrinsics::fingerprint(p, b)) {
+        if registry.anchor_fp(entry.name, dep) != Some(memo.of(p, b)) {
             return Some(format!(
                 "dep `{dep}` drifted from its pinned reference (or is anchored in another library)"
             ));
@@ -3362,6 +3424,8 @@ fn build_intrinsics<'a>(
 ) -> BTreeMap<&'a str, intrinsics::Intrinsic> {
     let explain = intrinsics::explain_on();
     let mut out = BTreeMap::new();
+    // AR.19 — one fingerprint per distinct body for the whole pass. See `FpMemo`.
+    let mut memo = FpMemo::default();
     // AR.2 — the run gate. `FAB_INTRINSICS=0` wires NOTHING, so the same program evaluates on the pure
     // interpreter and becomes the oracle a dispatch-level differential diffs the native tier against.
     // Gated HERE rather than at the call sites because this and `arm_guarded_intrinsics` are the only
@@ -3398,13 +3462,13 @@ fn build_intrinsics<'a>(
                 intrinsics::Plan::NotRegistered => {}
             }
         }
-        let Some(entry) = registry.resolve(name, params, body) else {
+        let Some(entry) = registry.resolve_fp(name, memo.of(params, body)) else {
             continue;
         };
         if needs_post_hoist(registry, entry) {
             continue; // const-guarded, directly or through a dep: arms in `arm_guarded_intrinsics`
         }
-        match guard_veto(registry, entry, functions) {
+        match guard_veto(registry, entry, functions, &mut memo) {
             None => {
                 out.insert(name, entry.func);
             }
@@ -3432,17 +3496,21 @@ fn build_intrinsics<'a>(
 fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrinsic)> {
     let explain = intrinsics::explain_on();
     let mut out = Vec::new();
+    // AR.19 — see `FpMemo`. A second memo rather than a shared one: this pass runs after the `Ctx`
+    // exists, and threading one through the build would mean putting it ON the Ctx, where it would
+    // outlive the phase it is sound for.
+    let mut memo = FpMemo::default();
     if !ctx.config.intrinsics {
         return out; // AR.2 run gate — the post-hoist door, matching `build_intrinsics`.
     }
     for (&name, &((params, body), home)) in &ctx.functions {
-        let Some(entry) = ctx.registry.resolve(name, params, body) else {
+        let Some(entry) = ctx.registry.resolve_fp(name, memo.of(params, body)) else {
             continue;
         };
         if !needs_post_hoist(&ctx.registry, entry) {
             continue; // genuinely unguarded: already wired (or vetoed) at build_intrinsics
         }
-        if let Some(why) = guard_veto(&ctx.registry, entry, &ctx.functions) {
+        if let Some(why) = guard_veto(&ctx.registry, entry, &ctx.functions, &mut memo) {
             if explain {
                 eprintln!("+ [intrinsic GUARD-DECLINED] {name} — {why} → INTERPRETED");
             }
@@ -3463,7 +3531,7 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
         // but if a dep ever grows deps of its own this needs to go transitive.
         let dep_const_veto = entry.deps.iter().find_map(|&dep| {
             let &((p, b), dep_home) = ctx.functions.get(dep)?;
-            let dep_entry = ctx.registry.resolve(dep, p, b)?;
+            let dep_entry = ctx.registry.resolve_fp(dep, memo.of(p, b))?;
             let dep_scope = globals.get(dep_home)?;
             let bad = dep_entry.consts.iter().any(|&(cname, expected)| {
                 !matches!(dep_scope.lookup_opt(cname), Some(Value::Num(n)) if n.to_bits() == expected.to_bits())

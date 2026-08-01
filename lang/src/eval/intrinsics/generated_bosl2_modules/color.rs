@@ -47,11 +47,11 @@ use fab_lang::rt;
 pub(super) fn color_overlaps(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_color = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
-    let l3_pairs = { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::binary(fx, rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { for l2_j in rt::iter_values_native(&rt::build_range(&rt::binary(fx, rt::BinOp::Add, l1_i.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::binary(fx, rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l0_acc.push(rt::build_vector(vec![l1_i.clone(), l2_j.clone()]));
+    let l3_pairs = { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_warned(fx, &rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::binary(fx, rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { for l2_j in rt::iter_values_warned(fx, &rt::build_range(&rt::binary(fx, rt::BinOp::Add, l1_i.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::binary(fx, rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l0_acc.push(rt::build_vector(vec![l1_i.clone(), l2_j.clone()]));
         } } rt::build_vector(l0_acc) };
     let l4_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
-    for l5_p in rt::iter_values_native(&l3_pairs.clone()) {
+    for l5_p in rt::iter_values_warned(fx, &l3_pairs.clone()) {
     parts.push(fx.call(&rt::ModuleCall { name: "color", args: &[(None, p_color.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "intersection", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l6_sel = rt::member(l5_p.clone(), "x");
     parts.push(fx.child_at(&l6_sel)?);
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l7_sel = rt::member(l5_p.clone(), "y");
@@ -201,14 +201,14 @@ pub(super) fn rainbow(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let l0_ll = fx.call_fn(&rt::FnCall { name: "len", args: &[(None, p_list.clone())] })?;
     let l1_maxhues = fx.call_fn(&rt::FnCall { name: "first_defined", args: &[(None, rt::build_vector(vec![p_maxhues.clone(), l0_ll.clone()]))] })?;
     let l2_huestep = rt::binary(fx, rt::BinOp::Div, rt::Value::Num(f64::from_bits(0x4076800000000000_u64)), l1_maxhues.clone());
-    let l5_huelist = { let mut l3_acc: Vec<rt::Value> = Vec::new(); for l4_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::binary(fx, rt::BinOp::Sub, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l3_acc.push(fx.call_fn(&rt::FnCall { name: "posmod", args: &[(None, rt::binary(fx, rt::BinOp::Add, rt::binary(fx, rt::BinOp::Mul, l4_i.clone(), l2_huestep.clone()), rt::binary(fx, rt::BinOp::Div, rt::binary(fx, rt::BinOp::Mul, l4_i.clone(), rt::Value::Num(f64::from_bits(0x4076800000000000_u64))), p_stride.clone()))), (None, rt::Value::Num(f64::from_bits(0x4076800000000000_u64)))] })?);
+    let l5_huelist = { let mut l3_acc: Vec<rt::Value> = Vec::new(); for l4_i in rt::iter_values_warned(fx, &rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::binary(fx, rt::BinOp::Sub, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l3_acc.push(fx.call_fn(&rt::FnCall { name: "posmod", args: &[(None, rt::binary(fx, rt::BinOp::Add, rt::binary(fx, rt::BinOp::Mul, l4_i.clone(), l2_huestep.clone()), rt::binary(fx, rt::BinOp::Div, rt::binary(fx, rt::BinOp::Mul, l4_i.clone(), rt::Value::Num(f64::from_bits(0x4076800000000000_u64))), p_stride.clone()))), (None, rt::Value::Num(f64::from_bits(0x4076800000000000_u64)))] })?);
         } rt::build_vector(l3_acc) };
     let l6_hues = if p_shuffle.clone().is_truthy() { fx.call_fn(&rt::FnCall { name: "shuffle", args: &[(None, l5_huelist.clone()), (Some("seed"), p_seed.clone())] })? } else { l5_huelist.clone() };
     let l7_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
     let l8_sd = fx.dollar("$idx");
-    for l9_dv in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, p_list.clone())] })?) {
+    for l9_dv in rt::iter_values_warned(fx, &fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, p_list.clone())] })?) {
     fx.set_dollar("$idx", l9_dv.clone());
     let l10_sd = fx.dollar("$item");
     fx.set_dollar("$item", rt::index(p_list.clone(), &fx.dollar("$idx")));

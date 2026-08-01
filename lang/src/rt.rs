@@ -37,6 +37,10 @@ pub use crate::eval::ops::{apply_binary, apply_unary, index, member};
 pub use crate::eval::ops::{binary, unary};
 pub use crate::eval::value::Value;
 pub use crate::eval::{build_range, build_vector, iter_values_native};
+/// AR.27 — the for/each expansion WITH its diagnostic. What generated code emits; the silent
+/// `iter_values_native` stays for the builtin seams that genuinely have no "for statement" to warn
+/// about.
+pub use crate::eval::iter_values_warned;
 pub use crate::parser::{BinOp, UnOp};
 /// The MODULE half of the ABI (AR.20). A generated module takes a `&dyn ModuleCtx` and hands
 /// `Children` to the modules it calls — both have to be nameable through `rt`, or the emitted

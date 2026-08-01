@@ -162,7 +162,7 @@ pub(super) fn metaballs(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let l1_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     if (p_debug.clone()).is_truthy() {
-    for l2_a in rt::iter_values_native(&rt::index(l0_vnflist.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) {
+    for l2_a in rt::iter_values_warned(fx, &rt::index(l0_vnflist.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) {
     parts.push(fx.call(&rt::ModuleCall { name: "color", args: &[(None, if rt::binary(fx, rt::BinOp::Eq, rt::index(l2_a.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() { rt::Value::string("gray") } else { if rt::binary(fx, rt::BinOp::Gt, rt::index(l2_a.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() { rt::Value::string("#3399FF") } else { rt::Value::string("#FF9933") } }), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "vnf_polyhedron", args: &[(None, rt::index(l2_a.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), ], children: rt::Children::None })?);
  Ok(fx.group(parts)) }, ]) })?);
     }
@@ -217,7 +217,7 @@ pub(super) fn metaballs2d(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let l1_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     if (p_debug.clone()).is_truthy() {
-    for l2_a in rt::iter_values_native(&rt::index(l0_regionlist.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) {
+    for l2_a in rt::iter_values_warned(fx, &rt::index(l0_regionlist.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) {
     if (rt::binary(fx, rt::BinOp::Gt, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, rt::index(l2_a.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))] })?, rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "color", args: &[(None, if rt::binary(fx, rt::BinOp::Eq, rt::index(l2_a.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() { rt::Value::string("gray") } else { if rt::binary(fx, rt::BinOp::Gt, rt::index(l2_a.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() { rt::Value::string("#3399FF") } else { rt::Value::string("#FF9933") } }), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "region", args: &[(None, rt::index(l2_a.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), ], children: rt::Children::None })?);
  Ok(fx.group(parts)) }, ]) })?);

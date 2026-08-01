@@ -5563,3 +5563,70 @@ fn an_echo_expression_in_a_function_reaches_the_console() {
         "two calls, two echoes — a memoized echo is a lost one: {both}"
     );
 }
+
+/// AR.27 SKEPTIC ROUND — the outward call resolves in the CALLING NATIVE'S lexical world, not the
+/// caller's, and it warns only where the interpreter does.
+///
+/// Both cases were found by adversarial review with working repros, and the first was a WRONG
+/// ANSWER — the contract this whole tier exists to keep. They are separated from the resolution
+/// test above because they are about the SCOPE a name resolves in rather than the order of the
+/// rungs, and because each has a concrete counter-program that used to fail.
+#[test]
+fn an_outward_call_resolves_in_the_natives_own_scope() {
+    let reference = reference_of("_fab_poc_outward").expect("registered");
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (_geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        format!("{msgs:?}")
+    };
+
+    // (1) THE CALLER'S PARAMETER MUST NOT BE VISIBLE. The interpreted twin evaluates the call
+    // inside the native's OWN frame, whose lexical base is its home-island global; the caller's
+    // scope is only that frame's DYNAMIC parent, which a non-`$` lookup never walks. Resolving
+    // against the caller found this closure and answered 401 where the interpreter warns and
+    // answers undef — a wrong ANSWER, not a missed speedup.
+    let shadowed = format!(
+        "{reference}\n\
+         function wrapper(_fab_poc_absent) = _fab_poc_outward(4);\n\
+         echo(wrapper(function(y) y * 100));\n"
+    );
+    let fast = run(&shadowed, true);
+    assert_eq!(
+        fast,
+        run(&shadowed, false),
+        "the caller's own parameter is not in the native's lexical chain"
+    );
+    assert!(
+        fast.contains("Ignoring unknown function"),
+        "the callee is genuinely unbound from the native's island: {fast}"
+    );
+    assert!(
+        !fast.contains("401"),
+        "401 means the native reached into the CALLER's scope: {fast}"
+    );
+
+    // (2) A TOP-LEVEL BINDING IS visible, because it IS the native's island base — the other half
+    // of the same rule, and the case that would break if the fix over-corrected into "never look".
+    let at_top = format!("_fab_poc_absent = function(y) y * 100;\n{reference}\necho(_fab_poc_outward(4));\n");
+    let top = run(&at_top, true);
+    assert_eq!(top, run(&at_top, false), "the island binding diverged");
+    assert!(top.contains("401"), "4 * 100 + 1 = 401, got {top}");
+
+    // (3) BOUND BUT NOT CALLABLE IS SILENT. The interpreter warns only when a name is UNBOUND; a
+    // name bound to a non-function falls to `Task::CallValue`, which answers undef and says
+    // nothing. Warning there is a console line the interpreter never prints — the same right
+    // value / wrong console class AR.27 fixed in the value algebra.
+    let non_fn = format!("_fab_poc_absent = 5;\n{reference}\necho(_fab_poc_outward(4));\n");
+    let bound = run(&non_fn, true);
+    assert_eq!(bound, run(&non_fn, false), "the non-function arm diverged");
+    assert!(
+        !bound.contains("Ignoring unknown function"),
+        "a BOUND name is not the unknown case: {bound}"
+    );
+}
+

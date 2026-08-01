@@ -56,7 +56,7 @@ pub(super) fn debug_region(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     if (rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_path", args: &[(None, p_region.clone())] })?.is_truthy() || rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_region", args: &[(None, p_region.clone())] })?.is_truthy() && rt::binary(fx, rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, p_region.clone())] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy()).is_truthy())).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "debug_polygon", args: &[(None, fx.call_fn(&rt::FnCall { name: "force_path", args: &[(None, p_region.clone())] })?), (Some("vertices"), p_vertices.clone()), (Some("edges"), p_edges.clone()), (Some("convexity"), p_convexity.clone()), (Some("size"), p_size.clone()), ], children: rt::Children::None })?);
     } else {
-    for l1_i in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, p_region.clone())] })?) {
+    for l1_i in rt::iter_values_warned(fx, &fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, p_region.clone())] })?) {
     fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("points_")), (None, fx.call_fn(&rt::FnCall { name: "chr", args: &[(None, rt::binary(fx, rt::BinOp::Add, rt::Value::Num(f64::from_bits(0x4058400000000000_u64)), l1_i.clone()))] })?), (None, rt::Value::string(" = ")), (None, rt::index(p_region.clone(), &l1_i.clone()))] })?), ])?;
     let l2_un = {
         let mut parts: Vec<rt::Geo> = Vec::new();
@@ -70,7 +70,7 @@ pub(super) fn debug_region(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     parts.push(fx.call(&rt::ModuleCall { name: "_debug_poly_verts", args: &[(None, p_region.clone()), (None, p_size.clone()), ], children: rt::Children::None })?);
     } else {
     }
-    for l3_j in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, p_region.clone())] })?) {
+    for l3_j in rt::iter_values_warned(fx, &fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, p_region.clone())] })?) {
     if (p_edges.clone()).is_truthy() {
     parts.push(fx.call(&rt::ModuleCall { name: "_debug_poly_edges", args: &[(None, l3_j.clone()), (None, rt::index(p_region.clone(), &l3_j.clone())), (Some("vertices"), p_vertices.clone()), (Some("size"), p_size.clone()), ], children: rt::Children::None })?);
     } else {
@@ -291,11 +291,11 @@ pub(super) fn region(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let l0_r = fx.call_fn(&rt::FnCall { name: "force_region", args: &[(None, p_r.clone())] })?;
     let l1_dummy = { if !(fx.call_fn(&rt::FnCall { name: "is_region", args: &[(None, l0_r.clone())] })?).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef };
     let l2_points = fx.call_fn(&rt::FnCall { name: "flatten", args: &[(None, l0_r.clone())] })?;
-    let l5_lengths = { let mut l3_acc: Vec<rt::Value> = Vec::new(); for l4_path in rt::iter_values_native(&l0_r.clone()) { l3_acc.push(fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l4_path.clone())] })?);
+    let l5_lengths = { let mut l3_acc: Vec<rt::Value> = Vec::new(); for l4_path in rt::iter_values_warned(fx, &l0_r.clone()) { l3_acc.push(fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l4_path.clone())] })?);
         } rt::build_vector(l3_acc) };
     let l8_starts = { let mut l6_acc: Vec<rt::Value> = Vec::new(); l6_acc.push(rt::Value::Num(f64::from_bits(0x0_u64)));
-        for l7_each in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "cumsum", args: &[(None, l5_lengths.clone())] })?) { l6_acc.push(l7_each); } rt::build_vector(l6_acc) };
-    let l11_paths = { let mut l9_acc: Vec<rt::Value> = Vec::new(); for l10_i in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, l0_r.clone())] })?) { l9_acc.push(fx.call_fn(&rt::FnCall { name: "count", args: &[(Some("s"), rt::index(l8_starts.clone(), &l10_i.clone())), (Some("n"), rt::index(l5_lengths.clone(), &l10_i.clone()))] })?);
+        for l7_each in rt::iter_values_warned(fx, &fx.call_fn(&rt::FnCall { name: "cumsum", args: &[(None, l5_lengths.clone())] })?) { l6_acc.push(l7_each); } rt::build_vector(l6_acc) };
+    let l11_paths = { let mut l9_acc: Vec<rt::Value> = Vec::new(); for l10_i in rt::iter_values_warned(fx, &fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, l0_r.clone())] })?) { l9_acc.push(fx.call_fn(&rt::FnCall { name: "count", args: &[(Some("s"), rt::index(l8_starts.clone(), &l10_i.clone())), (Some("n"), rt::index(l5_lengths.clone(), &l10_i.clone()))] })?);
         } rt::build_vector(l9_acc) };
     let l12_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();

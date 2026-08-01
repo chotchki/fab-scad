@@ -423,7 +423,18 @@ impl Registry {
     /// non-empty `consts`, arm post-hoist) before wiring `func`.
     #[must_use]
     pub fn resolve(&self, name: &str, params: &[Parameter], body: &Expr) -> Option<&'static Entry> {
-        let fp = crate::fingerprint_of(params, body);
+        self.resolve_fp(name, crate::fingerprint_of(params, body))
+    }
+
+    /// [`Registry::resolve`] with the fingerprint ALREADY COMPUTED — the AR.19 seam.
+    ///
+    /// Arming a library asks about the same body many times (its own resolve, then once per row
+    /// that names it as a dep, then again post-hoist), and hashing an AST is not free: at 1260 rows
+    /// the repeated walks measured at +55 ms per evaluation. The caller memoizes and hands the hash
+    /// in. Nothing about the GATE changes — the fingerprint is still ours, computed by our parser
+    /// from the program's own body — only how many times we compute it.
+    #[must_use]
+    pub fn resolve_fp(&self, name: &str, fp: Fingerprint) -> Option<&'static Entry> {
         self.fn_index()
             .map
             .get(name)

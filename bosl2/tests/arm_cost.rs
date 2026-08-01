@@ -1,10 +1,12 @@
-//! AR.19's number, measurable at last: what does ARMING an 866-row library cost per evaluation?
+//! AR.19's number, measurable at last: what does ARMING a whole transpiled library cost per evaluation?
 //!
 //! `build_intrinsics` fingerprints every defined function once at `Ctx` build, and
 //! `arm_guarded_intrinsics` then re-resolves each const-guarded row and walks its dep list, doing a
 //! full AST fingerprint per (row, dep) pair. At 83 hand rows nobody noticed. AR.26.2 measured the
-//! shape at library scale — 437 of 866 rows need the post-hoist arm, ~4500 fingerprints and as many
-//! bake-builder calls — and this is the wall-clock that shape actually costs.
+//! shape at library scale — roughly half the rows need the post-hoist arm, thousands of
+//! fingerprints and as many bake-builder calls — and this is the wall-clock that shape costs. The
+//! row count is whatever the current band is (1260 at AR.27); the test asks the registry rather
+//! than hard-coding it, so the number cannot go stale the way this paragraph can.
 //!
 //! `#[ignore]`d: it is a measurement, not a gate. A gate would need a threshold, and a threshold on
 //! a laptop's wall clock is a flake generator. Run it with
@@ -52,7 +54,7 @@ fn best(src: &str, registry: &Registry, intrinsics: bool, n: usize) -> f64 {
 
 #[test]
 #[ignore = "measurement, not a gate"]
-fn arming_an_866_row_library_costs() {
+fn arming_a_transpiled_library_costs() {
     if !fab_bosl2::transpiled() || !libs().join("BOSL2/std.scad").exists() {
         eprintln!("skipping: libs/BOSL2 not checked out");
         return;

@@ -975,10 +975,11 @@ impl crate::surface::FnCtx for NativeFnCtx<'_, '_> {
 
     fn call_named(
         &self,
+        def: &str,
         name: &str,
         args: &[(Option<&'static str>, Value)],
     ) -> crate::Result<Value> {
-        call_named_outward(self.ctx, &self.caller, name, args)
+        call_named_outward(self.ctx, &self.caller, def, name, args)
     }
 
 }
@@ -1070,12 +1071,20 @@ pub(super) fn reinterpret_named(
 /// about what a call means:
 ///
 /// 1. a user FUNCTION of that name — interpret it, exactly as a depth-decline would;
-/// 2. else a bound function VALUE of that name — invoke it (`lookup` walks the caller's chain, so
-///    a top-level `f = function(x) …` answers here, which is what the interpreter's own
-///    `CallValue` arm does);
-/// 3. else warn `Ignoring unknown function 'name'` and answer `undef` — OpenSCAD's behaviour, and
-///    the reason a corpus naming a newer-BOSL2 function still renders the rest instead of hard
-///    failing (L.5.7).
+/// 2. else a name BOUND in `def`'s own lexical base — its home-island global. A function value
+///    there is invoked; anything else answers `undef` SILENTLY, which is what `Task::CallValue`
+///    does for a non-function and is NOT the unknown case;
+/// 3. else — genuinely unbound — warn `Ignoring unknown function 'name'` and answer `undef`.
+///    OpenSCAD's behaviour, and the reason a corpus naming a newer-BOSL2 function still renders the
+///    rest instead of hard failing (L.5.7).
+///
+/// `def` IS LOAD-BEARING and getting it wrong is a wrong ANSWER, not a missed speedup. The
+/// interpreted twin evaluates this call inside `def`'s own frame, whose lexical base is `def`'s
+/// home-island global; the CALLER's scope is only that frame's DYNAMIC parent, which non-`$` lookups
+/// never walk. Resolving arm 2 against `caller` therefore reads a chain the twin cannot see — the
+/// call site's own parameters and lets — and misses the one it does. Caught by a skeptic with
+/// `function wrapper(_fab_poc_absent) = _fab_poc_outward(4);`: the compiled tier found the CALLER's
+/// parameter closure and answered 401 where the interpreter warned and answered `undef`.
 ///
 /// Arm 3 is the one worth arguing about, and the argument is that the alternative is worse: an
 /// error would make a compiled caller FAIL where the interpreted twin merely warns, which is a
@@ -1083,6 +1092,7 @@ pub(super) fn reinterpret_named(
 pub(super) fn call_named_outward(
     ctx: &super::Ctx<'_>,
     caller: &Scope,
+    def: &str,
     name: &str,
     args: &[(Option<&'static str>, Value)],
 ) -> crate::Result<Value> {
@@ -1115,12 +1125,24 @@ pub(super) fn call_named_outward(
         let call = bind_values(params, &slots, &dollars, caller, &base, ctx)?;
         return super::eval_with_ctx(body, &call, ctx);
     }
-    let bound = caller.lookup(name);
-    if matches!(bound, Value::Function { .. }) {
-        return invoke_function_value(ctx, caller, &bound, args);
+    // `def`'s own lexical base — see the note above on why it is not `caller`.
+    let bound = ctx
+        .functions
+        .get(def)
+        .and_then(|&(_, home)| ctx.island_globals.borrow().get(home).cloned())
+        .and_then(|base| base.lookup_opt(name));
+    match bound {
+        Some(v) if matches!(v, Value::Function { .. }) => {
+            invoke_function_value(ctx, caller, &v, args)
+        }
+        // BOUND but not callable. `Task::CallValue`'s catch-all answers `undef` and says nothing,
+        // and a warning here would be a line the interpreter never prints.
+        Some(_) => Ok(Value::Undef),
+        None => {
+            ctx.warn(format!("Ignoring unknown function '{name}'"));
+            Ok(Value::Undef)
+        }
     }
-    ctx.warn(format!("Ignoring unknown function '{name}'"));
-    Ok(Value::Undef)
 }
 
 /// AR.17.2 — MINT a `Value::Function` from the literal at `path` inside the fingerprint-proven

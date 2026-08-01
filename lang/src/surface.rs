@@ -17,8 +17,8 @@
 //! TWO LISTS, NOT ONE WITH AN `Option`. [`LibrarySurface::callables`] is pure DECLARATION — what
 //! exists and how to call it — and [`LibrarySurface::rows`] is IMPLEMENTATION — what we compiled and
 //! what has to be true for it to be legal, as the [`crate::registry::Rows`] a consumer accumulates.
-//! They are different lengths ON PURPOSE: BOSL2 declares 1335 functions and the emitter compiles
-//! 1072 of them. Folding them into one list with an optional function pointer would assert those are
+//! They are different lengths ON PURPOSE: BOSL2 declares 1329 functions and the emitter compiles
+//! 1260 of them (AR.27). Folding them into one list with an optional function pointer would assert those are
 //! the same set, which is exactly the drift this phase exists to kill.
 //!
 //! Declaring MODULES earns something before a single module is transpiled: the fuzzer can generate
@@ -246,8 +246,8 @@ pub trait LibrarySurface: Send + Sync {
     /// the same rows a consumer accumulates into a [`crate::registry::Registry`].
     ///
     /// Deliberately a different list from [`LibrarySurface::callables`], and deliberately a
-    /// different LENGTH: BOSL2 declares 1335 functions and the emitter compiles 1072 of them, plus
-    /// 416 modules on their own curve. Folding the two into one list with an optional function
+    /// different LENGTH: BOSL2 declares 1329 functions and the emitter compiles 1260 of them (AR.27),
+    /// plus 416 modules on their own curve. Folding the two into one list with an optional function
     /// pointer would assert they are the same set, which is exactly the drift this phase exists to
     /// kill — and it is the drift AR.5a found three times in the hand-maintained guard lists.
     ///
@@ -379,7 +379,16 @@ pub trait FnCtx: Console {
     /// RESOLUTION ORDER IS THE INTERPRETER'S, and it must be: a user function, else a bound
     /// function VALUE of that name, else the unknown-function path — warn `Ignoring unknown
     /// function 'name'` and answer `undef`, which is what OpenSCAD does and what a corpus naming a
-    /// newer-BOSL2 function depends on to render the rest.
+    /// newer-BOSL2 function depends on to render the rest. A name bound to a NON-function is not
+    /// the unknown case: the interpreter answers `undef` there SILENTLY, and a warning we invent is
+    /// a console line it never prints.
+    ///
+    /// `def` IS THE CALLING NATIVE'S OWN NAME, and it is not bookkeeping. The value arm has to
+    /// resolve `name` in the lexical world the INTERPRETED twin would — the calling function's
+    /// HOME-ISLAND global — and a native has no scope of its own to offer; siblings share one `fx`,
+    /// so the ctx cannot know which of them is asking. Handing the caller's scope instead reads a
+    /// chain the twin never walks: it sees the call site's locals (which the twin cannot) and
+    /// misses the callee's own island (which the twin uses). Same reason `mint_fn` takes a `def`.
     ///
     /// ARGUMENTS ARRIVE AS WRITTEN, names attached, and slot matching happens HERE against whatever
     /// the name actually resolved to. Positionalising at compile time would mean matching against
@@ -393,6 +402,7 @@ pub trait FnCtx: Console {
     /// ([`NoClosures`]) — the whole call re-interprets, so the gap costs speed, never an answer.
     fn call_named(
         &self,
+        def: &str,
         name: &str,
         args: &[(Option<&'static str>, Value)],
     ) -> crate::Result<Value>;
@@ -451,6 +461,7 @@ impl FnCtx for NoClosures {
 
     fn call_named(
         &self,
+        _def: &str,
         _name: &str,
         _args: &[(Option<&'static str>, Value)],
     ) -> crate::Result<Value> {
@@ -480,6 +491,10 @@ impl LibrarySurface for Natives {
     }
 
     fn rows(&self) -> crate::registry::Rows {
+        // fab-lang's own FUNCTION rows and pins. NOT the generated BOSL2 module band, which
+        // `Registry::builtin()` accumulates as a SECOND row set — a `Rows` is one library's
+        // hand-over and squeezing two into it would be the lie this split exists to prevent.
+        // A consumer wanting what fab-lang ships wants `Registry::builtin()`, not this.
         crate::eval::intrinsics::builtin_rows()
     }
 

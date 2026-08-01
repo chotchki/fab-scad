@@ -94,7 +94,7 @@ pub(super) fn regular_polyhedron(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> 
     }
  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (rt::binary(fx, rt::BinOp::Gt, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
     let l12_maxrange = if p_repeat.clone().is_truthy() { rt::binary(fx, rt::BinOp::Sub, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l5_faces.clone())] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) } else { rt::binary(fx, rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) };
-    for l13_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &l12_maxrange.clone())) {
+    for l13_i in rt::iter_values_warned(fx, &rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &l12_maxrange.clone())) {
     let l14_facepts = fx.call_fn(&rt::FnCall { name: "select", args: &[(None, l2_scaled_points.clone()), (None, rt::index(l5_faces.clone(), &l13_i.clone()))] })?;
     let l15_sd = fx.dollar("$center");
     fx.set_dollar("$center", rt::unary(fx, rt::UnOp::Neg, fx.call_fn(&rt::FnCall { name: "mean", args: &[(None, l14_facepts.clone())] })?));

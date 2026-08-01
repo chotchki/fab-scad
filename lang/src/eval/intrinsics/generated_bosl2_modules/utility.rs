@@ -127,8 +127,8 @@ pub(super) fn echo_viewport(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let mut parts: Vec<rt::Geo> = Vec::new();
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
-    fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "format", args: &[(None, rt::Value::string("VPR=[{:.2f},{:.2f},{:.2f}],VPD={:.2f},VPT=[{:.2f},{:.2f},{:.2f}]")), (None, { let mut l1_acc: Vec<rt::Value> = Vec::new(); for l2_each in rt::iter_values_native(&fx.dollar("$vpr")) { l1_acc.push(l2_each); } l1_acc.push(fx.dollar("$vpd"));
-        for l3_each in rt::iter_values_native(&fx.dollar("$vpt")) { l1_acc.push(l3_each); } rt::build_vector(l1_acc) })] })?), ])?;
+    fx.echo(&[(None, fx.call_fn(&rt::FnCall { name: "format", args: &[(None, rt::Value::string("VPR=[{:.2f},{:.2f},{:.2f}],VPD={:.2f},VPT=[{:.2f},{:.2f},{:.2f}]")), (None, { let mut l1_acc: Vec<rt::Value> = Vec::new(); for l2_each in rt::iter_values_warned(fx, &fx.dollar("$vpr")) { l1_acc.push(l2_each); } l1_acc.push(fx.dollar("$vpd"));
+        for l3_each in rt::iter_values_warned(fx, &fx.dollar("$vpt")) { l1_acc.push(l3_each); } rt::build_vector(l1_acc) })] })?), ])?;
         fx.group(parts)
     };
     parts.push(l0_blk);

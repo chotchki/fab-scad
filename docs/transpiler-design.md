@@ -389,8 +389,9 @@ together would assert those are the same set, which is precisely the drift this 
 > sets a consumer accumulates into a `registry::Registry`. And a row carries its VERBATIM REFERENCE,
 > not a fingerprint: the registry parses it and hashes it with our own parser, so the gate hash is
 > never asserted by the row author. That is the difference between trusting a library and checking
-> it, and it is why `surface::Fingerprint` needs no public constructor. Count is 1072 compiled, not
-> 742. This document stays as the dated design record it says it is; the live contract is
+> it, and it is why `surface::Fingerprint` needs no public constructor. Count is 1260 of 1329
+> compiled as of AR.27, not 742 — and the live figure is the FLOOR const in `fab_lib::emit`'s
+> coverage ratchet, never a number in prose. This document stays as the dated design record it says it is; the live contract is
 > `lang/src/registry.rs` and `lang/src/surface.rs`.
 
 Declaring MODULES buys something before a single module is transpiled: the fuzzer can generate calls

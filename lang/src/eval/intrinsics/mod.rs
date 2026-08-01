@@ -20,11 +20,15 @@
     reason = "the uniform fallible Intrinsic fn-pointer type; infallible impls wrap in Ok to conform"
 )]
 
-use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use super::value::Value;
+#[cfg(test)]
 use crate::parser::{Expr, Parameter};
+#[cfg(test)]
+use crate::registry::ModuleNative;
+
+use super::value::Value;
+
 
 mod affine;
 pub(crate) mod fingerprint;
@@ -95,64 +99,10 @@ use shape::{all_nonzero, is_consistent, is_matrix, is_path, is_vector};
 #[cfg(test)]
 use vectors::{bt_search, unit};
 
-/// A native implementation of a specific user function. Receives the call's POSITIONAL argument
-/// VALUES (already evaluated, in source order) and returns the result — the same `Value` the interpreted body
-/// would, or the same ERROR (a BOSL2 function with an inline `assert(…)` raises when the assert fails, so the
-/// ABI is fallible; the native reproduces the assert's CONTROL FLOW — it errors where the body errors — not
-/// its diagnostic string, which is a locator, not output). The dispatch gate ([`super`]) only routes
-/// all-positional calls here, so the args stay a flat slice. An intrinsic implements the WHOLE function for
-/// the arg shapes it accepts; it hardcodes the reference's parameter defaults (it matches that exact source),
-/// so a short positional call still gets it.
-///
-/// AR.17: the ctx is the ONE capability a native may use beyond its args — invoking a function
-/// VALUE ([`crate::surface::FnCtx`], deliberately that narrow). A native that never reaches a
-/// closure ignores it (`_fx`), and purity is preserved WHERE IT MATTERS by the trait's surface,
-/// not by the absence of a parameter — the module side's `ModuleCtx` discipline one level down.
-pub(super) type Intrinsic = fn(&dyn crate::surface::FnCtx, &[Value]) -> crate::Result<Value>;
-
-/// One registered intrinsic: the exact function it stands in for. `reference` is the VERBATIM source of that
-/// function (one `function name(params) = body;`) — the single source of truth: its fingerprint gates
-/// dispatch, and the fast==slow harness runs its interpreted body as the oracle the `func` must bit-match.
-/// A named top-level constant + a builder for its expected `Value` (statics can't hold one directly).
-type ValueConst = (&'static str, fn() -> Value);
-
-pub(super) struct Entry {
-    /// The function name the intrinsic implements (registry bucket key).
-    pub(super) name: &'static str,
-    /// The verbatim reference source of that function — fingerprinted + run as the harness oracle.
-    /// `pub(super)` for the transpiler (AR.5): the analysis pass derives the guard sets below FROM
-    /// this source, and the registry's hand lists are its acceptance oracle.
-    pub(super) reference: &'static str,
-    /// Named TOP-LEVEL CONSTANTS the reference hardcodes (default exprs like `eps=_EPSILON`, or body reads
-    /// — `PI` counts too, it's just a seeded binding), with the value the native impl bakes in. Empty =
-    /// self-contained. Non-empty makes the entry CONST-GUARDED (O.5.1): the fingerprint proves the FUNCTION
-    /// source, not the constants it names, so a user override (`_EPSILON = 1e-6;`) would make the baked
-    /// value silently wrong. Guarded entries never wire at ctx build and arm ONLY after island globals are
-    /// built, when each named constant's BOUND value in the fn's home-island global bit-matches — see
-    /// `super::arm_guarded_intrinsics`. Mismatch (or mid-hoist, before globals exist) → interpreted: the
-    /// worst case stays "missed speedup, never a wrong answer".
-    pub(super) consts: &'static [(&'static str, f64)],
-    /// The VALUE-typed half of the const guard (O.8): named top-level constants whose baked value is NOT a
-    /// number — BOSL2's direction vectors (`UP`/`RIGHT`) and sentinels (`_NO_ARG`). Each `fn()` builds the
-    /// expected `Value` (statics can't hold one); the arm step compares it against the home-scope binding
-    /// BIT-level ([`value_bits_eq`]: f64s by `to_bits`, exact variant, recursive) — same
-    /// wire-only-if-proven contract as `consts`, same post-hoist arm timing.
-    pub(super) consts_v: &'static [ValueConst],
-    /// USER-FUNCTION names interpreting the reference can reach (O.5.2 dep pins), TRANSITIVELY CLOSED by the
-    /// author over every arg shape the native accepts (`select` → `is_vector`/`is_range` → `is_finite` →
-    /// `is_nan`; a branch no accepted arg shape can reach — `all_nonzero` behind select's fixed 1-arg
-    /// `is_vector(start)` — is excluded). The entry wires only if each dep's DEFINED body fingerprints to
-    /// that dep's own registry/[`PINS`] reference — the fingerprint gate extended one hop, because the
-    /// native bakes the dep's semantics without the dep's own fingerprint ever being consulted at dispatch.
-    pub(super) deps: &'static [&'static str],
-    /// BUILTIN names interpreting the reference (or a pinned dep) can reach. A user function may SHADOW a
-    /// builtin (dispatch resolves user fns first — BOSL2 itself shadows `reverse`), which would reroute the
-    /// interpreted body while the native keeps the real builtin. The entry wires only if none of these names
-    /// has a user-function definition.
-    pub(super) builtins: &'static [&'static str],
-    /// The native implementation.
-    pub(super) func: Intrinsic,
-}
+/// AR.26.1 — the ROW TYPES live in [`crate::registry`] now, because a generated library crate has to
+/// construct them and this module is private. Re-exported under their old names so the hand registry
+/// below, the generated band spines and ~300 test sites read exactly as they did.
+pub(crate) use crate::registry::{Entry, Intrinsic, ModuleEntry, Plan};
 
 /// Reference-only dependency anchors: BOSL2 functions we PIN (verbatim source → fingerprint) because a
 /// registry entry's reference calls them, without shipping a native impl of our own. [`anchor_fp`] resolves
@@ -2182,7 +2132,7 @@ pub fn assert_decline() -> crate::Error {
 /// `to_bits` (same-bits NaNs are EQUAL, `0.0`/`-0.0` are DISTINCT — the determinism doctrine), lists
 /// recurse, and the VARIANT must match exactly (a `NumList` never equals the element-wise-equal `List` —
 /// conservative: an unexpected construction declines rather than wires).
-pub(super) fn value_bits_eq(a: &Value, b: &Value) -> bool {
+pub(crate) fn value_bits_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => x.to_bits() == y.to_bits(),
         (Value::NumList(x), Value::NumList(y)) => {
@@ -2248,60 +2198,39 @@ fn non_terminating(name: &str) -> crate::Error {
     ))
 }
 
-/// `(fingerprint, entry)` for every registry entry, computed ONCE by parsing each `reference` and
-/// fingerprinting its `(params, body)`. Lazy + cached: the parse cost is paid the first time an intrinsic is
-/// looked up in the process, never per call. A `reference` that doesn't parse to a single `function` def is
-/// a registry BUG — it's dropped with a debug assert rather than silently mis-registering.
-fn table() -> &'static BTreeMap<&'static str, (crate::surface::Fingerprint, &'static Entry)> {
-    static TABLE: OnceLock<BTreeMap<&'static str, (crate::surface::Fingerprint, &'static Entry)>> =
-        OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut map = BTreeMap::new();
-        for entry in REGISTRY {
-            let Some(fp) = reference_fingerprint(entry.reference) else {
-                continue;
-            };
-            let prior = map.insert(entry.name, (fp, entry));
-            debug_assert!(
-                prior.is_none(),
-                "registry declares `{}` twice — the index keeps one and dispatch silently loses \
-                 the other",
-                entry.name
-            );
-        }
-        map
-    })
+/// Everything fab-lang's OWN library contributes to a registry — the hand [`REGISTRY`], the
+/// reference-only [`PINS`], and the compiled modules (the POC set plus the generated BOSL2 band).
+///
+/// This is the whole seam between the shipped natives and [`crate::registry::Registry`]: the index
+/// itself, the fingerprints and the lookups all live there now, so a consumer that loads other
+/// libraries accumulates them the same way rather than being told there is only one table.
+pub(crate) fn builtin_rows() -> crate::registry::Rows {
+    crate::registry::Rows {
+        name: "fab-lang",
+        functions: REGISTRY,
+        modules: MODULE_REGISTRY,
+        pins: PINS,
+    }
 }
 
-/// The [`PINS`] fingerprints, same lazy shape as [`table`].
-fn pin_table() -> &'static BTreeMap<&'static str, crate::surface::Fingerprint> {
-    static TABLE: OnceLock<BTreeMap<&'static str, crate::surface::Fingerprint>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut map = BTreeMap::new();
-        for &(name, reference) in PINS {
-            let Some(fp) = reference_fingerprint(reference) else {
-                continue;
-            };
-            let prior = map.insert(name, fp);
-            debug_assert!(prior.is_none(), "PINS declares `{name}` twice");
-        }
-        map
-    })
+/// The GENERATED BOSL2 module band, as its own row set (AR.23 keeps it in its own files, and
+/// AR.26.3 moves it into its own crate — where it will hand over exactly this).
+pub(crate) fn generated_bosl2_module_rows() -> crate::registry::Rows {
+    crate::registry::Rows {
+        name: "BOSL2 (generated modules)",
+        modules: generated_bosl2_modules::REGISTRY,
+        ..crate::registry::Rows::default()
+    }
 }
 
-/// SU.2 (sustainment): every audited `(name, reference-fingerprint, is_pin)` — registry entries first,
-/// then the [`PINS`]. The parity matrix walks these against whatever library a program actually loaded;
-/// the fingerprints are the SAME cached ones dispatch uses, so the audit can never disagree with the
-/// wire gate about what "matched" means. The `_fab_` namespace (the O.1 proof-of-concept trio) is
-/// fab-authored — no upstream defines it, so upstream parity doesn't apply and it's excluded.
-pub(super) fn matrix_targets()
--> impl Iterator<Item = (&'static str, crate::surface::Fingerprint, bool)> {
-    table()
-        .values()
-        .filter(|(_, e)| !e.name.starts_with("_fab_"))
-        .map(|(fp, e)| (e.name, *fp, false))
-        .chain(pin_table().iter().map(|(&n, &fp)| (n, fp, true)))
-}
+// ── AR.26.1: the GLOBAL DOOR, shut ───────────────────────────────────────────────────────────────
+//
+// The lookups below used to be free functions over three process-lifetime caches. They now live on
+// `crate::registry::Registry` and every production reader holds an INSTANCE — which is the whole
+// point, since an accumulating registry has no single answer to give. What remains here is
+// `#[cfg(test)]` shims over `Registry::builtin()`, so the ~300 assertion sites that ask the shipped
+// registry a question read exactly as they did; the `cfg` is what makes the invariant mechanical
+// rather than documented, because outside tests these items do not exist to be called.
 
 /// Test-only: every MATRIX-AUDITED reference source (entries + pins, `_fab_` POC excluded to mirror
 /// [`matrix_targets`]) — the matrix tests assemble a synthetic library at exactly the pinned revision.
@@ -2315,55 +2244,24 @@ pub(super) fn all_reference_sources() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// The reference fingerprint a DEP name must match to satisfy an entry's dep pin: the dep's own registry
-/// entry if it has one, else its [`PINS`] row. `None` = the dep isn't anchored anywhere — a registry
-/// authoring bug the depending entry then never wires over.
+/// Test-only shim. See [`crate::registry::Registry::anchor_fp`].
+#[cfg(test)]
 #[must_use]
-pub(super) fn anchor_fp(name: &str) -> Option<crate::surface::Fingerprint> {
-    table()
-        .get(name)
-        .map(|(fp, _)| *fp)
-        .or_else(|| pin_table().get(name).copied())
+pub(super) fn anchor_fp(asking: &str, dep: &str) -> Option<crate::surface::Fingerprint> {
+    crate::registry::Registry::builtin().anchor_fp(asking, dep)
 }
 
-/// Parse a registry `reference` (one `function` def) and fingerprint it, or `None` if it isn't exactly that
-/// (a registry authoring bug).
-fn reference_fingerprint(reference: &str) -> Option<crate::surface::Fingerprint> {
-    use crate::parser::{StmtKind, parse};
-    let program = parse(reference).ok()?;
-    let stmt = program.stmts.into_iter().next()?;
-    if let StmtKind::FunctionDef { params, body, .. } = stmt.kind {
-        Some(fingerprint(&params, &body))
-    } else {
-        debug_assert!(
-            false,
-            "intrinsic reference is not a single function def: {reference}"
-        );
-        None
-    }
-}
-
-/// Resolve a defined function to its registry entry, if one is registered for EXACTLY this body. Called ONCE
-/// per function at [`super::build_ctx`] time (never per call): fingerprint the running `(params, body)`,
-/// then match on (name, fingerprint). A miss — no entry for the name, or the name matches but the body
-/// doesn't — returns `None`, so the interpreter runs the real body. This is the never-silently-wrong gate's
-/// FIRST hop; the caller must still clear the entry's `deps`/`builtins` guards (and, for a non-empty
-/// `consts`, arm post-hoist) before wiring `func` — see `super::build_intrinsics` /
-/// `super::arm_guarded_intrinsics`.
+/// Test-only shim. See [`crate::registry::Registry::resolve`].
+#[cfg(test)]
 #[must_use]
 pub(super) fn resolve(name: &str, params: &[Parameter], body: &Expr) -> Option<&'static Entry> {
-    let fp = fingerprint(params, body);
-    table().get(name).filter(|(f, _)| *f == fp).map(|(_, e)| *e)
+    crate::registry::Registry::builtin().resolve(name, params, body)
 }
 
-/// A registry entry by NAME alone — no fingerprint, no program.
-///
-/// Deliberately weaker than [`resolve`]: the question it answers is about the REGISTRY's shape ("does this
-/// dep bake a constant?"), not about a particular program's definitions, and it is asked in
-/// `build_intrinsics` before any island scope exists to check a constant against (AN.17's
-/// `needs_post_hoist`). A name is unique in the registry even though fingerprints are not.
+/// Test-only shim. See [`crate::registry::Registry::entry_by_name`].
+#[cfg(test)]
 pub(super) fn entry_by_name(name: &str) -> Option<&'static Entry> {
-    table().get(name).map(|(_, e)| *e)
+    crate::registry::Registry::builtin().entry_by_name(name)
 }
 
 /// Test-only access to a registry entry's reference source, for the fast==slow harness.
@@ -2381,42 +2279,18 @@ pub(super) fn pin_reference_of(name: &str) -> Option<&'static str> {
     PINS.iter().find(|(n, _)| *n == name).map(|(_, r)| *r)
 }
 
-/// How a defined function relates to the intrinsic registry — the EXPLAIN classification (O.3).
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum Plan {
-    /// An intrinsic is registered for this name AND the body fingerprint matches → native dispatch will fire.
-    Wired,
-    /// An intrinsic is registered for this NAME, but the defined body fingerprints DIFFERENTLY (a BOSL2
-    /// revision the intrinsic's reference doesn't match) → it silently INTERPRETS. The actionable case:
-    /// either the user's library drifted, or the intrinsic's reference source is stale and needs updating.
-    Drift,
-    /// No intrinsic registered for this name — the ordinary interpreted function (the vast majority).
-    NotRegistered,
-}
-
-/// Classify a defined function against the registry (O.3 EXPLAIN). Pure + testable; the `FAB_EXPLAIN`
-/// stderr report ([`super::build_intrinsics`]) is just this plus a print.
+/// Test-only shim. See [`crate::registry::Registry::classify`].
+#[cfg(test)]
 #[must_use]
 pub(super) fn classify(name: &str, params: &[Parameter], body: &Expr) -> Plan {
-    if !table().contains_key(name) {
-        return Plan::NotRegistered;
-    }
-    // Fingerprint-level truth: a guarded match is WIRED here (the source matched); whether its deps/consts
-    // guards then clear is a separate, per-program verdict the build/arm steps print under the same EXPLAIN.
-    if resolve(name, params, body).is_some() {
-        Plan::Wired
-    } else {
-        Plan::Drift
-    }
+    crate::registry::Registry::builtin().classify(name, params, body)
 }
 
-/// The registered REFERENCE fingerprint for `name` — the hash a running function must match to WIRE — or
-/// `None` if no intrinsic is registered under that name. Feeds the EXPLAIN DRIFT diagnostic, which prints it
-/// next to the running function's own fingerprint so an author can SEE how the two differ (stale reference vs
-/// a genuinely different library version). See [`fingerprint`].
+/// Test-only shim. See [`crate::registry::Registry::reference_fp`].
+#[cfg(test)]
 #[must_use]
 pub(super) fn reference_fp(name: &str) -> Option<crate::surface::Fingerprint> {
-    table().get(name).map(|(fp, _)| *fp)
+    crate::registry::Registry::builtin().reference_fp(name)
 }
 
 /// Is the `FAB_EXPLAIN` intrinsic-plan report on? Cached once (env read per ctx build would be silly).
@@ -2429,33 +2303,9 @@ pub(super) fn explain_on() -> bool {
 //
 // Separate from `REGISTRY` because a module native is a different animal (it reaches back into the
 // evaluator for children and `$`-vars — see `crate::surface::ModuleCtx`), and because the two lists
-// are genuinely different lengths: 1335 declared functions against 742 compiled, and 416 modules on
-// their own curve. AR.14.4 folds both into the generated crate's `LibrarySurface::natives`; this is
-// the proving ground until then.
-
-/// A compiled module: geometry out, with the evaluator reachable through `ModuleCtx`.
-pub(super) type ModuleNative =
-    fn(&dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo>;
-
-/// One module the registry implements natively.
-pub(super) struct ModuleEntry {
-    /// The module name dispatch keys on.
-    pub(super) name: &'static str,
-    /// Verbatim source of the module it stands in for — fingerprinted, and run as the harness
-    /// oracle. Same contract as `Entry::reference`: the native wires only against a definition that
-    /// matches this structurally.
-    pub(super) reference: &'static str,
-    /// The compiled implementation.
-    pub(super) func: ModuleNative,
-    /// Named top-level constants the emitted body BAKES (AR.14.4 band 2) — the module twin of
-    /// `Entry::consts_v`, value-typed from the start because the library fold hands back whole
-    /// `Value`s (BOSL2's direction vectors, not just numbers). The fingerprint proves the module's
-    /// SOURCE, not the constants it names, so [`resolve_module`] refuses to wire unless each name's
-    /// binding in the body's lexical base bit-matches the baked expectation. Checked per RESOLUTION
-    /// rather than at a separate arm step, because module dispatch already holds the home scope at
-    /// the call site — there is no earlier moment with more information. Empty = band 1.
-    pub(super) consts: &'static [ValueConst],
-}
+// are genuinely different lengths: 1335 declared functions against 1072 compiled, and 416 modules on
+// their own curve. AR.26.1 made both halves rows a consumer hands in (`builtin_rows`); AR.26.3 moves
+// them into the generated crate, which will hand over exactly the same shape.
 
 /// The compiled modules, every one of them GENERATED (AR.20.8) — there are no hand-written module
 /// natives, which is the shape the whole phase is aiming at for the function side too.
@@ -2591,106 +2441,16 @@ pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
     },
 ];
 
-/// The compiled module for `name`, IFF one is registered, the definition in this program
-/// fingerprints to the reference it was generated from, AND every constant the native bakes
-/// bit-matches its binding in `base` — the body's lexical base, the same scope the interpreted
-/// body's free reads resolve against (`bind_values` receives exactly this scope).
-///
-/// Same wire-only-if-proven contract as [`resolve`]: a library that drifted from the pinned source
-/// interprets instead, so the worst case stays a missed compilation rather than a wrong answer.
-/// A user override of a baked constant (`_EPSILON = 1e-6;`) is the same story one level down —
-/// the fingerprint cannot see it, the guard here can.
+/// Test-only shim. See [`crate::registry::Registry::resolve_module`].
+#[cfg(test)]
+#[must_use]
 pub(super) fn resolve_module(
     name: &str,
     params: &[Parameter],
     body: &crate::parser::Stmt,
     base: &super::scope::Scope,
 ) -> Option<ModuleNative> {
-    let &(fp, entry) = module_table().get(name)?;
-    if module_fingerprint(params, body) != fp {
-        return None;
-    }
-    entry
-        .consts
-        .iter()
-        .all(|&(cname, expected)| {
-            base.lookup_opt(cname)
-                .is_some_and(|v| value_bits_eq(&v, &expected()))
-        })
-        .then_some(entry.func)
-}
-
-/// `name → (reference fingerprint, entry)`, parsed and fingerprinted ONCE per process — the module
-/// twin of [`table`]. Carries the whole `&'static ModuleEntry` because [`resolve_module`] needs the
-/// const guard alongside the native.
-///
-/// PERF NOTE, deliberately left rather than hidden: the CALLER's body is still fingerprinted on
-/// every instantiation, because this hook sits in the per-call path while the function side resolves
-/// once at `Ctx` build. Fine for AR.20.1, whose job is proving the ABI; AR.20.5 moves module
-/// resolution to build time alongside `build_intrinsics`, where it belongs.
-fn module_table()
--> &'static BTreeMap<&'static str, (crate::surface::Fingerprint, &'static ModuleEntry)> {
-    static TABLE: OnceLock<
-        BTreeMap<&'static str, (crate::surface::Fingerprint, &'static ModuleEntry)>,
-    > = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut map = BTreeMap::new();
-        // POC entries first, then the AR.14.4 standalone BOSL2 band — one namespace, names
-        // disjoint by construction (the debug_assert holds the line).
-        for entry in MODULE_REGISTRY
-            .iter()
-            .chain(generated_bosl2_modules::REGISTRY)
-        {
-            let Some((params, body)) = parse_module_reference(entry.reference) else {
-                continue;
-            };
-            let prior = map.insert(entry.name, (module_fingerprint(&params, &body), entry));
-            debug_assert!(
-                prior.is_none(),
-                "module registry declares `{}` twice",
-                entry.name
-            );
-        }
-        map
-    })
-}
-
-/// A module reference parsed to its `(params, body)` — the shape the fingerprint takes.
-fn parse_module_reference(reference: &str) -> Option<(Vec<Parameter>, crate::parser::Stmt)> {
-    let program = crate::parser::parse(reference).ok()?;
-    let stmt = program.stmts.into_iter().next()?;
-    let crate::parser::StmtKind::ModuleDef { params, body, .. } = stmt.kind else {
-        debug_assert!(
-            false,
-            "module reference is not a single module def: {reference}"
-        );
-        return None;
-    };
-    Some((params, *body))
-}
-
-/// A module's structural identity. Distinct from the expression fingerprint because a module's body
-/// is a STATEMENT, not an expression — but the same idea and the same guarantee: spans excluded, so
-/// reformatting and comment edits survive while a semantic change does not.
-fn module_fingerprint(
-    params: &[Parameter],
-    body: &crate::parser::Stmt,
-) -> crate::surface::Fingerprint {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    params.len().hash(&mut h);
-    for p in params {
-        p.name.hash(&mut h);
-        p.default.is_some().hash(&mut h);
-    }
-    // The body via the parser's own printer: a canonical, span-free rendering of the statement tree.
-    // Cheaper to trust than a hand-written statement walk, which is the thing AR.3.3 caught going
-    // quietly stale when it stopped seeing a node type.
-    let as_program = crate::parser::Program {
-        stmts: vec![body.clone()],
-    };
-    crate::parser::print(&as_program).hash(&mut h);
-    crate::surface::Fingerprint::new(h.finish())
+    crate::registry::Registry::builtin().resolve_module(name, params, body, base)
 }
 
 /// AR.14.3 — the bootstrap bridge's implementation. See [`crate::bootstrap_subjects`] for why this

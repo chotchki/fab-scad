@@ -15,11 +15,11 @@
 //! depend on the fuzzer to describe itself.
 //!
 //! TWO LISTS, NOT ONE WITH AN `Option`. [`LibrarySurface::callables`] is pure DECLARATION — what
-//! exists and how to call it — and [`LibrarySurface::natives`] is IMPLEMENTATION — what we compiled
-//! and what has to be true for it to be legal. They are different lengths ON PURPOSE: BOSL2 declares
-//! 1335 functions and the emitter compiles 742 of them. Folding them into one list with an optional
-//! function pointer would assert those are the same set, which is exactly the drift this phase
-//! exists to kill.
+//! exists and how to call it — and [`LibrarySurface::rows`] is IMPLEMENTATION — what we compiled and
+//! what has to be true for it to be legal, as the [`crate::registry::Rows`] a consumer accumulates.
+//! They are different lengths ON PURPOSE: BOSL2 declares 1335 functions and the emitter compiles
+//! 1072 of them. Folding them into one list with an optional function pointer would assert those are
+//! the same set, which is exactly the drift this phase exists to kill.
 //!
 //! Declaring MODULES earns something before a single module is transpiled: the fuzzer can generate
 //! calls against BOSL2's 416-module surface as soon as it is declared. That coverage is not gated on
@@ -242,19 +242,20 @@ pub trait LibrarySurface: Send + Sync {
         &[]
     }
 
-    /// What this library actually COMPILED, as opposed to what it declares.
+    /// What this library actually COMPILED, as opposed to what it declares — [`crate::registry::Rows`],
+    /// the same rows a consumer accumulates into a [`crate::registry::Registry`].
     ///
     /// Deliberately a different list from [`LibrarySurface::callables`], and deliberately a
-    /// different LENGTH: BOSL2 declares 1335 functions and the emitter compiles 742 of them, plus
+    /// different LENGTH: BOSL2 declares 1335 functions and the emitter compiles 1072 of them, plus
     /// 416 modules on their own curve. Folding the two into one list with an optional function
     /// pointer would assert they are the same set, which is exactly the drift this phase exists to
     /// kill — and it is the drift AR.5a found three times in the hand-maintained guard lists.
     ///
-    /// Every entry carries the guards that decide whether it may WIRE at all. None of that is
-    /// optional: the fingerprint proves the definition, the const guards prove the values it baked,
+    /// Every row carries the guards that decide whether it may WIRE at all. None of that is
+    /// optional: the reference proves the definition, the const guards prove the values it baked,
     /// and the dep/builtin guards prove nothing it calls has been shadowed.
-    fn natives(&self) -> &'static [Native] {
-        &[]
+    fn rows(&self) -> crate::registry::Rows {
+        crate::registry::Rows::default()
     }
 
     /// Everything callable, functions AND modules, in a stable order.
@@ -383,6 +384,10 @@ pub struct Natives;
 impl LibrarySurface for Natives {
     fn name(&self) -> &'static str {
         "natives"
+    }
+
+    fn rows(&self) -> crate::registry::Rows {
+        crate::eval::intrinsics::builtin_rows()
     }
 
     fn callables(&self) -> &'static [Decl] {
@@ -681,53 +686,3 @@ pub enum Children<'a> {
 /// Named because the bare type appears on both sides of the ABI and reads as noise inline.
 pub type ChildThunk<'a> = &'a dyn Fn(&dyn ModuleCtx) -> crate::Result<Geo>;
 
-/// One callable this library COMPILED, with everything that has to be true for it to be legal.
-pub struct Native {
-    /// The name it stands in for — the registry's dispatch key.
-    pub name: &'static str,
-    /// The structural identity of the definition it was generated FROM. It wires only against a
-    /// definition that fingerprints to exactly this; anything else is library drift and interprets.
-    pub fingerprint: Fingerprint,
-    /// Named top-level constants whose value this native BAKED. The fingerprint proves the
-    /// function, never the constants it names, so a user rebinding one has to disarm it.
-    pub consts: &'static [&'static str],
-    /// User-function names the body can reach. Each must be defined AND fingerprint to its own
-    /// pinned reference, because the native bakes the dep's semantics without the dep's own gate
-    /// ever being consulted at dispatch.
-    pub deps: &'static [&'static str],
-    /// Builtin names the body can reach. A user function may SHADOW a builtin — BOSL2 itself
-    /// shadows `reverse` — which would reroute the interpreted body while the native keeps calling
-    /// the real one.
-    pub builtins: &'static [&'static str],
-    /// The compiled implementation.
-    pub imp: NativeImpl,
-}
-
-/// The two shapes a compiled callable comes in. Split rather than unified because they are not
-/// variations on a theme: a function is a pure map from values to a value, and a module reaches
-/// back into the evaluator for its children and its `$`-chain (see [`ModuleCtx`]).
-pub enum NativeImpl {
-    /// Values in, a value out. No evaluator context, which is what made the function side
-    /// tractable — composition is bit-identical BY CONSTRUCTION because the body routes every
-    /// operation through the interpreter's own value algebra.
-    Function(fn(&[Value]) -> crate::Result<Value>),
-    /// Geometry out, with the evaluator reachable through [`ModuleCtx`] for children, `$`-vars and
-    /// module dispatch.
-    Module(fn(&dyn ModuleCtx) -> crate::Result<Geo>),
-}
-
-impl std::fmt::Debug for Native {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Native")
-            .field("name", &self.name)
-            .field("fingerprint", &self.fingerprint)
-            .field(
-                "kind",
-                &match self.imp {
-                    NativeImpl::Function(_) => "function",
-                    NativeImpl::Module(_) => "module",
-                },
-            )
-            .finish_non_exhaustive()
-    }
-}

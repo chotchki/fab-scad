@@ -72,12 +72,20 @@ pub(crate) fn decode_source(bytes: Vec<u8>) -> String {
 /// # Errors
 /// [`Error::Load`](crate::Error::Load) for an unresolvable/unreadable `use`/`include` or a `mesh_reader`
 /// failure; [`Error::Parse`](crate::Error::Parse) for a malformed source; any evaluation error.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "AR.26.1 — the registry joins jit_factory as a second accelerator handed in beside \
+              Config; both are WHICH-CAPABILITIES rather than knobs, so neither belongs on the Copy \
+              Config, and bundling them into a struct would hide that the three drivers take the \
+              same list"
+)]
 pub(crate) fn drive<R>(
     source: &str,
     base_dir: &Path,
     root_path: Option<&Path>,
     library_paths: &[PathBuf],
     jit_factory: Option<&dyn NumericJitFactory>,
+    registry: &crate::registry::Registry,
     config: super::Config,
     mut mesh_reader: R,
 ) -> crate::RunResult<(Geo, Vec<Message>)>
@@ -104,6 +112,7 @@ where
             &scad,
             &files,
             jit_factory,
+            registry,
             config,
         ) {
             Ok(resolution) => resolution,
@@ -149,13 +158,14 @@ pub(crate) fn drive_intrinsic_matrix(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
+    registry: &crate::registry::Registry,
 ) -> crate::Result<Vec<super::IntrinsicMatrixRow>> {
     let mut scad = SourceMap::new();
     let mut files = FileTable::new();
     let mut warnings: Vec<Message> = Vec::new();
     let mut reader = no_import_reader;
     loop {
-        match super::resolve_intrinsic_matrix(source, base_dir, &scad)? {
+        match super::resolve_intrinsic_matrix(source, base_dir, &scad, registry)? {
             super::MatrixResolution::Complete(rows) => {
                 let broken = warnings.iter().find_map(|m| match m {
                     Message::Warning(w) => Some(w.as_str()),
@@ -201,6 +211,7 @@ pub(crate) fn drive_from_map<R>(
     source: &str,
     sources: &std::collections::BTreeMap<PathBuf, String>,
     jit_factory: Option<&dyn NumericJitFactory>,
+    registry: &crate::registry::Registry,
     config: super::Config,
     mut mesh_reader: R,
 ) -> crate::RunResult<(Geo, Vec<Message>)>
@@ -215,7 +226,7 @@ where
         // AP.2 parity with `drive`: a failing round owes the console the loader warnings this loop
         // accumulated — they printed before eval started, so they read first (a bare `?` dropped them).
         let resolution =
-            match resolve_source(source, base_dir, None, &scad, &files, jit_factory, config) {
+            match resolve_source(source, base_dir, None, &scad, &files, jit_factory, registry, config) {
                 Ok(resolution) => resolution,
                 Err(failure) => return Err(behind(warnings, failure)),
             };
@@ -268,12 +279,20 @@ where
 /// [`Error::Parse`](crate::Error::Parse) for a malformed ROOT source, a `mesh_reader` failure, or
 /// any evaluation error. (A missing/broken lib is tolerated — warn + empty — as in both sibling
 /// drivers.)
+#[allow(
+    clippy::too_many_arguments,
+    reason = "AR.26.1 — the registry joins jit_factory as a second accelerator handed in beside \
+              Config; both are WHICH-CAPABILITIES rather than knobs, so neither belongs on the Copy \
+              Config, and bundling them into a struct would hide that the three drivers take the \
+              same list"
+)]
 pub(crate) fn drive_hybrid<R>(
     source: &str,
     base_dir: &Path,
     overlay: &std::collections::BTreeMap<PathBuf, String>,
     library_paths: &[PathBuf],
     jit_factory: Option<&dyn NumericJitFactory>,
+    registry: &crate::registry::Registry,
     config: super::Config,
     mut mesh_reader: R,
 ) -> crate::RunResult<(Geo, Vec<Message>)>
@@ -303,6 +322,7 @@ where
             &scad,
             &files,
             jit_factory,
+            registry,
             config,
         ) {
             Ok(resolution) => resolution,

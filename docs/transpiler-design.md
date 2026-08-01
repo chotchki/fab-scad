@@ -385,6 +385,14 @@ Two lists on the trait, deliberately NOT one list with an `Option`:
 They are different lengths on purpose. BOSL2 declares 1335 functions and we compile 742. Folding them
 together would assert those are the same set, which is precisely the drift this phase exists to kill.
 
+> AS BUILT (AR.26.1, 2026-07-31): the second method is `rows()`, returning `registry::Rows` — the row
+> sets a consumer accumulates into a `registry::Registry`. And a row carries its VERBATIM REFERENCE,
+> not a fingerprint: the registry parses it and hashes it with our own parser, so the gate hash is
+> never asserted by the row author. That is the difference between trusting a library and checking
+> it, and it is why `surface::Fingerprint` needs no public constructor. Count is 1072 compiled, not
+> 742. This document stays as the dated design record it says it is; the live contract is
+> `lang/src/registry.rs` and `lang/src/surface.rs`.
+
 Declaring MODULES buys something before a single module is transpiled: the fuzzer can generate calls
 against BOSL2's 416-module surface as soon as it is declared. That coverage is not gated on the
 question of whether modules ever get natives.

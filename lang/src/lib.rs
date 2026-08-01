@@ -50,6 +50,10 @@ mod geom;
 mod lexer;
 mod mesh;
 mod parser;
+/// AR.26.1 — the dispatch registry as a VALUE: the row types a compiled library declares, and the
+/// accumulated index evaluation consults. Public because a generated library crate writes rows and
+/// a consumer hands the assembled registry in.
+pub mod registry;
 /// AR.13 — the runtime ABI transpiled libraries are generated against. Public because a sibling
 /// crate has to call it; hidden because it is the interpreter's internals under a stable name and
 /// carries no promise to anyone but the transpiler that emits the calls.
@@ -74,7 +78,8 @@ pub use eval::{
     Config, Contour, Evaluation, ExtrudeKind, FileTable, FnOracle, Geo, GeoNode, Imported,
     IntrinsicMatrixRow, IntrinsicMatrixStatus, JitConst, JitDef, JitOutcome, Join2D, Message,
     NumericJit, NumericJitFactory, RANGE_MAX, RangeIter, Resolution, Scope, Shape2D, SourceNeed,
-    Value, bench_intrinsic, eval_expr, eval_program, evaluate_geometry_metered, fragments,
+    Value, bench_intrinsic, eval_expr, eval_program, eval_program_with_registry,
+    evaluate_geometry_metered, fragments,
     interpret_fn, range_iter, range_len,
 };
 /// AR.14.3 — a function's structural identity, for tools that need to ask "is this the same
@@ -337,6 +342,7 @@ where
         None,
         library_paths,
         jit_factory,
+        registry::Registry::builtin(),
         config,
         mesh_reader,
     )?
@@ -357,7 +363,7 @@ pub fn intrinsic_matrix(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> Result<Vec<IntrinsicMatrixRow>> {
-    eval::io::drive_intrinsic_matrix(source, base_dir, library_paths)
+    eval::io::drive_intrinsic_matrix(source, base_dir, library_paths, registry::Registry::builtin())
 }
 
 /// Decode `.scad` source bytes the way the fs seam does (AA.5): UTF-8, with a LATIN-1 fallback when
@@ -387,7 +393,7 @@ pub fn resolve_geometry_from_sources<R>(
 where
     R: FnMut(&str) -> Result<Imported>,
 {
-    Ok(eval::io::drive_from_map(source, sources, jit_factory, config, mesh_reader)?.0)
+    Ok(eval::io::drive_from_map(source, sources, jit_factory, registry::Registry::builtin(), config, mesh_reader)?.0)
 }
 
 /// Like [`resolve_geometry_with_base`], but ALSO returns the ordered `echo`/warning [`Message`]s — the
@@ -412,6 +418,7 @@ where
         None,
         library_paths,
         jit_factory,
+        registry::Registry::builtin(),
         config,
         mesh_reader,
     )
@@ -432,7 +439,7 @@ pub fn resolve_geometry_from_sources_full<R>(
 where
     R: FnMut(&str) -> Result<Imported>,
 {
-    eval::io::drive_from_map(source, sources, jit_factory, config, mesh_reader)
+    eval::io::drive_from_map(source, sources, jit_factory, registry::Registry::builtin(), config, mesh_reader)
 }
 
 /// Like [`resolve_geometry_with_base_full`], but `use`/`include` consult an in-memory OVERLAY
@@ -471,6 +478,7 @@ where
         overlay,
         library_paths,
         jit_factory,
+        registry::Registry::builtin(),
         config,
         mesh_reader,
     )
@@ -502,6 +510,7 @@ where
         Some(path),
         library_paths,
         jit_factory,
+        registry::Registry::builtin(),
         config,
         mesh_reader,
     )
@@ -530,6 +539,7 @@ where
         Some(path),
         library_paths,
         jit_factory,
+        registry::Registry::builtin(),
         config,
         mesh_reader,
     )?

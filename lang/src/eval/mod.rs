@@ -58,6 +58,7 @@ use std::rc::Rc;
 
 use crate::Mesh;
 use crate::geom::{Affine, Affine2};
+use crate::registry::Registry;
 use crate::parser::{Arg, BinOp, Expr, ExprKind, Parameter, Program, Stmt, StmtKind, UnOp};
 
 /// The caller-supplied table that fulfills `import`/`surface` [`SourceNeed::File`]s (M.3): the literal
@@ -205,6 +206,7 @@ fn resolve_intrinsic_matrix(
     source: &str,
     base_dir: &std::path::Path,
     scad_sources: &loader::SourceMap,
+    registry: &Registry,
 ) -> crate::Result<MatrixResolution> {
     let loaded = match loader::resolve_graph(source, base_dir, None, scad_sources)? {
         loader::GraphOutcome::Complete(loaded) => loaded,
@@ -222,7 +224,7 @@ fn resolve_intrinsic_matrix(
     };
     let islands = loader::islands(&loaded);
     let functions = tagged_functions(&islands);
-    let rows = intrinsics::matrix_targets()
+    let rows = registry.matrix_targets()
         .map(|(name, reference_fp, pin)| {
             let defined_fp = functions
                 .get(name)
@@ -492,6 +494,16 @@ pub(super) struct Ctx<'a> {
     /// A `Some` result is bit-identical to interpreting, so this only ever changes speed. `None` everywhere
     /// the interpreter is the whole story (raw-AST eval, wasm, no factory).
     jit: Option<Box<dyn NumericJit>>,
+    /// WHICH LIBRARIES the compiled tier may dispatch to (AR.26.1) — the accumulated
+    /// [`crate::registry::Registry`] the consumer handed in, or the one fab-lang ships if it did not
+    /// say. Same family as `jit` above: an accelerator table supplied from outside, and deliberately
+    /// NOT a [`Config`] field, because Config is execution KNOBS (and `Copy`) while this is which
+    /// libraries EXIST. BORROWED rather than owned — a registry is shared across evaluations by
+    /// design, and owning it would mean copying a 500-row index per run.
+    ///
+    /// `Config::intrinsics` stays the per-eval ON/OFF toggle beside it, since AR.2's differential has
+    /// to turn natives off WITHOUT changing which libraries are present.
+    registry: crate::registry::RegistryRef<'a>,
 }
 
 /// One active module call's children context: the call-site child statements (borrowed from the AST) +
@@ -1039,6 +1051,19 @@ impl<'a> FnOracle<'a> {
         functions: &[(&'a str, &'a [Parameter], &'a Expr)],
         globals: &[(&'a str, &'a Expr)],
     ) -> crate::Result<Self> {
+        Self::with_registry(functions, globals, Registry::builtin())
+    }
+
+    /// [`FnOracle::new`] against a CALLER-SUPPLIED registry (AR.26.1) — the oracle half of the
+    /// inversion, so a differential can compare tiers under a library set that is not fab-lang's own.
+    ///
+    /// # Errors
+    /// Same as [`FnOracle::new`].
+    pub fn with_registry(
+        functions: &[(&'a str, &'a [Parameter], &'a Expr)],
+        globals: &[(&'a str, &'a Expr)],
+        registry: &'a Registry,
+    ) -> crate::Result<Self> {
         let fn_map: BTreeMap<&str, (&[Parameter], &Expr)> =
             functions.iter().map(|&(n, p, b)| (n, (p, b))).collect();
         // The `Ctx` function store carries the home-island tag every function needs; a flat single-scope oracle
@@ -1047,7 +1072,7 @@ impl<'a> FnOracle<'a> {
             .iter()
             .map(|&(n, p, b)| (n, ((p, b), 0usize)))
             .collect();
-        let intrinsics = build_intrinsics(&ctx_functions, Config::default().intrinsics);
+        let intrinsics = build_intrinsics(registry, &ctx_functions, Config::default().intrinsics);
         let mut ctx = Ctx {
             functions: ctx_functions,
             intrinsics,
@@ -1081,6 +1106,7 @@ impl<'a> FnOracle<'a> {
             live_calls: std::cell::Cell::new(0),
             suppress_intrinsics: std::cell::Cell::new(0),
             jit: None, // the oracle IS the interpreter baseline — never route it through the JIT
+            registry: crate::registry::RegistryRef(registry),
         };
         // Publish the constants into island 0's global (whole-scope, last-wins, first-occurrence order), so a
         // called function's body resolves them (`dispatch_call` bases a call on `island_globals[home = 0]`).
@@ -1180,7 +1206,7 @@ impl<'a> FnOracle<'a> {
 #[must_use]
 pub fn bench_intrinsic(name: &str, params: &[Parameter], body: &Expr) -> Option<IntrinsicFn> {
     // Bench seam only — no dep/const guard here (the bench times the fn pointer, it doesn't dispatch it).
-    intrinsics::resolve(name, params, body).map(|e| e.func)
+    Registry::builtin().resolve(name, params, body).map(|e| e.func)
 }
 
 /// The intrinsic tier's entry shape: the [`crate::surface::FnCtx`] capability plus the call's
@@ -2865,11 +2891,30 @@ pub fn build_range(start: &Value, step: &Value, end: &Value) -> Value {
 /// Deferred constructs fail LOUD: unknown modules / transforms / booleans (module eval), and
 /// multiple top-level objects (implicit union — J.2).
 pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
+    eval_program_with_registry(program, scope, Registry::builtin(), Config::from_env())
+}
+
+/// AR.26.1 — [`eval_program`] against a CALLER-SUPPLIED registry and config: which LIBRARIES the
+/// compiled tier may dispatch to, handed in rather than assumed.
+///
+/// The registry-carrying door the inversion is actually proven through. Two registries built in one
+/// process answer differently for the same program, which is the thing a process-lifetime table
+/// structurally could not do — and it is what a generated library crate (AR.26.3) needs to exist at
+/// all, since fab-lang cannot depend on the crates that hand it rows.
+///
+/// # Errors
+/// Same as [`eval_program`].
+pub fn eval_program_with_registry(
+    program: &Program,
+    scope: &Scope,
+    registry: &Registry,
+    config: Config,
+) -> crate::Result<Mesh> {
     // The top-of-tree benchmark span (I.6): its busy-time is the whole evaluation. Everything below
     // nests under it, so a subscriber can attribute cost to `builtin`/`module` children. TRACE level →
     // free with no subscriber, compiled out in release under `release_max_level_off`.
     let _span = tracing::trace_span!("eval_program").entered();
-    let ctx = build_ctx(program, Config::from_env());
+    let ctx = build_ctx_with(program, registry, config);
     let tree = run_stmts(program.stmts.iter(), &ctx, scope)?;
     // The raw AST path has no file table (`build_ctx` sets `files: None`), so an `import`/`surface` here
     // can't be fulfilled — fail LOUD naming the files rather than return a silently-empty mesh. Real import
@@ -2965,13 +3010,21 @@ fn diag_file_infos(loaded: &loader::Loaded) -> Vec<static_diag::FileInfo<'_>> {
         .collect()
 }
 
-fn resolve_source(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "AR.26.1 — the registry joins jit_factory as a second accelerator handed in beside \
+              Config; both are WHICH-CAPABILITIES rather than knobs, so neither belongs on the Copy \
+              Config, and bundling them into a struct would hide that the three drivers take the \
+              same list"
+)]
+fn resolve_source<'a>(
     source: &str,
     base_dir: &std::path::Path,
     root_id: Option<&std::path::Path>,
     scad_sources: &loader::SourceMap,
-    files: &FileTable,
+    files: &'a FileTable,
     jit_factory: Option<&dyn NumericJitFactory>,
+    registry: &'a Registry,
     config: Config,
 ) -> crate::RunResult<Resolution> {
     let _span = tracing::trace_span!("eval_program").entered();
@@ -2998,7 +3051,7 @@ fn resolve_source(
     let (exec, _defs) = loader::flatten(&loaded)?;
     let islands = loader::islands(&loaded);
     let functions = tagged_functions(&islands);
-    let intrinsics = build_intrinsics(&functions, config.intrinsics);
+    let intrinsics = build_intrinsics(registry, &functions, config.intrinsics);
     // Build the numeric-JIT registry ONCE, now the graph is closed and every function is known (P.1.2b).
     // The factory (native fab-jit) compiles the numeric-subset bodies and returns a `NumericJit`; `None`
     // when there's no factory (wasm / raw path) or nothing compiled. Done here, borrowing `functions`
@@ -3034,6 +3087,7 @@ fn resolve_source(
         functions,
         intrinsics,
         jit,
+        registry: crate::registry::RegistryRef(registry),
         island_globals: RefCell::new(placeholder_island_globals(&islands, config.preview)),
         islands,
         closures: RefCell::default(),
@@ -3135,6 +3189,7 @@ pub(crate) fn evaluate_source(
         root_path,
         library_paths,
         None,
+        Registry::builtin(),
         config,
         io::no_import_reader,
     )
@@ -3250,16 +3305,18 @@ fn tagged_globals<'a>(islands: &loader::Islands<'a>) -> BTreeMap<&'a str, &'a Ex
 ///
 /// ONE HOP, matching the dep-fingerprint pin and the dep-const check themselves — a dep-of-a-dep's
 /// constants stay unchecked. Sound while deps are leaf predicates; revisit together if that stops holding.
-fn needs_post_hoist(entry: &intrinsics::Entry) -> bool {
+fn needs_post_hoist(registry: &Registry, entry: &intrinsics::Entry) -> bool {
     !entry.consts.is_empty()
         || !entry.consts_v.is_empty()
         || entry.deps.iter().any(|&dep| {
-            intrinsics::entry_by_name(dep)
+            registry
+                .entry_by_name(dep)
                 .is_some_and(|d| !d.consts.is_empty() || !d.consts_v.is_empty())
         })
 }
 
 fn guard_veto<'a>(
+    registry: &Registry,
     entry: &intrinsics::Entry,
     functions: &BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
 ) -> Option<String> {
@@ -3267,8 +3324,10 @@ fn guard_veto<'a>(
         let Some(&((p, b), _)) = functions.get(dep) else {
             return Some(format!("dep `{dep}` is not defined in this program"));
         };
-        if intrinsics::anchor_fp(dep) != Some(intrinsics::fingerprint(p, b)) {
-            return Some(format!("dep `{dep}` drifted from its pinned reference"));
+        if registry.anchor_fp(entry.name, dep) != Some(intrinsics::fingerprint(p, b)) {
+            return Some(format!(
+                "dep `{dep}` drifted from its pinned reference (or is anchored in another library)"
+            ));
         }
         // NO param-shadow veto here anymore, and the absence is load-bearing (AR.17.2). The old
         // AN.10 arm vetoed a dep sharing a PARAMETER's name (`is_vector` declares `all_nonzero`
@@ -3296,6 +3355,7 @@ fn guard_veto<'a>(
 /// dispatches against, so the body matched is the body that would run. CONST-GUARDED entries (non-empty
 /// `consts`) never wire here — they arm post-hoist in [`arm_guarded_intrinsics`].
 fn build_intrinsics<'a>(
+    registry: &Registry,
     functions: &BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
     enabled: bool,
 ) -> BTreeMap<&'a str, intrinsics::Intrinsic> {
@@ -3319,7 +3379,7 @@ fn build_intrinsics<'a>(
             // Print the fingerprints so an author can diagnose a DRIFT: `defined` is what the user's actual
             // library hashes to; `reference` is what the intrinsic was written against. If they differ, EITHER
             // paste `defined` as an updated reference (library moved) OR fix a stale reference. (chotchki's ask.)
-            match intrinsics::classify(name, params, body) {
+            match registry.classify(name, params, body) {
                 intrinsics::Plan::Wired => {
                     eprintln!(
                         "+ [intrinsic WIRED] {name} (fp {})",
@@ -3330,19 +3390,20 @@ fn build_intrinsics<'a>(
                     "+ [intrinsic DRIFT] {name} — defined fp {} != reference fp {} → INTERPRETED \
                      (library drift, or a stale reference)",
                     intrinsics::fingerprint(params, body),
-                    intrinsics::reference_fp(name)
+                    registry
+                        .reference_fp(name)
                         .map_or_else(|| "?".to_string(), |fp| fp.to_string()),
                 ),
                 intrinsics::Plan::NotRegistered => {}
             }
         }
-        let Some(entry) = intrinsics::resolve(name, params, body) else {
+        let Some(entry) = registry.resolve(name, params, body) else {
             continue;
         };
-        if needs_post_hoist(entry) {
+        if needs_post_hoist(registry, entry) {
             continue; // const-guarded, directly or through a dep: arms in `arm_guarded_intrinsics`
         }
-        match guard_veto(entry, functions) {
+        match guard_veto(registry, entry, functions) {
             None => {
                 out.insert(name, entry.func);
             }
@@ -3374,13 +3435,13 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
         return out; // AR.2 run gate — the post-hoist door, matching `build_intrinsics`.
     }
     for (&name, &((params, body), home)) in &ctx.functions {
-        let Some(entry) = intrinsics::resolve(name, params, body) else {
+        let Some(entry) = ctx.registry.resolve(name, params, body) else {
             continue;
         };
-        if !needs_post_hoist(entry) {
+        if !needs_post_hoist(&ctx.registry, entry) {
             continue; // genuinely unguarded: already wired (or vetoed) at build_intrinsics
         }
-        if let Some(why) = guard_veto(entry, &ctx.functions) {
+        if let Some(why) = guard_veto(&ctx.registry, entry, &ctx.functions) {
             if explain {
                 eprintln!("+ [intrinsic GUARD-DECLINED] {name} — {why} → INTERPRETED");
             }
@@ -3401,7 +3462,7 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
         // but if a dep ever grows deps of its own this needs to go transitive.
         let dep_const_veto = entry.deps.iter().find_map(|&dep| {
             let &((p, b), dep_home) = ctx.functions.get(dep)?;
-            let dep_entry = intrinsics::resolve(dep, p, b)?;
+            let dep_entry = ctx.registry.resolve(dep, p, b)?;
             let dep_scope = globals.get(dep_home)?;
             let bad = dep_entry.consts.iter().any(|&(cname, expected)| {
                 !matches!(dep_scope.lookup_opt(cname), Some(Value::Num(n)) if n.to_bits() == expected.to_bits())
@@ -4334,7 +4395,20 @@ fn assert_verdict<'a>(
 /// Collect user function definitions into the [`Ctx`] store (their own namespace). A pre-pass over the
 /// whole program, so a call can resolve a function defined anywhere (whole-program visibility, like
 /// OpenSCAD); a duplicate name — last definition wins (`BTreeMap::insert`).
+///
+/// Against the registry fab-lang SHIPS. [`build_ctx_with`] is the same thing against a caller-supplied
+/// one (AR.26.1); this wrapper is what keeps the ~20 raw-AST entry points and their test call sites
+/// from having to say so.
 fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
+    build_ctx_with(program, Registry::builtin(), config)
+}
+
+/// [`build_ctx`] against a caller-supplied registry.
+fn build_ctx_with<'a>(
+    program: &'a Program,
+    registry: &'a Registry,
+    config: Config,
+) -> Ctx<'a> {
     let mut functions = BTreeMap::new();
     let mut modules = BTreeMap::new();
     for stmt in &program.stmts {
@@ -4354,7 +4428,7 @@ fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
     // program), used by nothing. Module resolution against island 0 is exactly the old global lookup.
     // The island's own function/assignment stores stay empty — island 0's global (constants) is the root
     // global that `run_stmts` hoists + publishes, not something built from `Island::assignments` here.
-    let intrinsics = build_intrinsics(&functions, config.intrinsics);
+    let intrinsics = build_intrinsics(registry, &functions, config.intrinsics);
     Ctx {
         functions,
         intrinsics,
@@ -4389,6 +4463,7 @@ fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
         live_calls: std::cell::Cell::new(0),
         suppress_intrinsics: std::cell::Cell::new(0),
         jit: None, // the raw-AST path (no loader) is interpreter-only; the JIT rides the loader entry
+        registry: crate::registry::RegistryRef(registry),
     }
 }
 
@@ -4423,6 +4498,7 @@ mod proofs {
 mod tests {
     use super::{Scope, Value, build_ctx, eval_with_ctx, tagged_functions};
     use crate::parser::{StmtKind, parse};
+    use crate::registry::Registry;
 
     /// The empty-graph guard in [`tagged_functions`]: no islands → no functions (in production `islands`
     /// always has the root, so this defensive branch is only reachable here).
@@ -4833,6 +4909,7 @@ mod tests {
             &SourceMap::new(),
             &FileTable::new(),
             None,
+            Registry::builtin(),
             crate::Config::default(),
         )
         .expect("resolves")
@@ -4972,6 +5049,7 @@ mod tests {
                 &SourceMap::new(),
                 &FileTable::new(),
                 None,
+                Registry::builtin(),
                 crate::Config::default(),
             )
             .expect("resolves")
@@ -5008,7 +5086,7 @@ mod tests {
                 acc
             },
         );
-        let rows = super::io::drive_intrinsic_matrix(&lib, std::path::Path::new("."), &[])
+        let rows = super::io::drive_intrinsic_matrix(&lib, std::path::Path::new("."), &[], Registry::builtin())
             .expect("audits");
         assert!(!rows.is_empty(), "registry can't be empty");
         for row in &rows {
@@ -5041,7 +5119,7 @@ mod tests {
             });
         // Same name, structurally different body, defined LAST → last-wins → Changed.
         let _ = writeln!(lib, "function {revised}() = \"sustainment-drift\";");
-        let rows = super::io::drive_intrinsic_matrix(&lib, std::path::Path::new("."), &[])
+        let rows = super::io::drive_intrinsic_matrix(&lib, std::path::Path::new("."), &[], Registry::builtin())
             .expect("audits");
         let status = |name: &str| {
             rows.iter()
@@ -5072,6 +5150,7 @@ mod tests {
             "include <no-such-dir/std.scad>\n",
             std::path::Path::new("."),
             &[],
+            Registry::builtin(),
         )
         .expect_err("must refuse a broken tree");
         assert!(
@@ -5111,6 +5190,7 @@ mod tests {
             &no_scad,
             &no_files,
             None,
+            Registry::builtin(),
             crate::Config::default(),
         )
         .expect("resolves");
@@ -5128,6 +5208,7 @@ mod tests {
             &no_scad,
             &no_files,
             None,
+            Registry::builtin(),
             crate::Config::default(),
         )
         .expect("resolves");
@@ -5150,6 +5231,7 @@ mod tests {
             &no_scad,
             &have,
             None,
+            Registry::builtin(),
             crate::Config::default(),
         )
         .expect("resolves");

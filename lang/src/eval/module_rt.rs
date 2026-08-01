@@ -559,7 +559,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         super::bind_call_bookkeeping(&mut call, n_children, self.ctx);
 
         let native = if self.ctx.config.intrinsics {
-            super::intrinsics::resolve_module(name, params, body, &home_global)
+            self.ctx.registry.resolve_module(name, params, body, &home_global)
         } else {
             None
         };

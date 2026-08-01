@@ -2226,14 +2226,19 @@ fn a_const_guarded_entry_resolves_with_its_guard_attached() {
         resolve("_fab_poc_sq", &p, &b).is_none(),
         "same body, different name → no entry"
     );
-    // The pin anchors resolve too — a dep check needs their fingerprints.
+    // The pin anchors resolve too — a dep check needs their fingerprints. AR.26.1: an anchor is
+    // scoped to the ASKING row's library, so the question is always "who is asking about what".
     assert!(
-        super::anchor_fp("is_range").is_some(),
+        super::anchor_fp("select", "is_range").is_some(),
         "PINS must anchor is_range"
     );
     assert!(
-        super::anchor_fp("no_such_fn").is_none(),
+        super::anchor_fp("select", "no_such_fn").is_none(),
         "an unanchored name is a registry authoring bug the dep check declines over"
+    );
+    assert!(
+        super::anchor_fp("no_such_fn", "is_range").is_none(),
+        "a row nobody declared cannot anchor anything"
     );
 }
 
@@ -3364,17 +3369,20 @@ fn the_registry_index_agrees_with_a_linear_scan() {
             entry.name
         );
         assert_eq!(
-            anchor_fp(entry.name),
+            anchor_fp(entry.name, entry.name),
             reference_fp(entry.name),
             "anchor_fp must prefer the registry entry for `{}`",
             entry.name
         );
     }
 
-    // A PIN resolves only when no registry entry shadows it — the `or_else` arm.
+    // A PIN resolves only when no registry entry shadows it — the `or_else` arm. Asked on behalf of
+    // a registry entry, since AR.26.1 scopes an anchor to the asking row's own library and fab-lang
+    // ships its rows and its pins as ONE library.
+    let asker = REGISTRY[0].name;
     for &(name, _) in PINS {
         assert!(
-            anchor_fp(name).is_some(),
+            anchor_fp(asker, name).is_some(),
             "pinned dep `{name}` does not resolve"
         );
     }

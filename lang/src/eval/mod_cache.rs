@@ -578,7 +578,15 @@ mod tests {
             csg_cache: on,
             ..Config::default()
         };
-        super::super::evaluate_source(src, std::path::Path::new("."), None, &[], cfg).unwrap()
+        super::super::evaluate_source(
+            src,
+            std::path::Path::new("."),
+            None,
+            &[],
+            crate::registry::Registry::builtin(),
+            cfg,
+        )
+        .unwrap()
     }
 
     fn geo(src: &str, on: bool) -> Geo {

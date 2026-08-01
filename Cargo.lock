@@ -2842,6 +2842,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fab-bosl2"
+version = "0.1.0"
+dependencies = [
+ "fab-lang",
+ "fab-lib",
+]
+
+[[package]]
 name = "fab-gen"
 version = "0.1.0"
 dependencies = [

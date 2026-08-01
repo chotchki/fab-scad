@@ -3178,6 +3178,7 @@ pub(crate) fn evaluate_source(
     base_dir: &std::path::Path,
     root_path: Option<&std::path::Path>,
     library_paths: &[std::path::PathBuf],
+    registry: &Registry,
     config: Config,
 ) -> crate::RunResult<(Geo, Vec<Message>)> {
     // The no-import spine (tests + the pure-geometry `evaluate*` sugar) is interpreter-only — its callers
@@ -3189,7 +3190,7 @@ pub(crate) fn evaluate_source(
         root_path,
         library_paths,
         None,
-        Registry::builtin(),
+        registry,
         config,
         io::no_import_reader,
     )

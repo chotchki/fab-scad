@@ -182,6 +182,7 @@ pub fn evaluate_file_full(path: &Path, library_paths: &[PathBuf]) -> RunResult<E
         base_dir,
         Some(path),
         library_paths,
+        registry::Registry::builtin(),
         Config::from_env(),
     )?;
     flattened(tree, messages)
@@ -227,7 +228,14 @@ pub fn evaluate_with_base_full(
     library_paths: &[PathBuf],
 ) -> RunResult<Evaluation> {
     let (tree, messages) =
-        eval::evaluate_source(source, base_dir, None, library_paths, Config::from_env())?;
+        eval::evaluate_source(
+        source,
+        base_dir,
+        None,
+        library_paths,
+        registry::Registry::builtin(),
+        Config::from_env(),
+    )?;
     flattened(tree, messages)
 }
 
@@ -254,6 +262,7 @@ pub fn evaluate_geometry_file(path: &Path, library_paths: &[PathBuf]) -> Result<
         base_dir,
         Some(path),
         library_paths,
+        registry::Registry::builtin(),
         Config::from_env(),
     )?
     .0)
@@ -268,7 +277,14 @@ pub fn evaluate_geometry_with_base(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> Result<Geo> {
-    Ok(eval::evaluate_source(source, base_dir, None, library_paths, Config::from_env())?.0)
+    Ok(eval::evaluate_source(
+        source,
+        base_dir,
+        None,
+        library_paths,
+        registry::Registry::builtin(),
+        Config::from_env(),
+    )?.0)
 }
 
 /// Like [`evaluate_geometry`], but returns the geometry tree PLUS the ordered `echo`/warning
@@ -280,7 +296,14 @@ pub fn evaluate_geometry_with_base(
 /// # Errors
 /// As [`evaluate_geometry`].
 pub fn evaluate_geometry_full(source: &str) -> RunResult<(Geo, Vec<Message>)> {
-    eval::evaluate_source(source, Path::new("."), None, &[], Config::from_env())
+    eval::evaluate_source(
+        source,
+        Path::new("."),
+        None,
+        &[],
+        registry::Registry::builtin(),
+        Config::from_env(),
+    )
 }
 
 /// Like [`evaluate_geometry_with_base`], but ALSO returns the ordered `echo`/warning [`Message`]s — the
@@ -295,7 +318,14 @@ pub fn evaluate_geometry_with_base_full(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> RunResult<(Geo, Vec<Message>)> {
-    eval::evaluate_source(source, base_dir, None, library_paths, Config::from_env())
+    eval::evaluate_source(
+        source,
+        base_dir,
+        None,
+        library_paths,
+        registry::Registry::builtin(),
+        Config::from_env(),
+    )
 }
 
 /// [`evaluate_geometry_with_base_full`] with an EXPLICIT [`Config`] instead of the ambient env —
@@ -310,7 +340,35 @@ pub fn evaluate_geometry_with_base_config(
     library_paths: &[PathBuf],
     config: Config,
 ) -> RunResult<(Geo, Vec<Message>)> {
-    eval::evaluate_source(source, base_dir, None, library_paths, config)
+    eval::evaluate_source(
+        source,
+        base_dir,
+        None,
+        library_paths,
+        registry::Registry::builtin(),
+        config,
+    )
+}
+
+/// [`evaluate_geometry_with_base_config`] against a CALLER-SUPPLIED registry (AR.26.3) — which
+/// LIBRARIES the compiled tier may dispatch to, on the loader path that real programs take.
+///
+/// The door a generated library crate needs. fab-lang cannot depend on `fab-bosl2`, so BOSL2's
+/// compiled natives can only reach dispatch by being handed in: a consumer accumulates
+/// `Bosl2::rows()` into a [`registry::Registry`] and passes it here. `Config::intrinsics` stays the
+/// orthogonal per-eval toggle beside it, which is what lets a differential turn the compiled tier
+/// OFF without changing which libraries are present — the AR.2 contract, at library scale.
+///
+/// # Errors
+/// As [`evaluate_geometry_with_base`].
+pub fn evaluate_geometry_with_registry(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+    registry: &registry::Registry,
+    config: Config,
+) -> RunResult<(Geo, Vec<Message>)> {
+    eval::evaluate_source(source, base_dir, None, library_paths, registry, config)
 }
 
 /// Evaluate `source` to a geometry [`Geo`] tree, resolving `import`/`surface` meshes through `mesh_reader`

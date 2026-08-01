@@ -1,0 +1,19 @@
+[package]
+name = "fab-bosl2"
+version = "0.1.0"
+edition = "2024"
+description = "BOSL2, transpiled to Rust at build time — the first generated library crate"
+license = "GPL-2.0-or-later"
+publish = false
+
+[dependencies]
+# The RUNTIME the generated code is emitted against (`fab_lang::rt`), and the registry row types
+# it declares itself with. This is the only direction the dependency can run: fab-lang cannot see
+# this crate, which is the whole reason the registry became something a consumer hands in (AR.26.1).
+fab-lang = { path = "../lang" }
+
+[build-dependencies]
+# The TRANSPILER, host-side. A build dependency rather than a normal one: nothing at runtime needs
+# a code generator, and keeping it here means a consumer of fab-bosl2 never links one.
+fab-lib = { path = "../lib" }
+fab-lang = { path = "../lang" }

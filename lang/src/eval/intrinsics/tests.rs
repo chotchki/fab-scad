@@ -5516,3 +5516,50 @@ fn an_outward_call_resolves_against_the_running_program() {
         "4 - 3 + 1 = 2, got {fast4:?}"
     );
 }
+
+/// AR.27 — AN ECHO-EXPRESSION IN A FUNCTION BODY puts the SAME line on the run's console, in the
+/// same place, as interpreting the reference would.
+///
+/// A console divergence is invisible to every geometry check — the value can be perfectly right
+/// while the log is wrong — which is how `rt::apply_binary` came to swallow its warnings for a year
+/// and a half. So the echo band gets a differential of its own, and it compares the WHOLE message
+/// list rather than just the value: order, content and interleaving.
+#[test]
+fn an_echo_expression_in_a_function_reaches_the_console() {
+    let reference = reference_of("_fab_poc_echo").expect("registered");
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (_geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        format!("{msgs:?}")
+    };
+
+    // INTERLEAVED with an echo of the result, so the test pins ORDER too: the native's own echo
+    // must land BEFORE the caller's, exactly as evaluation order demands.
+    let src = format!("{reference}\necho(out=_fab_poc_echo(4));\n");
+    let fast = run(&src, true);
+    assert_eq!(fast, run(&src, false), "the echo-expression diverged across tiers");
+    assert!(
+        fast.contains("v = 4") && fast.contains("out = 5"),
+        "both lines must appear: {fast}"
+    );
+    assert!(
+        fast.find("v = 4") < fast.find("out = 5"),
+        "the native's own echo comes FIRST — the interpreter's A3 order: {fast}"
+    );
+
+    // FIRES ONCE PER CALL, not once per program: an echo memoized away would be a silent console
+    // loss, and the eval cache is exactly the machinery that could do it.
+    let twice = format!("{reference}\necho(a=_fab_poc_echo(1), b=_fab_poc_echo(1));\n");
+    let both = run(&twice, true);
+    assert_eq!(both, run(&twice, false), "repeated calls diverged");
+    assert_eq!(
+        both.matches("v = 1").count(),
+        2,
+        "two calls, two echoes — a memoized echo is a lost one: {both}"
+    );
+}

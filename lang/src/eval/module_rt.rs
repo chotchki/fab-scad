@@ -428,9 +428,22 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
     }
 }
 
-impl crate::surface::Warn for NativeModuleCtx<'_, '_, '_> {
+impl crate::surface::Console for NativeModuleCtx<'_, '_, '_> {
     fn warn(&self, message: String) {
         self.ctx.warn(message);
+    }
+
+    fn echo(&self, args: &[(Option<&'static str>, Value)]) -> crate::Result<()> {
+        // The interpreter's own pair-shaped formatter core, pushed through the ONE ordered
+        // message log — content only, no `ECHO: ` prefix (`Message::render` adds it), so the
+        // echo/warning interleave the I.5 gate string-compares survives untouched.
+        let pairs: Vec<(Option<&str>, &Value)> = args.iter().map(|(n, v)| (*n, v)).collect();
+        let line = super::format_echo_pairs(&pairs)?;
+        self.ctx
+            .messages
+            .borrow_mut()
+            .push(super::Message::Echo(line));
+        Ok(())
     }
 }
 
@@ -481,18 +494,6 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         self.call_scope.borrow_mut().bind(name, value);
     }
 
-    fn echo(&self, args: &[(Option<&'static str>, Value)]) -> crate::Result<()> {
-        // The interpreter's own pair-shaped formatter core, pushed through the ONE ordered
-        // message log — content only, no `ECHO: ` prefix (`Message::render` adds it), so the
-        // echo/warning interleave the I.5 gate string-compares survives untouched.
-        let pairs: Vec<(Option<&str>, &Value)> = args.iter().map(|(n, v)| (*n, v)).collect();
-        let line = super::format_echo_pairs(&pairs)?;
-        self.ctx
-            .messages
-            .borrow_mut()
-            .push(super::Message::Echo(line));
-        Ok(())
-    }
 
     #[allow(
         clippy::too_many_lines,
@@ -982,9 +983,22 @@ impl crate::surface::FnCtx for NativeFnCtx<'_, '_> {
 
 }
 
-impl crate::surface::Warn for NativeFnCtx<'_, '_> {
+impl crate::surface::Console for NativeFnCtx<'_, '_> {
     fn warn(&self, message: String) {
         self.ctx.warn(message);
+    }
+
+    fn echo(&self, args: &[(Option<&'static str>, Value)]) -> crate::Result<()> {
+        // The interpreter's own pair-shaped formatter core, pushed through the ONE ordered
+        // message log — content only, no `ECHO: ` prefix (`Message::render` adds it), so the
+        // echo/warning interleave the I.5 gate string-compares survives untouched.
+        let pairs: Vec<(Option<&str>, &Value)> = args.iter().map(|(n, v)| (*n, v)).collect();
+        let line = super::format_echo_pairs(&pairs)?;
+        self.ctx
+            .messages
+            .borrow_mut()
+            .push(super::Message::Echo(line));
+        Ok(())
     }
 }
 

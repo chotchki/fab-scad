@@ -267,19 +267,31 @@ pub trait LibrarySurface: Send + Sync {
     fn callables(&self) -> &'static [Decl];
 }
 
-/// Put a WARNING on the run's console — the diagnostic half of the value algebra, and the one
-/// capability BOTH native shapes need.
+/// THE RUN'S CONSOLE — what a native says, as opposed to what it computes. Both native shapes carry
+/// it, which is the reason it is a supertrait rather than a method on each: `rt::binary`/`rt::unary`
+/// are shared by the function and module emitters and must take whichever ctx the caller has.
 ///
-/// A supertrait rather than a method on each, because `rt::binary`/`rt::unary` are shared by the
-/// function and module emitters and must take whichever ctx the caller has. Found live in AR.27 and
-/// older than that: `rt::apply_binary` discarded the SV warning `apply_binary_traced` produces, so a
-/// native computing `undef * undef` returned the right VALUE in silence while the interpreted twin
-/// printed `undefined operation (undefined * undefined)`. A tier difference a user can see — and
-/// invisible to every mesh comparison, because the value was never wrong. Diff the echoes, not just
-/// the meshes.
-pub trait Warn {
+/// The console is not a side channel here, it is half the answer. A tier that computed every value
+/// correctly and printed nothing would still be WRONG, and it would be invisible to every mesh
+/// comparison — which is exactly how `rt::apply_binary` came to discard the SV warning
+/// `apply_binary_traced` produces, live since AR.6: a native computing `undef * undef` returned the
+/// right value in silence while the interpreted twin printed `undefined operation (undefined *
+/// undefined)`. Diff the echoes, not just the meshes.
+pub trait Console {
     /// Emit `message` as a run warning, exactly where the interpreter would.
     fn warn(&self, message: String);
+
+    /// Push an `echo` line through the evaluator's console. Args are (written name, value) pairs in
+    /// SOURCE order — `$`-names included, formatted like any named arg — and the side effect lands
+    /// BEFORE whatever the echo wraps: the interpreter's A3 order, which the I.5 string-equal
+    /// console gate pins.
+    ///
+    /// One formatter behind it (`format_echo_pairs`), shared with the statement path and the
+    /// expression task path, so the three consumers cannot drift about what an echo LOOKS like.
+    ///
+    /// # Errors
+    /// Past the echo nesting guard (AD.5), exactly as the interpreted path errs.
+    fn echo(&self, args: &[(Option<&'static str>, Value)]) -> crate::Result<()>;
 }
 
 /// What a generated FUNCTION native may ask of the evaluator (AR.17) — and it is exactly ONE
@@ -293,7 +305,7 @@ pub trait Warn {
 /// the trait declares, not by whether a parameter exists. `&self` for `ModuleCtx`'s reason —
 /// nested native calls (`f(fx, &[g(fx, x)?])`) fight the borrow checker under `&mut`, and the
 /// evaluator's state is already behind `RefCell`/`Cell`.
-pub trait FnCtx: Warn {
+pub trait FnCtx: Console {
     /// Invoke `callee` as a function with `args` (written names attached, `$`-names included),
     /// resolving through the interpreter's own `CallValue` machinery: letrec group re-injection,
     /// self LAST, defaults in the closure's lexical base, the name-less recursion verdict.
@@ -391,10 +403,17 @@ pub trait FnCtx: Warn {
 /// decline, not a silent wrong value.
 pub struct NoClosures;
 
-impl Warn for NoClosures {
+impl Console for NoClosures {
     fn warn(&self, _message: String) {
         // No run, no console. A bench or a value-level battery has nowhere to put this, and
         // inventing a sink would only hide that the caller has no evaluator.
+    }
+
+    fn echo(&self, _args: &[(Option<&'static str>, Value)]) -> crate::Result<()> {
+        // Same story, and DROPPED rather than refused: an echo is an observation, so losing one
+        // costs a ctx-less caller nothing it could have used. A refusal here would turn every
+        // value-level probe of an echoing function into an error.
+        Ok(())
     }
 }
 
@@ -546,7 +565,7 @@ impl std::fmt::Display for Fingerprint {
 /// stack depth, which the interpreter's explicit stack deliberately does not use, so it is bounded
 /// the same way AR.10 bounds function natives: a depth budget, and past it a decline back to the
 /// interpreter, whose own limit is `100_000` because its depth is heap.
-pub trait ModuleCtx: Warn {
+pub trait ModuleCtx: Console {
     /// The call's bound arguments, already matched to parameters (positional fill, named, defaults)
     /// by the evaluator's own two-phase rule — the AN.1/AN.2/AN.6 semantics a native must not
     /// reimplement.
@@ -589,15 +608,6 @@ pub trait ModuleCtx: Warn {
     /// Read a `$`-variable off the inherited dynamic chain. `undef` when unbound, as in the
     /// interpreter — a missing `$`-var is not an error.
     fn dollar(&self, name: &str) -> Value;
-
-    /// Push a statement-`echo` line through the evaluator's console (AR.20.4). Args are
-    /// (written name, value) pairs in SOURCE order — `$`-names included, formatted like any named
-    /// arg — and the side effect lands BEFORE the echo's children render: the interpreter's A3
-    /// order, which the I.5 string-equal console gate pins.
-    ///
-    /// # Errors
-    /// Past the echo nesting guard (AD.5), exactly as the interpreted path errs.
-    fn echo(&self, args: &[(Option<&'static str>, Value)]) -> crate::Result<()>;
 
     /// Call another module, dispatching through the registry: another native where one is armed,
     /// the interpreter otherwise.

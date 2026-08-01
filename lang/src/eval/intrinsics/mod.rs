@@ -657,6 +657,19 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &[],
         func: generated::_fab_poc_outward,
     },
+    // AR.27 — an echo-EXPRESSION in a function body. `echo` moved onto the `Console` supertrait
+    // both ctx shapes carry, so what had been module-only compiles here too. The POC exists because
+    // a console divergence is invisible to every geometry check: this native must put the SAME line
+    // on the run's log, in the same place, as interpreting the reference would.
+    Entry {
+        name: "_fab_poc_echo",
+        reference: "function _fab_poc_echo(x) = echo(v=x) x + 1;",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::_fab_poc_echo,
+    },
     // The VALUE-const guard POC (O.8): bakes the vector constant `UP` — wires only when the home scope's
     // `UP` is bit-exactly `[0,0,1]` AS A NumList ([`value_bits_eq`] is variant-exact). The real consumers
     // (vector_axis's UP/RIGHT, rot's _NO_ARG sentinel) are O.9.

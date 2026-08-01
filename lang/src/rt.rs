@@ -44,7 +44,7 @@ pub use crate::parser::{BinOp, UnOp};
 /// emission was exercised as generated TEXT, which never proved the text would build.
 pub use crate::surface::{
     ChildThunk, Children, Decl, Domain, FnCall, FnCtx, Kind, ModuleCall, ModuleCtx, NoClosures,
-    Param, Warn,
+    Console, Param,
 };
 /// The REGISTRY ROWS a generated library declares (AR.26.2). Emitted as static struct literals
 /// beside the natives they name, so a generated crate hands over its own dispatch table rather

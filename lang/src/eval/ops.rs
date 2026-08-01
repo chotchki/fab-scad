@@ -36,7 +36,7 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
 /// twin warned. A tier difference no mesh comparison can see (the value was never wrong), which is
 /// exactly why the console is part of the differential.
 #[must_use]
-pub fn binary<W: crate::surface::Warn + ?Sized>(fx: &W, op: BinOp, a: Value, b: Value) -> Value {
+pub fn binary<W: crate::surface::Console + ?Sized>(fx: &W, op: BinOp, a: Value, b: Value) -> Value {
     let mut warn = None;
     let out = apply_binary_traced(op, a, b, &mut warn);
     if let Some(w) = warn {
@@ -144,7 +144,7 @@ pub fn apply_unary(op: UnOp, v: Value) -> Value {
 
 /// [`apply_unary`] for GENERATED code — see [`binary`].
 #[must_use]
-pub fn unary<W: crate::surface::Warn + ?Sized>(fx: &W, op: UnOp, v: Value) -> Value {
+pub fn unary<W: crate::surface::Console + ?Sized>(fx: &W, op: UnOp, v: Value) -> Value {
     let mut warn = None;
     let out = apply_unary_traced(op, v, &mut warn);
     if let Some(w) = warn {

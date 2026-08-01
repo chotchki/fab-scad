@@ -740,12 +740,14 @@ impl Emitter<'_, '_> {
             // `echo(args) body` in EXPRESSION position — the AR.22 census found `cyl`, the most
             // instantiated shape module in the library, declining on THIS alone (its bool-radius
             // warning). The console side effect fires when the expression evaluates, then the
-            // body yields (`undef` when absent). Module bodies only: a function native has no
-            // console to reach.
+            // body yields (`undef` when absent).
+            //
+            // FUNCTIONS TOO since AR.27: `echo` moved onto the `Console` supertrait both ctx
+            // shapes carry, so the reason this was module-only — "a function native has no console
+            // to reach" — stopped being true the moment warnings needed one. 29 functions, and no
+            // new semantics: the emission is identical on both sides, which is the point of the
+            // capability living in one place.
             ExprKind::Echo { args, body } => {
-                if !self.in_module {
-                    return Err("an echo-expression in a function body".into());
-                }
                 let mut pairs: Vec<String> = Vec::with_capacity(args.len());
                 for a in args {
                     let v = self.expr(&a.value)?;
@@ -2914,6 +2916,9 @@ pub const GENERATED_ENTRIES: &[&str] = &[
     // emitter cannot compile it and the call has to dispatch through `fx.call_named` instead of
     // taking the caller down with it. A POC whose whole point is what is MISSING.
     "_fab_poc_outward",
+    // AR.27 — an echo-EXPRESSION in a function body. The console side effect is half the answer
+    // and no mesh comparison can see it, so it gets a differential of its own.
+    "_fab_poc_echo",
     "_fab_poc_isup",
     // AR.7 — the first REAL BOSL2 intrinsics through the pipeline: the two hottest functions on
     // the model profile (56% of user-fn calls between them). `is_nan` first: `is_finite`'s
@@ -3798,7 +3803,15 @@ mod tests {
         /// so the call declined — but `fill_slots` already separates `$`-args and `bind_values`
         /// already binds them into the call frame's dynamic parent, so the runtime path needed
         /// nothing new at all. Costs a dispatch where a static call would have done.
-        const FLOOR: usize = 1233;
+        ///
+        /// 1260 (94.8%) once an echo-EXPRESSION compiled in a function body. It had been
+        /// module-only for a stated reason — "a function native has no console to reach" — that
+        /// stopped being true the moment WARNINGS needed one: `echo` moved onto the `Console`
+        /// supertrait both ctx shapes carry, and the emission is now identical on both sides.
+        ///
+        /// The tail is 37 free reads, 11 C-style comprehensions, 8 `rands`, 5 duplicate parameters
+        /// (a CORRECT decline), 3 range forms, and a handful of singletons.
+        const FLOOR: usize = 1260;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

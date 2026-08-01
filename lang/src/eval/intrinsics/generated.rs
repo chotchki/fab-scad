@@ -45,6 +45,7 @@ function _fab_poc_sq(x) = x * x;
 function _fab_poc_near0(x) = abs(x) < _EPSILON;
 function _fab_poc_outer(x) = _fab_poc_near0(x);
 function _fab_poc_outward(x) = _fab_poc_absent(x) + 1;
+function _fab_poc_echo(x) = echo(v=x) x + 1;
 function _fab_poc_isup(v) = v == UP;
 function is_nan(x) = (x!=x);
 function is_finite(x) = is_num(x) && !is_nan(0*x);
@@ -506,6 +507,7 @@ pub(super) static SURFACE: &[rt::Decl] = &[
     rt::Decl { name: "_fab_poc_band4", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "s", domain: rt::Domain::Num, required: true }, rt::Param { name: "tag", domain: rt::Domain::List, required: false }] },
     rt::Decl { name: "_fab_poc_callshadow", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "last", domain: rt::Domain::Num, required: true }, rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_curried2", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "fs", domain: rt::Domain::List, required: true }, rt::Param { name: "i", domain: rt::Domain::Num, required: true }, rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
+    rt::Decl { name: "_fab_poc_echo", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_hole", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_isup", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "v", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_mint_arg", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "v", domain: rt::Domain::Num, required: true }] },
@@ -646,6 +648,15 @@ pub(super) static REGISTRY: &[rt::Entry] = &[
         deps: &[],
         builtins: &[],
         func: _fab_poc_outward,
+    },
+    rt::Entry {
+        name: "_fab_poc_echo",
+        reference: "function _fab_poc_echo(x) = echo(v=x) x + 1;",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: _fab_poc_echo,
     },
     rt::Entry {
         name: "_fab_poc_isup",
@@ -1395,6 +1406,20 @@ pub(super) fn _fab_poc_outward(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Re
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = rt::binary(fx, rt::BinOp::Add, fx.call_named("_fab_poc_absent", &[(None, p_x.clone())])?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_echo` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_echo(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10/AR.24: past the depth budget, DECLINE — the LIVE evaluator re-interprets
+    // the proven reference on one machine's explicit stack (ctx-less callers get the
+    // throwaway oracle instead); recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return fx.reinterpret("_fab_poc_echo", FALLBACK_SOURCES, args);
+    };
+    let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = { fx.echo(&[(Some("v"), p_x.clone())])?; rt::binary(fx, rt::BinOp::Add, p_x.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) };
     Ok(out)
 }
 

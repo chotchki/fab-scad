@@ -331,11 +331,35 @@ impl NativeSurface {
     /// derivation and the `Box::leak`s that made it `'static` are simply gone. Byte-identical
     /// output to the derived table by construction — the widest-domain mapping moved VERBATIM
     /// into fab-lang (`widest_domain`) and runs at regen time.
+    ///
+    /// FAB-LANG'S OWN natives, specifically. [`NativeSurface::from_library`] is the one that takes
+    /// a library; this stays because its decl table's ORDER AND LENGTH are what the accumulated
+    /// corpora mean.
     #[must_use]
     pub fn from_registry(preamble: impl Into<String>) -> Self {
         NativeSurface {
             decls: fab_lang::surface::Natives.callables(),
             preamble: preamble.into(),
+        }
+    }
+
+    /// Generate against a library the caller LOADED — the AR.28 shape, and the one a transpiled
+    /// crate needs.
+    ///
+    /// [`NativeSurface::from_registry`] names fab-lang's own table at compile time, which was the
+    /// whole surface there was to fuzz while fab-lang was the only library. It is not any more:
+    /// `fab-bosl2` declares 1329 callables against fab-lang's 85, and the acceptance suite AR.21
+    /// leans on has to be pointed at the band being deleted rather than at the one deleting it.
+    ///
+    /// TAKES THE LIBRARY'S OWN PREAMBLE, not a caller-supplied string. A surface and the `include`
+    /// that makes its names resolve are one fact; splitting them is how a generated program ends up
+    /// calling functions that do not exist, failing identically on both legs, and reading as
+    /// agreement.
+    #[must_use]
+    pub fn from_library(lib: &dyn LibrarySurface) -> Self {
+        NativeSurface {
+            decls: lib.callables(),
+            preamble: lib.preamble().to_string(),
         }
     }
 }

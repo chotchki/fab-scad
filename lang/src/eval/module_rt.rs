@@ -991,9 +991,17 @@ impl crate::surface::FnCtx for NativeFnCtx<'_, '_> {
         name: &str,
         args: &[(Option<&'static str>, Value)],
     ) -> crate::Result<Value> {
-        call_named_outward(self.ctx, &self.caller, def, name, args)
+        call_named_outward(self.ctx, &self.caller, def, name, args, Unbound::Warn)
     }
 
+    fn call_named_shadowed(
+        &self,
+        def: &str,
+        name: &str,
+        args: &[(Option<&'static str>, Value)],
+    ) -> crate::Result<Value> {
+        call_named_outward(self.ctx, &self.caller, def, name, args, Unbound::Undef)
+    }
 }
 
 impl crate::surface::Console for NativeFnCtx<'_, '_> {
@@ -1101,12 +1109,26 @@ pub(super) fn reinterpret_named(
 /// Arm 3 is the one worth arguing about, and the argument is that the alternative is worse: an
 /// error would make a compiled caller FAIL where the interpreted twin merely warns, which is a
 /// tier difference visible to a user — the one thing this whole tier promises never to produce.
+/// What an outward call does when NOTHING resolves — the only thing that differs between
+/// [`crate::surface::FnCtx::call_named`] and its shadowed twin, and it is a CONSOLE difference, not
+/// a value one. Both answer `undef`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Unbound {
+    /// A bare call to a name nothing defines: the interpreter warns, so we warn.
+    Warn,
+    /// A call through a name that IS locally bound, just not to a function (the AN.10 shadow rule's
+    /// else-half). The interpreter falls to `Task::CallValue`, which answers `undef` and says
+    /// nothing — a warning here is a line the twin never prints.
+    Undef,
+}
+
 pub(super) fn call_named_outward(
     ctx: &super::Ctx<'_>,
     caller: &Scope,
     def: &str,
     name: &str,
     args: &[(Option<&'static str>, Value)],
+    unbound: Unbound,
 ) -> crate::Result<Value> {
     if let Some(&((params, body), home)) = ctx.functions.get(name) {
         // The interpreted twin's own recursion verdict, NAME-FUL — this is a named call.
@@ -1150,8 +1172,13 @@ pub(super) fn call_named_outward(
         // BOUND but not callable. `Task::CallValue`'s catch-all answers `undef` and says nothing,
         // and a warning here would be a line the interpreter never prints.
         Some(_) => Ok(Value::Undef),
+        // NOTHING RESOLVED. Which console line that is depends on the CALL SITE, not on what we
+        // failed to find: an unknown name warns, a locally-bound-but-not-callable one is silent.
+        // See `Unbound`, and `FnCtx::call_named_shadowed` for the measurement behind it.
         None => {
-            ctx.warn(format!("Ignoring unknown function '{name}'"));
+            if unbound == Unbound::Warn {
+                ctx.warn(format!("Ignoring unknown function '{name}'"));
+            }
             Ok(Value::Undef)
         }
     }

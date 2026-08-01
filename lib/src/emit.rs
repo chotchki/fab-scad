@@ -1007,7 +1007,38 @@ impl Emitter<'_, '_> {
             if self.fn_locals.iter().any(|f| f == ident) {
                 return Ok(format!("fx.call_value(&{ident}, &[{}])?", pairs.join(", ")));
             }
-            let static_call = self.static_call(name, args)?;
+            // THE ELSE-HALF'S CONSOLE RULE (AR.28). A non-function local does not shadow, so the
+            // static resolution runs — but when there is none, the emitter must NOT fall into the
+            // ordinary outward dispatch: that reports an UNKNOWN name, and the interpreter's rule
+            // for a name that is locally BOUND is `Task::CallValue`, which answers `undef` and says
+            // nothing. Which of the two applies is a property of the USER's program (does a
+            // function of this name exist?), so it cannot be decided here — the call site declares
+            // it is under the shadow rule and the runtime picks. Found by the AR.28 surface
+            // differential on `root_find(f, …)`, seed 207.
+            let static_call = if fab_lang::is_builtin(name)
+                || matches!(name, "import" | "dxf_dim" | "dxf_cross")
+                || self.siblings.iter().any(|s| s.name == name)
+            {
+                self.static_call(name, args)?
+            } else {
+                let def = self
+                    .def_name
+                    .ok_or("a shadowed outward call from a body with no definition name")?;
+                let named: Vec<String> = args
+                    .iter()
+                    .map(|a| {
+                        let v = self.expr(&a.value)?;
+                        Ok(match &a.name {
+                            Some(n) => format!("(Some({:?}), {v})", &**n),
+                            None => format!("(None, {v})"),
+                        })
+                    })
+                    .collect::<Result<_, String>>()?;
+                format!(
+                    "fx.call_named_shadowed({def:?}, {name:?}, &[{}])?",
+                    named.join(", ")
+                )
+            };
             // Both branches evaluate their OWN argument emissions; exactly one branch runs, so
             // side effects fire once either way.
             return Ok(format!(

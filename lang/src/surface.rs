@@ -406,6 +406,33 @@ pub trait FnCtx: Console {
         name: &str,
         args: &[(Option<&'static str>, Value)],
     ) -> crate::Result<Value>;
+
+    /// [`FnCtx::call_named`] for a call site where `name` IS bound in the native's own lexical
+    /// world, just not to a function — the else-half of the AN.10 shadow rule.
+    ///
+    /// SAME RESOLUTION, DIFFERENT CONSOLE, and the difference is the whole reason this is a second
+    /// method rather than a flag nobody would read. A bare call to a name nothing defines is the
+    /// UNKNOWN case and the interpreter warns; a call through a name that is locally bound falls to
+    /// `Task::CallValue`, which answers `undef` and says NOTHING. The emitter cannot tell these
+    /// apart at build time — whether a function of that name exists is a property of the USER's
+    /// program — so the call site declares which rule it is under and the runtime applies it.
+    ///
+    /// MEASURED, not argued: `root_find(f, …)` with a non-function `f` printed two
+    /// `Ignoring unknown function 'f'` lines the interpreter never prints (AR.28, seed 207 of the
+    /// first deep run against BOSL2's own surface).
+    ///
+    /// ARGUMENTS ARE NOT EVALUATED when nothing resolves, matching the twin: an `echo` in an
+    /// argument to a non-callable local does not print. The caller therefore passes values it has
+    /// already computed only on the path where the callee IS a function.
+    ///
+    /// # Errors
+    /// As [`FnCtx::call_named`].
+    fn call_named_shadowed(
+        &self,
+        def: &str,
+        name: &str,
+        args: &[(Option<&'static str>, Value)],
+    ) -> crate::Result<Value>;
 }
 
 /// The [`FnCtx`] for call sites with NO evaluator — benches, oracles, value-level batteries. It
@@ -471,6 +498,21 @@ impl FnCtx for NoClosures {
         // indistinguishable from the interpreter's unknown-function result and therefore silent.
         Err(crate::Error::Unimplemented(
             "an outward call with no evaluator — re-interpreting",
+        ))
+    }
+
+    fn call_named_shadowed(
+        &self,
+        _def: &str,
+        _name: &str,
+        _args: &[(Option<&'static str>, Value)],
+    ) -> crate::Result<Value> {
+        // Refuses for the same reason `call_named` does. `undef` would be the RIGHT answer for an
+        // unresolved shadowed call, which is exactly what makes it the wrong one here: with no
+        // program there is nothing to resolve against, so answering `undef` would be a guess that
+        // happens to look like the correct result.
+        Err(crate::Error::Unimplemented(
+            "a shadowed outward call with no evaluator — re-interpreting",
         ))
     }
 }

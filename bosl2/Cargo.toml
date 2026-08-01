@@ -18,3 +18,9 @@ fab-lang = { path = "../lang" }
 # NOT here — the build script never names it; the generated TEXT does, which the normal dependency
 # above serves.
 fab-lib = { path = "../lib" }
+
+[dev-dependencies]
+# The GRAMMAR GENERATOR (AR.28): the surface differential generates programs against this crate's
+# own 1329 declared callables, so the acceptance suite is pointed at the band AR.21 deletes rather
+# than at fab-lang's 85. No cycle — fab-gen depends on fab-lang, not on us.
+fab-gen = { path = "../gen" }

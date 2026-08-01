@@ -2845,6 +2845,7 @@ dependencies = [
 name = "fab-bosl2"
 version = "0.1.0"
 dependencies = [
+ "fab-gen",
  "fab-lang",
  "fab-lib",
 ]

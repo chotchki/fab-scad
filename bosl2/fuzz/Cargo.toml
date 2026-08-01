@@ -1,0 +1,43 @@
+# cargo-fuzz project for fab-bosl2 (AR.28). Standalone `[workspace]` (cargo-fuzz convention) so it
+# stays OUT of the parent workspace: it needs nightly + libFuzzer, which the stable
+# `cargo build`/`test`/clippy at the repo root must never try to compile. Run it explicitly:
+# `cargo +nightly fuzz run bosl2_dispatch_diff`.
+#
+# ITS OWN CRATE rather than a target in `lang/fuzz`, and the reason is the dependency direction this
+# whole phase turned on: fab-lang deliberately cannot see fab-bosl2, and letting its fuzz crate do so
+# would blur the one boundary AR.26.1 exists to draw. A fuzz crate belongs beside what it fuzzes.
+[package]
+name = "fab-bosl2-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.fab-bosl2]
+path = ".."
+
+# The evaluator both legs run on, and the registry the library's rows accumulate into.
+[dependencies.fab-lang]
+path = "../../lang"
+
+# The grammar generator, driven from fuzzer bytes against fab-bosl2's OWN declared surface.
+[dependencies.fab-gen]
+path = "../../gen"
+
+# AR.28 — the tier differential aimed at the TRANSPILED band: the same generated program, compiled
+# tier off vs on, against BOSL2's 1329 declared callables. `intrinsics_dispatch_diff` over in
+# lang/fuzz is the same comparison over the BUILTIN surface, so it never calls a library function at
+# all; this is the one that covers what AR.21 deletes the alternative to.
+[[bin]]
+name = "bosl2_dispatch_diff"
+path = "fuzz_targets/bosl2_dispatch_diff.rs"
+test = false
+doc = false
+bench = false

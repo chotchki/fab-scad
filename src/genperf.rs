@@ -112,7 +112,7 @@ pub fn run(
 fn oracle_startup_ms(timeout: Duration, flags: &[&str]) -> Result<f64> {
     let mut samples: Vec<f64> = Vec::new();
     for _ in 0..5 {
-        let r = crate::gendiff::oracle_report("cube(1);\n", timeout, flags)?;
+        let r = crate::gendiff::oracle_report("cube(1);\n", timeout, flags, None)?;
         samples.push(r.duration.as_secs_f64() * 1e3);
     }
     Ok(median(&mut samples))
@@ -169,7 +169,7 @@ fn one_seed(
     let _ = std::fs::remove_file(&stl);
     let tris = solid.as_ref().map_or(0, crate::kernel::Solid::num_tri);
 
-    let Ok(report) = crate::gendiff::oracle_report(&src, timeout, flags) else {
+    let Ok(report) = crate::gendiff::oracle_report(&src, timeout, flags, None) else {
         return Seed::OracleFailed;
     };
     // A CRASHED oracle answered nothing — scoring it as a disagreement would bury the real

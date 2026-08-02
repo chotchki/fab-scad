@@ -409,6 +409,40 @@ where
     .0)
 }
 
+/// [`resolve_geometry_with_base`] against a registry the CALLER built (AR.36).
+///
+/// The STRING-rooted door, which AR.26.4.3 left on fab-lang's own rows while wiring the
+/// file-rooted ones. That gap was not cosmetic: the GUI renders an UNSAVED buffer through
+/// here, so the editor was evaluating against a different library set than `fab render` on
+/// the same text.
+///
+/// # Errors
+/// As [`resolve_geometry_with_base`].
+pub fn resolve_geometry_with_base_with_registry<R>(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
+    registry: &registry::Registry,
+    config: Config,
+    mesh_reader: R,
+) -> Result<Geo>
+where
+    R: FnMut(&str) -> Result<Imported>,
+{
+    Ok(eval::io::drive(
+        source,
+        base_dir,
+        None,
+        library_paths,
+        jit_factory,
+        registry,
+        config,
+        mesh_reader,
+    )?
+    .0)
+}
+
 /// SU.2 (sustainment): audit the intrinsic registry against the library `source` loads — per
 /// registered intrinsic (and dep PIN), does the library's definition still fingerprint to the verified
 /// reference? `Changed`/`Missing` rows are the drift signal: the intrinsic silently stops dispatching
@@ -506,6 +540,39 @@ where
     )
 }
 
+/// [`resolve_geometry_with_base_full`] against a registry the CALLER built (AR.36).
+///
+/// The STRING-rooted door, which AR.26.4.3 left on fab-lang's own rows while wiring the
+/// file-rooted ones. That gap was not cosmetic: the GUI renders an UNSAVED buffer through
+/// here, so the editor was evaluating against a different library set than `fab render` on
+/// the same text.
+///
+/// # Errors
+/// As [`resolve_geometry_with_base_full`].
+pub fn resolve_geometry_with_base_full_with_registry<R>(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
+    registry: &registry::Registry,
+    config: Config,
+    mesh_reader: R,
+) -> RunResult<(Geo, Vec<Message>)>
+where
+    R: FnMut(&str) -> Result<Imported>,
+{
+    eval::io::drive(
+        source,
+        base_dir,
+        None,
+        library_paths,
+        jit_factory,
+        registry,
+        config,
+        mesh_reader,
+    )
+}
+
 /// Like [`resolve_geometry_from_sources`], but ALSO returns the ordered `echo`/warning [`Message`]s —
 /// the GUI console on WEB (W.3.16), where the worker evals from the in-memory source map.
 ///
@@ -561,6 +628,48 @@ where
         library_paths,
         jit_factory,
         registry::Registry::builtin(),
+        config,
+        mesh_reader,
+    )
+}
+
+/// [`resolve_geometry_hybrid_full`] against a registry the CALLER built (AR.36).
+///
+/// The STRING-rooted door, which AR.26.4.3 left on fab-lang's own rows while wiring the
+/// file-rooted ones. That gap was not cosmetic: the GUI renders an UNSAVED buffer through
+/// here, so the editor was evaluating against a different library set than `fab render` on
+/// the same text.
+///
+/// # Errors
+/// As [`resolve_geometry_hybrid_full`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the hybrid entry's arguments are each a distinct axis — source, the include root, the \
+              IMPORT root (deliberately separate), the live-buffer overlay, the library path, the \
+              JIT, the registry, the config. Grouping them into a struct would hide which ones \
+              coincide for a flat project and diverge for a nested one, which is the bug this \
+              signature exists to prevent"
+)]
+pub fn resolve_geometry_hybrid_full_with_registry<R>(
+    source: &str,
+    base_dir: &Path,
+    overlay: &std::collections::BTreeMap<PathBuf, String>,
+    library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
+    registry: &registry::Registry,
+    config: Config,
+    mesh_reader: R,
+) -> RunResult<(Geo, Vec<Message>)>
+where
+    R: FnMut(&str) -> Result<Imported>,
+{
+    eval::io::drive_hybrid(
+        source,
+        base_dir,
+        overlay,
+        library_paths,
+        jit_factory,
+        registry,
         config,
         mesh_reader,
     )

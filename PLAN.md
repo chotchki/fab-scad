@@ -104,6 +104,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] AR.32 - The C-style comprehension compiles: a Rust loop with the interpreter's ordering
 - [x] AR.33 - rands compiles: the run's one advancing stream, as a capability
 - [x] AR.34 - Comprehension dispatch: constructs that were always in the subset, never routed to
+- [x] AR.35 - Tier performance: transpiler vs intrinsics/JIT vs OpenSCAD, on real models
 ## Phase K - scad-rs: differential harness + semantics corpus
 - [ ] K.1 - Harness v1: both engines, metric gate per model class, corpus tiers 1-3 wired in CI (OpenSCAD suite, BOSL2 tests, models/)
   - [x] K.1.1 - K.1.1 - BOSL2 test corpus tier: sweep the .scadtest suite through scad-rs

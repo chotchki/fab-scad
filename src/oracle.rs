@@ -13,6 +13,7 @@
 //! comparison is therefore impossible through a file — the metric tiers are tolerance-based (G.3.7).
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -105,7 +106,24 @@ pub fn run(source: &str, timeout: Duration) -> Result<OracleRun> {
 /// [`run`] with extra `--enable=…` oracle flags (AJ.8's gen-diff runs the oracle with the
 /// experimental features our evaluator ships always-on).
 pub fn run_with_flags(source: &str, timeout: Duration, flags: &[&str]) -> Result<OracleRun> {
-    let osc = Openscad::discover(None)?;
+    run_with_flags_in(source, timeout, flags, None)
+}
+
+/// [`run_with_flags`] with the fab-scad ROOT, so `OPENSCADPATH` carries `libs/` + `scad-lib` and a
+/// generated program may `include <BOSL2/std.scad>` (AR.36).
+///
+/// Without it the oracle cannot see the library at all and every such program fails identically on
+/// its side — which a differential reads as "both engines errored", i.e. as agreement.
+///
+/// # Errors
+/// As [`run_with_flags`].
+pub fn run_with_flags_in(
+    source: &str,
+    timeout: Duration,
+    flags: &[&str],
+    root: Option<&Path>,
+) -> Result<OracleRun> {
+    let osc = Openscad::discover(root)?;
     let version = osc.tool_version();
 
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);

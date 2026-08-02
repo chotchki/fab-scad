@@ -107,11 +107,12 @@ pub fn resolve_geometry_with_base(
     library_paths: &[PathBuf],
     config: fab_lang::Config,
 ) -> Result<Geo, Error> {
-    fab_lang::resolve_geometry_with_base(
+    fab_lang::resolve_geometry_with_base_with_registry(
         source,
         base_dir,
         library_paths,
         jit_factory(),
+        registry(),
         config,
         |raw| read_import(base_dir, raw),
     )
@@ -125,11 +126,12 @@ pub fn resolve_geometry_with_base_full(
     library_paths: &[PathBuf],
     config: fab_lang::Config,
 ) -> fab_lang::RunResult<(Geo, Vec<Message>)> {
-    fab_lang::resolve_geometry_with_base_full(
+    fab_lang::resolve_geometry_with_base_full_with_registry(
         source,
         base_dir,
         library_paths,
         jit_factory(),
+        registry(),
         config,
         |raw| read_import(base_dir, raw),
     )
@@ -153,12 +155,13 @@ pub fn resolve_geometry_hybrid_full(
     library_paths: &[PathBuf],
     config: fab_lang::Config,
 ) -> fab_lang::RunResult<(Geo, Vec<Message>)> {
-    fab_lang::resolve_geometry_hybrid_full(
+    fab_lang::resolve_geometry_hybrid_full_with_registry(
         source,
         base_dir,
         overlay,
         library_paths,
         jit_factory(),
+        registry(),
         config,
         |raw| read_import(import_dir, raw),
     )
@@ -224,12 +227,28 @@ pub fn resolve_geometry_file(
     library_paths: &[PathBuf],
     config: fab_lang::Config,
 ) -> Result<Geo, Error> {
+    resolve_geometry_file_with(path, library_paths, registry(), config)
+}
+
+/// [`resolve_geometry_file`] against a registry the CALLER chose — the seam a tier comparison needs
+/// (AR.35), and the only way to render the SAME model through the hand tiers and the transpiler in
+/// one process. Everything else is the product path verbatim: the same mesh reader, the same JIT
+/// factory, so a leg differs only in the thing under test.
+///
+/// # Errors
+/// As [`resolve_geometry_file`].
+pub fn resolve_geometry_file_with(
+    path: &Path,
+    library_paths: &[PathBuf],
+    registry: &fab_lang::registry::Registry,
+    config: fab_lang::Config,
+) -> Result<Geo, Error> {
     let base_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     fab_lang::resolve_geometry_file_with_registry(
         path,
         library_paths,
         jit_factory(),
-        registry(),
+        registry,
         config,
         |raw| read_import(&base_dir, raw),
     )

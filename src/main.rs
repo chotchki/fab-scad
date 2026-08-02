@@ -86,6 +86,11 @@ enum Commands {
         /// Emit GitHub-flavored markdown.
         #[arg(long)]
         md: bool,
+        /// Generate against BOSL2's 1329 declared callables instead of the builtins (AR.36) — the
+        /// only lane that checks the TRANSPILER against OpenSCAD rather than against our own
+        /// interpreter. Needs `libs/BOSL2` checked out.
+        #[arg(long)]
+        bosl2: bool,
     },
     /// AO.4: the HEAVY perf lane — fab vs the OpenSCAD binary on programs big enough to time.
     /// `gen-diff`'s programs are deliberately cheap, so its oracle number is mostly process fork;
@@ -290,7 +295,12 @@ fn main() -> Result<()> {
             committed,
             md,
         } => corpus_diff_cmd(&candidate, &committed, md),
-        Commands::GenDiff { seeds, timeout, md } => fab_scad::gendiff::run(seeds, timeout, md),
+        Commands::GenDiff {
+            seeds,
+            timeout,
+            md,
+            bosl2,
+        } => fab_scad::gendiff::run_surface(seeds, timeout, md, bosl2),
         Commands::GenPerf {
             dials,
             budget,

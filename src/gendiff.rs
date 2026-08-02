@@ -76,7 +76,38 @@ pub(crate) fn negotiate_flags(timeout: Duration) -> &'static [&'static str] {
 /// # Errors
 /// Only on harness-level failures (no OpenSCAD binary at all); per-seed failures are outcomes.
 pub fn run(seeds: u32, timeout_secs: u64, md: bool) -> Result<()> {
+    run_surface(seeds, timeout_secs, md, false)
+}
+
+/// [`run`] over a chosen SURFACE (AR.36).
+///
+/// `bosl2 = true` generates against `fab-bosl2`'s 1329 declared callables instead of the builtins,
+/// which is the only lane that checks the TRANSPILER against ground truth. Every other differential
+/// in the tree compares our compiled tier against our own interpreter — so if both are wrong the
+/// same way, they agree. This one asks OpenSCAD.
+///
+/// It is also a different KIND of program: `names_bind` is true on every library decl and false on
+/// every builtin, so the whole named-argument family is unreachable from the builtin lane.
+///
+/// # Errors
+/// As [`run`], plus a missing `libs/BOSL2` when the BOSL2 surface is asked for.
+pub fn run_surface(seeds: u32, timeout_secs: u64, md: bool, bosl2: bool) -> Result<()> {
     let timeout = Duration::from_secs(timeout_secs);
+    // The fab-scad root: the oracle needs it for `OPENSCADPATH`, we need it for `library_paths`.
+    let root = bosl2.then(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    if let Some(r) = &root {
+        anyhow::ensure!(
+            r.join("libs/BOSL2/std.scad").exists(),
+            "the BOSL2 surface needs libs/BOSL2 checked out"
+        );
+    }
+    let libs: Vec<std::path::PathBuf> = root
+        .as_ref()
+        .map(|r| vec![r.join("libs"), r.join("scad-lib")])
+        .unwrap_or_default();
+    let surface = bosl2.then(|| {
+        fab_gen::NativeSurface::from_library(&fab_bosl2::Bosl2)
+    });
 
     let flags = negotiate_flags(timeout);
 
@@ -107,8 +138,11 @@ pub fn run(seeds: u32, timeout_secs: u64, md: bool) -> Result<()> {
     let mut ours_fails: Vec<(u32, String)> = Vec::new();
 
     for seed in 0..seeds {
-        let src = fab_gen::generate(seed);
-        match diff_one(&src, timeout, flags) {
+        let src = match &surface {
+            Some(s) => fab_gen::generate_against(seed, fab_gen::Profile::AB, s),
+            None => fab_gen::generate(seed),
+        };
+        match diff_one(&src, timeout, flags, &libs, root.as_deref()) {
             Outcome::Match {
                 ours_ms,
                 oracle_ms,
@@ -194,7 +228,13 @@ pub fn run(seeds: u32, timeout_secs: u64, md: bool) -> Result<()> {
 }
 
 /// Diff one program: ours (eval + mesh lower, timed) vs the oracle (timed, baseline-adjusted).
-fn diff_one(src: &str, timeout: Duration, flags: &[&str]) -> Outcome {
+fn diff_one(
+    src: &str,
+    timeout: Duration,
+    flags: &[&str],
+    libs: &[std::path::PathBuf],
+    root: Option<&std::path::Path>,
+) -> Outcome {
     use crate::backend::{ManifoldBackend, build_geo};
 
     // OURS — the same span the oracle's render covers: parse → eval → lower to a mesh.
@@ -203,7 +243,7 @@ fn diff_one(src: &str, timeout: Duration, flags: &[&str]) -> Outcome {
     let evaluated = crate::import::resolve_geometry_with_base_full(
         src,
         &tmp,
-        &[],
+        libs,
         fab_lang::Config::from_env(),
     );
     let (tree, messages) = match evaluated {
@@ -216,7 +256,7 @@ fn diff_one(src: &str, timeout: Duration, flags: &[&str]) -> Outcome {
     // ORACLE — the raw Report, so a failed EXPORT (2D top level, empty result) still hands us
     // the eval's echo for comparison (AK.2: agreement was invisible through run_with_flags's
     // throw-away-on-failure). Only a timeout / spawn failure is uncomparable.
-    let report = match oracle_report(src, timeout, flags) {
+    let report = match oracle_report(src, timeout, flags, root) {
         Ok(r) => r,
         Err(e) => {
             let first = format!("{e}")
@@ -284,10 +324,14 @@ pub(crate) fn oracle_report(
     src: &str,
     timeout: Duration,
     flags: &[&str],
+    root: Option<&std::path::Path>,
 ) -> Result<crate::openscad::Report> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let osc = crate::openscad::Openscad::discover(None)?;
+    // AR.36 — with a ROOT, `OPENSCADPATH` carries `libs/`, which is the only way a generated
+    // program that `include`s BOSL2 resolves on the oracle side. Without it every such program
+    // fails identically on both engines, and a differential reads that as agreement.
+    let osc = crate::openscad::Openscad::discover(root)?;
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir();
     let stem = format!("fab-gendiff-{}-{seq}", std::process::id());

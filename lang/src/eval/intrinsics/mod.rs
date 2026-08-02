@@ -29,20 +29,14 @@ use crate::registry::ModuleNative;
 
 use super::value::Value;
 
-mod affine;
 pub(crate) mod fingerprint;
 
 // Generated code keeps its emitter's exact bytes — the regen test pins them; fmt stays out.
 #[rustfmt::skip]
 mod generated;
 mod generated_modules;
-mod geometry;
-mod lists;
-mod math;
 pub(crate) mod native_rt;
 mod poc;
-mod regions;
-mod shape;
 /// AR.3 — the registry's call surface, PARSED from the references (see the module doc).
 pub mod surface;
 #[cfg(test)]
@@ -54,18 +48,25 @@ pub mod surface;
     reason = "test harness: expect/panic ARE the assertions; intrinsics must bit-match, so == is exact"
 )]
 mod tests;
-mod vectors;
 
 pub(super) use fingerprint::fingerprint;
 
-// The fast==slow harness addresses every native as `super::<name>`; these bindings keep those
-// paths valid from the tests submodule.
-#[cfg(test)]
-use affine::{affine3d_identity, affine3d_rot_by_axis, apply, ident, is_2d_transform};
 // AR.25 — the vector_angle/rot_from_to cone's hand natives are DELETED; direct-call tests now
 // exercise the generated versions under the old names (the tests cover what ships).
+//
+// AR.21.2 finished the job for the rest. The hand modules (affine/regions/shape/lists/math/
+// vectors/geometry) are gone, so every direct-call test that used to reach a hand native now
+// reaches the GENERATED one of the same name — same reason as AR.17/AR.25, and the tests got
+// STRICTLY better for it because the thing under test is now the thing that ships. The four
+// natives with no generated twin (`apply`, `rot`, `_sum`'s tail helper, `_bt_search`) lost their
+// direct-call tests entirely: the product takes BOSL2's transpiled versions, which `bosl2/tests`
+// covers whole-program.
 #[cfg(test)]
 use generated::{_fab_poc_isup as poc_isup, _fab_poc_near0 as poc_near0, _fab_poc_sq as poc_sq};
+#[cfg(test)]
+use generated::{
+    affine3d_identity, force_list, ident, in_list, is_2d_transform, is_consistent, is_path,
+};
 #[cfg(test)]
 use generated::{point2d, vector_axis};
 // AR.17 stage A — these hand natives are DELETED; their direct-call unit tests now exercise the
@@ -79,14 +80,6 @@ use generated::{
 };
 #[cfg(test)]
 use generated::{_none_inside as none_inside, _point_dist as point_dist};
-#[cfg(test)]
-use lists::{force_list, in_list};
-#[cfg(test)]
-use math::sum_tail;
-#[cfg(test)]
-use shape::{is_consistent, is_path};
-#[cfg(test)]
-use vectors::bt_search;
 
 /// AR.26.1 — the ROW TYPES live in [`crate::registry`] now, because a generated library crate has to
 /// construct them and this module is private. Re-exported under their old names so the hand registry
@@ -1434,9 +1427,10 @@ pub(super) static REGISTRY: &[Entry] = &[
         func: generated::_vnf_centroid,
     },
     // ── O.7, band 5 batch 2 (linalg/affine/geometry/lists/paths.scad) ───────────────────────────────────
-    // The affine BUILDERS rot() leans on (rot itself is a dep avalanche — move/rot_inverse/_NO_ARG — and
-    // stays interpreted, in the JIT bucket with _find_anchor/apply/vector_axis), the earcut driver's
-    // per-candidate scan, and pill_holder's membership pair.
+    // The affine BUILDERS rot() leans on. `rot` itself was a dep avalanche — move/rot_inverse/_NO_ARG —
+    // that never compiled here and was hand-written instead; AR.21.2 deleted that hand version, so the
+    // product now takes BOSL2's transpiled `rot` and fab-lang alone interprets it. Also the earcut
+    // driver's per-candidate scan, and pill_holder's membership pair.
     Entry {
         name: "ident",
         reference: "function ident(n) = [
@@ -1668,7 +1662,7 @@ pub(super) static REGISTRY: &[Entry] = &[
                    : RIGHT
             ) unit(cross(w1,w3));",
         consts: &[],
-        consts_v: &[("UP", vectors::bosl_up), ("RIGHT", vectors::bosl_right)],
+        consts_v: &[("UP", bosl_up), ("RIGHT", bosl_right)],
         deps: &[
             "is_vector",
             "is_finite",
@@ -1717,52 +1711,6 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &["is_list", "len", "is_undef", "is_num", "norm", "abs", "cross", "atan2", "sin", "cos", "acos", "min", "max", "is_bool"],
         func: generated::affine3d_rot_from_to,
     },
-    // ── O.9 tree 2a (transforms.scad) ────────────────────────────────────────────────────────────────────
-    // `apply` — the public transform-application dispatcher over the already-native `_apply`. Its vnf lane's
-    // mirror check reaches the determinant chain (4×4 only — the _apply asserts force tdim==datadim==3
-    // before determinant runs) and `vnf_reverse_faces` → BOSL2's `reverse` (the builtin shadow) → whose
-    // string lane reaches `str_join` (a degenerate-but-is_vnf-passing input can put a string face through
-    // it, so the native reproduces that too).
-    Entry {
-        name: "apply",
-        reference: "function apply(transform,points) =
-    points==[] ? []
-  : is_vector(points) ? _apply(transform, [points])[0]    // point
-  : is_vnf(points) ?                                      // vnf
-        let(
-            newvnf = [_apply(transform, points[0]), points[1]],
-            reverse = (len(transform)==len(transform[0])) && determinant(transform)<0
-        )
-        reverse ? vnf_reverse_faces(newvnf) : newvnf
-  : is_list(points) && is_list(points[0]) && is_vector(points[0][0])    // bezier patch
-        ? [for (x=points) _apply(transform,x)]
-  : _apply(transform,points);",
-        consts: &[],
-        consts_v: &[],
-        deps: &[
-            "_apply",
-            "is_matrix",
-            "is_vector",
-            "is_finite",
-            "is_nan",
-            "is_consistent",
-            "_list_pattern",
-            "is_2d_transform",
-            "is_vnf",
-            "determinant",
-            "det2",
-            "det3",
-            "det4",
-            "is_def",
-            "reverse",
-            "vnf_reverse_faces",
-            "str_join",
-        ],
-        builtins: &[
-            "is_list", "len", "is_undef", "is_num", "concat", "str", "cross", "is_string",
-        ],
-        func: affine::apply,
-    },
     // ── O.9 tree 2b (transforms/affine.scad) — rot, the band's finale ───────────────────────────────────
     Entry {
         name: "affine3d_translate",
@@ -1801,7 +1749,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         [               0,                0,                0, 1]
     ];",
         consts: &[],
-        consts_v: &[("UP", vectors::bosl_up)],
+        consts_v: &[("UP", bosl_up)],
         deps: &[
             "is_finite",
             "is_nan",
@@ -1819,208 +1767,18 @@ pub(super) static REGISTRY: &[Entry] = &[
         ],
         func: generated::affine3d_rot_by_axis,
     },
-    // The band's finale: rot's own body is a dispatcher, but its CLOSURE is the whole affine family — every
-    // lane composes already-landed natives (rot_from_to, rot_by_axis, the translate conjugation, the
-    // rot_inverse/hstack reachable slice, apply). `_NO_ARG` is the p-sentinel; UP/RIGHT ride in through the
-    // composed natives' bakes.
-    Entry {
-        name: "rot",
-        reference: "function rot(a=0, v, cp, from, to, reverse=false, p=_NO_ARG) =
-    assert(is_undef(from)==is_undef(to), \"from and to must be specified together.\")
-    assert(is_undef(from) || is_vector(from, zero=false), \"'from' must be a non-zero vector.\")
-    assert(is_undef(to) || is_vector(to, zero=false), \"'to' must be a non-zero vector.\")
-    assert(is_undef(v) || is_vector(v, zero=false), \"'v' must be a non-zero vector.\")
-    assert(is_undef(cp) || is_vector(cp), \"'cp' must be a vector.\")
-    assert(is_finite(a) || is_vector(a), \"'a' must be a finite scalar or a vector.\")
-    assert(is_bool(reverse))
-    let(
-        m = let(
-                from = is_undef(from)? undef : point3d(from),
-                to = is_undef(to)? undef : point3d(to),
-                cp = is_undef(cp)? undef : point3d(cp),
-                m1 = !is_undef(from) ?
-                        assert(is_num(a))
-                        affine3d_rot_from_to(from,to) * affine3d_rot_by_axis(from,a)
-                   : !is_undef(v)?
-                        assert(is_num(a))
-                        affine3d_rot_by_axis(v,a)
-                   : is_num(a) ? affine3d_zrot(a)
-                   : affine3d_zrot(a.z) * affine3d_yrot(a.y) * affine3d_xrot(a.x),
-                m2 = is_undef(cp)? m1 : (move(cp) * m1 * move(-cp)),
-                m3 = reverse? rot_inverse(m2) : m2
-            ) m3
-    )
-    p==_NO_ARG ? m : apply(m, p);",
-        consts: &[],
-        consts_v: &[("_NO_ARG", no_arg_value)],
-        deps: &[
-            "point3d",
-            "affine3d_rot_from_to",
-            "affine3d_rot_by_axis",
-            "affine3d_zrot",
-            "affine3d_yrot",
-            "affine3d_xrot",
-            "affine3d_translate",
-            "affine3d_identity",
-            "ident",
-            "default",
-            "move",
-            "rot_inverse",
-            "hstack",
-            "all",
-            "_all_bool",
-            "is_func",
-            "min_length",
-            "max_length",
-            "determinant",
-            "det2",
-            "det3",
-            "det4",
-            "apply",
-            "_apply",
-            "is_2d_transform",
-            "is_vnf",
-            "reverse",
-            "vnf_reverse_faces",
-            "str_join",
-            "vector_axis",
-            "v_abs",
-            "v_theta",
-            "point2d",
-            "vector_angle",
-            "same_shape",
-            "is_def",
-            "is_matrix",
-            "is_consistent",
-            "_list_pattern",
-            "constrain",
-            "unit",
-            "approx",
-            "idx",
-            "posmod",
-            "is_vector",
-            "all_nonzero",
-            "is_finite",
-            "is_nan",
-        ],
-        builtins: &[
-            "is_list",
-            "len",
-            "is_undef",
-            "is_num",
-            "is_bool",
-            "norm",
-            "abs",
-            "cross",
-            "sin",
-            "cos",
-            "acos",
-            "atan2",
-            "min",
-            "max",
-            "is_string",
-            "concat",
-            "str",
-            "version_num",
-            "is_function",
-        ],
-        func: affine::rot,
-    },
-    // ── O.10c (regions.scad) — the region monster: shoe_holder's ~9.7s/6-call residual ─────────────
-    Entry {
-        name: "_region_region_intersections",
-        reference: "function _region_region_intersections(region1, region2, closed1=true,closed2=true, eps=_EPSILON) =
-   let(
-       intersections =   [
-           for(p1=idx(region1))
-              let(
-                  path = closed1?list_wrap(region1[p1]):region1[p1]
-              )
-              for(i = [0:1:len(path)-2])
-                  let(
-                      a1 = path[i],
-                      a2 = path[i+1],
-                      nrm = norm(a1-a2)
-                  )
-                  if( nrm>eps )  // ignore zero-length path edges
-                       let( 
-                           seg_normal = [-(a2-a1).y, (a2-a1).x]/nrm,
-                           ref = a1*seg_normal
-                       )
-                           // `signs[j]` is the sign of the signed distance from
-                           // poly vertex j to the line [a1,a2] where near zero
-                           // distances are snapped to zero;  poly edges 
-                           //  with equal signs at its vertices cannot intersect
-                           // the path edge [a1,a2] or they are collinear and 
-                           // further tests can be discarded.
-                       for(p2=idx(region2))
-                           let(
-                               poly  = closed2?list_wrap(region2[p2]):region2[p2],
-                               signs = [for(v=poly*seg_normal) abs(v-ref) < eps ? 0 : sign(v-ref) ]
-                           ) 
-                           if(max(signs)>=0 && min(signs)<=0) // some edge intersects line [a1,a2]
-                               for(j=[0:1:len(poly)-2]) 
-                                   if(signs[j]!=signs[j+1])
-                                        let( // exclude non-crossing and collinear segments
-                                            b1 = poly[j],
-                                            b2 = poly[j+1],
-                                            isect = _general_line_intersection([a1,a2],[b1,b2],eps=eps) 
-                                        )
-                                        if (isect 
-                                            && isect[1]>= -eps 
-                                            && isect[1]<= 1+eps 
-                                            && isect[2]>= -eps
-                                            && isect[2]<= 1+eps)       
-                                         [[p1,i,isect[1]], [p2,j,isect[2]]]
-         ],
-         regions=[region1,region2],
-         // Create a flattened index list corresponding to the points in region1 and region2
-         // that gives each point as an intersection point
-         ptind = [for(i=[0:1])   
-                    [for(p=idx(regions[i]))
-                       for(j=idx(regions[i][p])) [p,j,0]]],
-         points = [for(i=[0:1]) flatten(regions[i])],
-         // Corner points are those points where the region touches itself, hence duplicate
-         // points in the region's point set
-         cornerpts = [for(i=[0:1])
-                         [for(k=vector_search(points[i],eps,points[i]))
-                             each if (len(k)>1) select(ptind[i],k)]],
-         risect = [for(i=[0:1]) concat(column(intersections,i), cornerpts[i])],
-         counts = [count(len(region1)), count(len(region2))],
-         pathind = [for(i=[0:1]) search(counts[i], risect[i], 0)]
-       )
-       [for(i=[0:1]) [for(j=counts[i]) _sort_vectors(select(risect[i],pathind[i][j]))]];",
-        consts: &[("_EPSILON", 1e-9)],
-        consts_v: &[],
-        deps: &["idx", "list_wrap", "are_ends_equal", "approx", "is_finite", "is_nan", "posmod", "_general_line_intersection", "flatten", "vector_search", "_bt_tree", "_bt_search", "pointlist_bounds", "ident", "transpose", "is_path", "is_matrix", "is_vector", "is_consistent", "_list_pattern", "in_list", "force_list", "all_nonzero", "is_range", "max_index", "min_index", "mean", "sum", "_sum", "column", "is_int", "count", "select", "_sort_vectors"],
-        builtins: &[
-            // AR.5a, both missing: `is_bool` via TWO independent live paths (list_wrap ->
-            // are_ends_equal -> approx, and _general_line_intersection -> approx) — approx's
-            // `a == b? is_bool(a) == is_bool(b)` is the UNGUARDED head of its ternary chain, so an
-            // already-closed input path reaches it. `is_string` via `idx`/`select`, whose bodies open
-            // `assert(is_list(x) || is_string(x))`: the `||` short-circuits on a list, but the native
-            // ERRORS rather than declining on the shapes that don't, so the interpreter would evaluate
-            // it where the native does not.
-            "norm", "sign", "cross", "search", "max", "min", "abs", "floor", "round", "concat",
-            "len", "is_list", "is_num", "is_undef", "is_bool", "is_string",
-        ],
-        func: regions::rri_val,
-    },
 ];
 
-/// BOSL2 `_NO_ARG` (transforms.scad) — the p-not-given sentinel: `[true,[123232345],false]`.
-fn no_arg_value() -> Value {
-    Value::list(vec![
-        Value::Bool(true),
-        Value::num_list(vec![123_232_345.0]),
-        Value::Bool(false),
-    ])
+/// BOSL2 `UP`: `[0,0,1]` as a `NumList`. A `consts_v` EXPECTATION — the value an arming guard compares
+/// the user's actual global against — not a native implementation, which is why it outlived the hand
+/// tier that used to house it.
+fn bosl_up() -> Value {
+    Value::num_list(vec![0.0, 0.0, 1.0])
 }
 
-/// Is `v` a list to the `is_list` BUILTIN (the branch every shape function turns on)? Both vector variants;
-/// nothing else (a string/range iterates in `for` but is NOT a list).
-fn v_is_list(v: &Value) -> bool {
-    matches!(v, Value::List(_) | Value::NumList(_))
+/// BOSL2 `RIGHT`: `[1,0,0]` as a `NumList`. Same role as [`bosl_up`].
+fn bosl_right() -> Value {
+    Value::num_list(vec![1.0, 0.0, 0.0])
 }
 
 /// A raised BOSL2 `assert(…)` — the message is a diagnostic LOCATOR (fast==slow matches "both raised", not
@@ -2101,37 +1859,6 @@ pub(crate) fn value_bits_eq(a: &Value, b: &Value) -> bool {
         (Value::Undef, Value::Undef) => true,
         _ => false,
     }
-}
-
-/// `is_finite` as the BOSL2 user fn computes it (`is_num(x) && !is_nan(0*x)`): a NON-NaN finite number.
-fn v_is_finite(v: &Value) -> bool {
-    matches!(v, Value::Num(n) if n.is_finite())
-}
-
-/// The `is_vector` CORE (its first three clauses — the 1-arg semantics): a nonempty list whose every element
-/// is a finite number. Shared by [`is_vector`], [`all_nonzero`]'s vector branch, and [`is_matrix`]'s row
-/// check.
-fn is_vector_core(v: &Value) -> bool {
-    match v {
-        Value::NumList(xs) => !xs.is_empty() && xs.iter().all(|x| x.is_finite()),
-        Value::List(xs) => !xs.is_empty() && xs.iter().all(v_is_finite),
-        _ => false,
-    }
-}
-
-/// `i+1` made no progress (`i` is ±inf — undef/NaN shapes raise in `select` before reaching this): the
-/// reference would recurse forever, which the interpreter only stops via its step budget. LOUD [`Err`]
-/// beats a native hang; a real model never constructs this.
-fn no_progress(i: &Value, next: &Value) -> bool {
-    match (i, next) {
-        (Value::Num(a), Value::Num(b)) => a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
-        _ => false,
-    }
-}
-fn non_terminating(name: &str) -> crate::Error {
-    crate::Error::Eval(format!(
-        "{name}: non-terminating recursion (the interpreter would only stop at its step budget)"
-    ))
 }
 
 /// Everything fab-lang's OWN library contributes to a registry — the hand [`REGISTRY`], the

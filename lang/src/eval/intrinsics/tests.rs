@@ -632,7 +632,7 @@ fn fast_equals_slow_shape_band() {
             );
             assert!(
                 same_result(
-                    &super::is_consistent(&args),
+                    &super::is_consistent(&crate::surface::NoClosures, &args),
                     &interpret_with_deps(ic_ref, &[lp_ref], &args)
                 ),
                 "is_consistent diverged on ({a:?}, {b:?})"
@@ -642,7 +642,7 @@ fn fast_equals_slow_shape_band() {
         let args = [a.clone()];
         assert!(
             same_result(
-                &super::is_consistent(&args),
+                &super::is_consistent(&crate::surface::NoClosures, &args),
                 &interpret_with_deps(ic_ref, &[lp_ref], &args)
             ),
             "is_consistent/1 diverged on {a:?}"
@@ -665,7 +665,7 @@ fn fast_equals_slow_shape_band() {
                 let args = [v.clone(), n.clone(), fill.clone()];
                 assert!(
                     same_result(
-                        &super::force_list(&args),
+                        &super::force_list(&crate::surface::NoClosures, &args),
                         &interpret_with_deps(fl_ref, &[], &args)
                     ),
                     "force_list diverged on ({v:?}, {n:?}, {fill:?})"
@@ -675,7 +675,7 @@ fn fast_equals_slow_shape_band() {
         let args = [v.clone()]; // defaults: n=1, fill undef
         assert!(
             same_result(
-                &super::force_list(&args),
+                &super::force_list(&crate::surface::NoClosures, &args),
                 &interpret_with_deps(fl_ref, &[], &args)
             ),
             "force_list/1 diverged on {v:?}"
@@ -1153,7 +1153,6 @@ fn fast_equals_slow_aggregate_band() {
         .copied()
         .chain([reference_of("_sum").unwrap()])
         .collect();
-    let st_ref = reference_of("_sum").unwrap();
     let m22 = Value::list(vec![
         Value::num_list(vec![1.0, 2.0]),
         Value::num_list(vec![3.0, 4.0]),
@@ -1186,30 +1185,7 @@ fn fast_equals_slow_aggregate_band() {
                 "sum diverged on ({v:?}, dflt {dflt:?})"
             );
         }
-        // a non-list v makes the reference recurse forever (len(v) is undef) — the oracle would HANG,
-        // so those inputs are asserted native-side only below.
-        if matches!(v, Value::List(_) | Value::NumList(_)) {
-            let args = [v.clone(), Value::Num(0.0)];
-            assert!(
-                same_result(
-                    &super::sum_tail(&args),
-                    &interpret_with_deps_consts(st_ref, &[], &consts, &args)
-                ),
-                "_sum diverged on {v:?}"
-            );
-        }
     }
-    // the non-terminating shapes: LOUD Err, never a hang (the interpreter only stops at its budget).
-    assert!(super::sum_tail(&[Value::Num(7.0), Value::Num(0.0)]).is_err());
-    assert!(super::sum_tail(&[Value::Undef, Value::Num(0.0)]).is_err());
-    assert!(
-        super::sum_tail(&[
-            Value::num_list(vec![1.0]),
-            Value::Num(0.0),
-            Value::Num(f64::NEG_INFINITY)
-        ])
-        .is_err()
-    );
 
     // unit — ordinary, near-zero (default raise vs custom error value), non-vector raise, List-shaped.
     let unit_ref = reference_of("unit").unwrap();
@@ -1300,7 +1276,7 @@ fn fast_equals_slow_aggregate_band() {
         let args = [t.clone()];
         assert!(
             same_result(
-                &super::is_2d_transform(&args),
+                &super::is_2d_transform(&crate::surface::NoClosures, &args),
                 &interpret_with_deps_consts(i2t_ref, &[], &consts, &args)
             ),
             "is_2d_transform diverged on {t:?}"
@@ -1325,76 +1301,6 @@ fn fast_equals_slow_aggregate_band() {
                 "_apply diverged on ({t:?}, {p:?})"
             );
         }
-    }
-
-    // _bt_search — a real 2-level tree over five 2D points, radii that hit the prune / root-hit / leaf
-    // lanes, plus the malformed-tree raises.
-    let bt_ref = reference_of("_bt_search").unwrap();
-    let bt_deps = [
-        reference_of("is_vector").unwrap(),
-        reference_of("is_finite").unwrap(),
-        reference_of("is_nan").unwrap(),
-        reference_of("all_nonzero").unwrap(),
-    ];
-    let points = Value::list(vec![
-        p2(0.0, 0.0),
-        p2(1.0, 0.0),
-        p2(0.0, 1.0),
-        p2(5.0, 5.0),
-        p2(5.2, 5.0),
-    ]);
-    // node: [pivot_idx, radius, left, right]; leaves carry index lists
-    let leaf = |ids: &[f64]| Value::list(vec![Value::num_list(ids.to_vec())]);
-    let tree = Value::list(vec![
-        Value::Num(0.0),
-        Value::Num(1.5),
-        leaf(&[1.0, 2.0]),
-        Value::list(vec![
-            Value::Num(3.0),
-            Value::Num(0.5),
-            leaf(&[4.0]),
-            leaf(&[]),
-        ]),
-    ]);
-    let bt_cases: Vec<Vec<Value>> = vec![
-        vec![p2(0.0, 0.0), Value::Num(1.1), points.clone(), tree.clone()],
-        vec![p2(0.0, 0.0), Value::Num(0.1), points.clone(), tree.clone()],
-        vec![p2(5.0, 5.0), Value::Num(0.5), points.clone(), tree.clone()],
-        vec![p2(9.0, 9.0), Value::Num(0.1), points.clone(), tree.clone()],
-        vec![
-            p2(0.0, 0.0),
-            Value::Num(1.1),
-            points.clone(),
-            leaf(&[0.0, 3.0]),
-        ],
-        vec![p2(0.0, 0.0), Value::Num(1.1), points.clone(), leaf(&[])],
-        vec![
-            p2(0.0, 0.0),
-            Value::Num(1.1),
-            points.clone(),
-            Value::Num(7.0),
-        ],
-        vec![
-            p2(0.0, 0.0),
-            Value::Num(1.1),
-            points.clone(),
-            Value::list(vec![
-                Value::Num(0.0),
-                Value::Num(1.0),
-                leaf(&[]),
-                Value::Num(9.0),
-            ]),
-        ],
-        vec![p2(0.0, 0.0), Value::Undef, points.clone(), tree.clone()],
-    ];
-    for args in &bt_cases {
-        assert!(
-            same_result(
-                &super::bt_search(&crate::surface::NoClosures, args),
-                &interpret_with_deps_consts(bt_ref, &bt_deps, &consts, args)
-            ),
-            "_bt_search diverged on {args:?}"
-        );
     }
 
     // vector_angle — two-vector, three-point, paired-list, and the assert lanes (mismatched shapes,
@@ -1647,26 +1553,6 @@ fn fast_equals_slow_band5_batch1() {
 fn fast_equals_slow_band5_batch2() {
     let consts = [("_EPSILON", Value::Num(1e-9))];
 
-    // ident / the axis rotations — sizes, angle values incl. the snap-relevant right angles, raises.
-    let id_ref = reference_of("ident").unwrap();
-    for n in [
-        Value::Num(0.0),
-        Value::Num(1.0),
-        Value::Num(3.0),
-        Value::Num(4.0),
-        Value::Num(2.5),
-        Value::Undef,
-        Value::string("n"),
-    ] {
-        let args = [n.clone()];
-        assert!(
-            same_result(
-                &super::ident(&args),
-                &interpret_with_deps_consts(id_ref, &[], &consts, &args)
-            ),
-            "ident diverged on {n:?}"
-        );
-    }
     let rot_deps = [
         reference_of("is_finite").unwrap(),
         reference_of("is_nan").unwrap(),
@@ -1753,9 +1639,30 @@ fn fast_equals_slow_band5_batch2() {
         );
     }
 
+    // ident — sizes, the non-integer/undef/string raises. AR.21.2 repointed it at the GENERATED
+    // native under the same name; the hand one it used to call is deleted.
+    let id_ref = reference_of("ident").unwrap();
+    for n in [
+        Value::Num(0.0),
+        Value::Num(1.0),
+        Value::Num(3.0),
+        Value::Num(4.0),
+        Value::Num(2.5),
+        Value::Undef,
+        Value::string("n"),
+    ] {
+        let args = [n.clone()];
+        assert!(
+            same_result(
+                &super::ident(&crate::surface::NoClosures, &args),
+                &interpret_with_deps_consts(id_ref, &[], &consts, &args)
+            ),
+            "ident diverged on {n:?}"
+        );
+    }
+
     // in_list / is_path — hits, misses, idx-column lookups, the all-hits retry (a first hit that
     // doesn't match), raises, and is_path's dim/fast lanes.
-    let il_ref = reference_of("in_list").unwrap();
     let il_deps = [
         reference_of("is_finite").unwrap(),
         reference_of("is_nan").unwrap(),
@@ -1766,6 +1673,7 @@ fn fast_equals_slow_band5_batch2() {
         Value::list(vec![Value::Num(1.0), Value::string("a")]),
         Value::list(vec![Value::Num(2.0), Value::string("b")]),
     ]);
+    let il_ref = reference_of("in_list").unwrap();
     let il_cases: Vec<Vec<Value>> = vec![
         vec![Value::Num(5.0), nums.clone()],
         vec![Value::Num(4.0), nums.clone()],
@@ -1780,7 +1688,7 @@ fn fast_equals_slow_band5_batch2() {
     for args in &il_cases {
         assert!(
             same_result(
-                &super::in_list(args),
+                &super::in_list(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(il_ref, &il_deps, &consts, args)
             ),
             "in_list diverged on {args:?}"
@@ -1861,178 +1769,20 @@ fn fast_equals_slow_fab_poc_isup() {
     }
 }
 
+/// O.9 tree 2b — what survives AR.21.2 of the transforms band. `rot` was the reason this test was
+/// enormous (a 47-entry dep closure, `_NO_ARG`, both matrix parities) and it is DELETED with the
+/// hand tier, so the product takes BOSL2's transpiled `rot` instead. What stays is the two builders
+/// that still ship as generated natives, each against its own reference and its own deps rather
+/// than borrowing rot's closure: `affine3d_translate` (sizes, the 2-vector short form, the empty
+/// list, the non-list raise) and `affine3d_rot_by_axis` (the angle lanes plus the approx-zero
+/// identity shortcut, which is the branch its `UP` const-guard exists for).
 #[test]
-fn fast_equals_slow_o9_tree2a_apply() {
-    let consts = [("_EPSILON", Value::Num(1e-9))];
-    let ap_ref = reference_of("apply").unwrap();
-    let ap_deps = [
-        reference_of("_apply").unwrap(),
-        reference_of("is_matrix").unwrap(),
-        reference_of("is_vector").unwrap(),
-        reference_of("is_finite").unwrap(),
-        reference_of("is_nan").unwrap(),
-        reference_of("all_nonzero").unwrap(),
-        reference_of("is_consistent").unwrap(),
-        reference_of("_list_pattern").unwrap(),
-        reference_of("is_2d_transform").unwrap(),
-        reference_of("is_def").unwrap(),
-        pin_reference_of("is_vnf").unwrap(),
-        pin_reference_of("determinant").unwrap(),
-        pin_reference_of("det2").unwrap(),
-        pin_reference_of("det3").unwrap(),
-        pin_reference_of("det4").unwrap(),
-        pin_reference_of("reverse").unwrap(),
-        pin_reference_of("vnf_reverse_faces").unwrap(),
-        pin_reference_of("str_join").unwrap(),
-    ];
-    let p3 = |x: f64, y: f64, z: f64| Value::num_list(vec![x, y, z]);
-    let m4 = |rows: [[f64; 4]; 4]| {
-        let rows: Vec<Value> = rows.iter().map(|r| Value::num_list(r.to_vec())).collect();
-        Value::list(rows)
-    };
-    let translate = m4([
-        [1.0, 0.0, 0.0, 5.0],
-        [0.0, 1.0, 0.0, -3.0],
-        [0.0, 0.0, 1.0, 2.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]);
-    let mirror_x = m4([
-        [-1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]);
-    let tet = Value::list(vec![
-        Value::list(vec![
-            p3(0.0, 0.0, 0.0),
-            p3(1.0, 0.0, 0.0),
-            p3(0.0, 1.0, 0.0),
-            p3(0.0, 0.0, 1.0),
-        ]),
-        Value::list(vec![
-            Value::num_list(vec![0.0, 2.0, 1.0]),
-            Value::num_list(vec![0.0, 1.0, 3.0]),
-            Value::num_list(vec![1.0, 2.0, 3.0]),
-            Value::num_list(vec![0.0, 3.0, 2.0]),
-        ]),
-    ]);
-    // a degenerate-but-is_vnf-passing VNF with a STRING face — the str_join lane under a mirror
-    let stringy = Value::list(vec![
-        Value::list(vec![
-            p3(0.0, 0.0, 0.0),
-            p3(1.0, 0.0, 0.0),
-            p3(0.0, 1.0, 0.0),
-        ]),
-        Value::list(vec![
-            Value::num_list(vec![0.0, 1.0, 2.0]),
-            Value::string("abc"),
-        ]),
-    ]);
-    let patch = Value::list(vec![
-        Value::list(vec![p3(0.0, 0.0, 0.0), p3(1.0, 0.0, 0.0)]),
-        Value::list(vec![p3(0.0, 1.0, 0.0), p3(1.0, 1.0, 0.0)]),
-    ]);
-    let pts = Value::list(vec![p3(1.0, 2.0, 3.0), p3(-1.0, 0.5, 0.0)]);
-    let cases: Vec<Vec<Value>> = vec![
-        vec![translate.clone(), Value::list(vec![])],
-        vec![translate.clone(), p3(1.0, 2.0, 3.0)],
-        vec![translate.clone(), tet.clone()],
-        vec![mirror_x.clone(), tet.clone()],
-        vec![mirror_x.clone(), stringy.clone()],
-        vec![translate.clone(), patch.clone()],
-        vec![translate.clone(), pts.clone()],
-        vec![Value::Num(5.0), pts.clone()],
-        vec![translate.clone(), Value::Num(7.0)],
-    ];
-    for args in &cases {
-        assert!(
-            same_result(
-                &super::apply(&crate::surface::NoClosures, args),
-                &interpret_with_deps_consts(ap_ref, &ap_deps, &consts, args)
-            ),
-            "apply diverged on {args:?}"
-        );
-    }
-}
-
-#[test]
-fn fast_equals_slow_o9_tree2b_rot() {
-    let no_arg = Value::list(vec![
-        Value::Bool(true),
-        Value::num_list(vec![123_232_345.0]),
-        Value::Bool(false),
-    ]);
+fn fast_equals_slow_o9_affine3d_builders() {
     let consts = [
         ("_EPSILON", Value::Num(1e-9)),
         ("UP", Value::num_list(vec![0.0, 0.0, 1.0])),
-        ("RIGHT", Value::num_list(vec![1.0, 0.0, 0.0])),
-        ("_NO_ARG", no_arg.clone()),
     ];
-    // rot's whole closure as the oracle program
-    let deps: Vec<&str> = [
-        "point3d",
-        "affine3d_rot_from_to",
-        "affine3d_rot_by_axis",
-        "affine3d_zrot",
-        "affine3d_yrot",
-        "affine3d_xrot",
-        "affine3d_translate",
-        "affine3d_identity",
-        "ident",
-        "default",
-        "apply",
-        "_apply",
-        "is_2d_transform",
-        "vector_axis",
-        "v_abs",
-        "v_theta",
-        "point2d",
-        "vector_angle",
-        "same_shape",
-        "is_def",
-        "is_matrix",
-        "is_consistent",
-        "_list_pattern",
-        "unit",
-        "approx",
-        "idx",
-        "posmod",
-        "is_vector",
-        "all_nonzero",
-        "is_finite",
-        "is_nan",
-    ]
-    .iter()
-    .map(|n| reference_of(n).expect(n))
-    .chain(
-        [
-            "move",
-            "rot_inverse",
-            "hstack",
-            "all",
-            "_all_bool",
-            "is_func",
-            "min_length",
-            "max_length",
-            "determinant",
-            "det2",
-            "det3",
-            "det4",
-            "is_vnf",
-            "reverse",
-            "vnf_reverse_faces",
-            "str_join",
-            "constrain",
-        ]
-        .iter()
-        .map(|n| pin_reference_of(n).expect(n)),
-    )
-    .collect();
     let p3 = |x: f64, y: f64, z: f64| Value::num_list(vec![x, y, z]);
-    let u = Value::Undef;
-    let pts = Value::list(vec![p3(1.0, 2.0, 3.0), p3(-1.0, 0.5, 0.0)]);
-
-    // translate / rot_by_axis smalls first
     let tr_ref = reference_of("affine3d_translate").unwrap();
     let tr_deps = [reference_of("default").unwrap()];
     for v in [
@@ -2050,7 +1800,21 @@ fn fast_equals_slow_o9_tree2b_rot() {
             "affine3d_translate diverged on {v:?}"
         );
     }
+
     let ba_ref = reference_of("affine3d_rot_by_axis").unwrap();
+    let ba_deps: Vec<&str> = [
+        "is_finite",
+        "is_nan",
+        "is_vector",
+        "approx",
+        "unit",
+        "affine3d_identity",
+        "ident",
+        "all_nonzero",
+    ]
+    .iter()
+    .map(|n| reference_of(n).expect(n))
+    .collect();
     let ba_cases: Vec<Vec<Value>> = vec![
         vec![p3(0.0, 0.0, 1.0), Value::Num(45.0)],
         vec![p3(1.0, 1.0, 1.0), Value::Num(120.0)],
@@ -2062,81 +1826,10 @@ fn fast_equals_slow_o9_tree2b_rot() {
     for args in &ba_cases {
         assert!(
             same_result(
-                &super::affine3d_rot_by_axis(&crate::surface::NoClosures, args),
-                &interpret_with_deps_consts(ba_ref, &deps, &consts, args)
+                &with_native(ba_ref, &ba_deps, &consts, |fx, f| f(fx, args)),
+                &interpret_with_deps_consts(ba_ref, &ba_deps, &consts, args)
             ),
             "affine3d_rot_by_axis diverged on {args:?}"
-        );
-    }
-
-    // rot — every lane: scalar, Euler vector, v-axis, from/to, cp conjugation, reverse (both parities of
-    // matrix), p application, explicit-sentinel p, and the assert lanes.
-    let rot_ref = reference_of("rot").unwrap();
-    let cases: Vec<Vec<Value>> = vec![
-        vec![Value::Num(37.0)],
-        vec![p3(30.0, 40.0, 50.0)],
-        vec![Value::Num(45.0), p3(1.0, 1.0, 0.0)],
-        vec![Value::Num(30.0), u.clone(), p3(1.0, 2.0, 3.0)],
-        vec![
-            Value::Num(15.0),
-            u.clone(),
-            u.clone(),
-            p3(0.0, 0.0, 1.0),
-            p3(1.0, 0.0, 0.0),
-        ],
-        vec![
-            Value::Num(0.0),
-            u.clone(),
-            u.clone(),
-            p3(0.0, 0.0, 1.0),
-            p3(0.0, 0.0, 2.0),
-        ],
-        vec![
-            Value::Num(37.0),
-            u.clone(),
-            u.clone(),
-            u.clone(),
-            u.clone(),
-            Value::Bool(true),
-        ],
-        vec![
-            Value::Num(37.0),
-            u.clone(),
-            u.clone(),
-            u.clone(),
-            u.clone(),
-            Value::Bool(false),
-            pts.clone(),
-        ],
-        vec![
-            Value::Num(37.0),
-            u.clone(),
-            u.clone(),
-            u.clone(),
-            u.clone(),
-            Value::Bool(false),
-            no_arg.clone(),
-        ],
-        vec![Value::Num(30.0), p3(0.0, 0.0, 0.0)],
-        vec![Value::string("a")],
-        vec![Value::Num(30.0), u.clone(), u.clone(), p3(1.0, 0.0, 0.0)],
-        vec![
-            p3(10.0, 20.0, 30.0),
-            u.clone(),
-            u.clone(),
-            u.clone(),
-            u.clone(),
-            Value::Bool(true),
-            pts.clone(),
-        ],
-    ];
-    for args in &cases {
-        assert!(
-            same_result(
-                &with_native(rot_ref, &deps, &consts, |fx, f| f(fx, args)),
-                &interpret_with_deps_consts(rot_ref, &deps, &consts, args)
-            ),
-            "rot diverged on {args:?}"
         );
     }
 }
@@ -2209,7 +1902,7 @@ fn fast_equals_slow_o9_tree1() {
     let ai_ref = reference_of("affine3d_identity").unwrap();
     assert!(
         same_result(
-            &super::affine3d_identity(&[]),
+            &super::affine3d_identity(&crate::surface::NoClosures, &[]),
             &interpret_with_deps_consts(ai_ref, &[reference_of("ident").unwrap()], &consts, &[])
         ),
         "affine3d_identity diverged"
@@ -2773,655 +2466,6 @@ fn explain_classifies_wired_drift_and_unregistered() {
     // NotRegistered: an ordinary function.
     let (pn, bn) = parse_fn("function ordinary(x) = x + 1;");
     assert_eq!(super::classify("ordinary", &pn, &bn), Plan::NotRegistered);
-}
-
-/// O.10a — the region-monster band's DEPENDENCY tier, each native vs interpreting its pinned
-/// reference: list handling (`list_wrap`/`are_ends_equal`/`flatten`/`column`/`count`), stats
-/// (`mean`/`min_index`/`max_index`), linalg (`transpose`/`pointlist_bounds`), the segment intersection
-/// (`_general_line_intersection`), and the lexicographic `_sort_vectors`. Exotic shapes ride along
-/// (ragged rows, NaN cells, `-0.0` — the 4-lane-dot sign case lives in `pointlist_bounds`).
-#[test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one battery per band tier, like its siblings"
-)]
-fn fast_equals_slow_o10_dep_tier() {
-    let consts = [("_EPSILON", Value::Num(1e-9))];
-    let approx_deps = [
-        reference_of("idx").unwrap(),
-        reference_of("posmod").unwrap(),
-        reference_of("is_finite").unwrap(),
-        reference_of("is_nan").unwrap(),
-    ];
-    let p = |xs: &[f64]| Value::num_list(xs.to_vec());
-
-    // list_wrap / are_ends_equal — open, closed, near-closed (eps), short, exotic.
-    let lw_ref = pin_reference_of("list_wrap").unwrap();
-    let lw_deps: Vec<&str> = approx_deps
-        .iter()
-        .copied()
-        .chain([
-            pin_reference_of("are_ends_equal").unwrap(),
-            reference_of("approx").unwrap(),
-        ])
-        .collect();
-    let square_open = Value::list(vec![p(&[0.0, 0.0]), p(&[10.0, 0.0]), p(&[10.0, 10.0])]);
-    let square_closed = Value::list(vec![p(&[0.0, 0.0]), p(&[10.0, 0.0]), p(&[0.0, 0.0])]);
-    let near_closed = Value::list(vec![p(&[0.0, 0.0]), p(&[10.0, 0.0]), p(&[0.0, 5e-10])]);
-    let one_pt = Value::list(vec![p(&[1.0, 2.0])]);
-    let raw_nums = Value::num_list(vec![1.0, 2.0, 3.0]);
-    for list in [
-        &square_open,
-        &square_closed,
-        &near_closed,
-        &one_pt,
-        &raw_nums,
-        &Value::Num(3.0),
-    ] {
-        let args = vec![list.clone(), Value::Num(1e-9)];
-        assert!(
-            same_result(
-                &with_fx(lw_ref, &lw_deps, &consts, |fx, _| {
-                    super::regions::list_wrap_val(fx, list, &Value::Num(1e-9))
-                }),
-                &interpret_with_deps_consts(lw_ref, &lw_deps, &consts, &args)
-            ),
-            "list_wrap diverged on {list:?}"
-        );
-        let ae_ref = pin_reference_of("are_ends_equal").unwrap();
-        let ae_deps: Vec<&str> = approx_deps
-            .iter()
-            .copied()
-            .chain([reference_of("approx").unwrap()])
-            .collect();
-        assert!(
-            same_result(
-                &with_fx(ae_ref, &ae_deps, &consts, |fx, _| {
-                    super::regions::are_ends_equal_val(fx, list, &Value::Num(1e-9))
-                }),
-                &interpret_with_deps_consts(ae_ref, &ae_deps, &consts, &args)
-            ),
-            "are_ends_equal diverged on {list:?}"
-        );
-    }
-
-    // _general_line_intersection — crossing, parallel, near-parallel, collinear, degenerate.
-    let gli_ref = pin_reference_of("_general_line_intersection").unwrap();
-    let gli_deps: Vec<&str> = approx_deps
-        .iter()
-        .copied()
-        .chain([reference_of("approx").unwrap()])
-        .collect();
-    let seg = |a: [f64; 2], b: [f64; 2]| Value::list(vec![p(&a), p(&b)]);
-    let cases = [
-        (seg([0.0, 0.0], [10.0, 0.0]), seg([5.0, -5.0], [5.0, 5.0])),
-        (seg([0.0, 0.0], [10.0, 0.0]), seg([0.0, 1.0], [10.0, 1.0])), // parallel
-        (seg([0.0, 0.0], [10.0, 0.0]), seg([0.0, 0.0], [10.0, 1e-12])), // near-parallel
-        (seg([0.0, 0.0], [10.0, 0.0]), seg([3.0, 0.0], [7.0, 0.0])),  // collinear
-        (seg([2.0, 2.0], [2.0, 2.0]), seg([0.0, 0.0], [4.0, 4.0])),   // zero-length s1
-        (seg([-0.0, 1.0], [4.0, -3.0]), seg([0.0, -1.0], [4.0, 3.0])), // -0.0 endpoint
-    ];
-    for (s1, s2) in &cases {
-        let args = vec![s1.clone(), s2.clone(), Value::Num(1e-9)];
-        assert!(
-            same_result(
-                &super::regions::gli_val(&crate::surface::NoClosures, s1, s2, &Value::Num(1e-9)),
-                &interpret_with_deps_consts(gli_ref, &gli_deps, &consts, &args)
-            ),
-            "_general_line_intersection diverged on {s1:?} x {s2:?}"
-        );
-    }
-
-    // flatten / column / count — plain, nested, ragged, exotic.
-    let fl_ref = pin_reference_of("flatten").unwrap();
-    let nested = Value::list(vec![
-        Value::list(vec![Value::Num(1.0), Value::Num(2.0)]),
-        p(&[3.0, 4.0]),
-        Value::Num(5.0),
-        Value::string("s"),
-        Value::list(vec![Value::list(vec![Value::Num(6.0)])]),
-    ]);
-    for l in [&nested, &raw_nums, &Value::Num(7.0), &Value::Undef] {
-        assert!(
-            same_result(
-                &super::regions::flatten_val(l),
-                &interpret_with_deps_consts(fl_ref, &[], &consts, std::slice::from_ref(l))
-            ),
-            "flatten diverged on {l:?}"
-        );
-    }
-    let col_ref = pin_reference_of("column").unwrap();
-    let col_deps = [
-        pin_reference_of("is_int").unwrap(),
-        reference_of("is_finite").unwrap(),
-        reference_of("is_nan").unwrap(),
-    ];
-    let ragged = Value::list(vec![p(&[1.0, 2.0, 3.0]), p(&[4.0]), p(&[5.0, 6.0])]);
-    for (m, i) in [
-        (&square_open, Value::Num(0.0)),
-        (&square_open, Value::Num(1.0)),
-        (&ragged, Value::Num(1.0)),
-        (&square_open, Value::Num(-1.0)),
-        (&square_open, Value::Num(0.5)),
-        (&Value::Num(1.0), Value::Num(0.0)),
-    ] {
-        let args = vec![m.clone(), i.clone()];
-        assert!(
-            same_result(
-                &super::regions::column_val(m, &i),
-                &interpret_with_deps_consts(col_ref, &col_deps, &consts, &args)
-            ),
-            "column diverged on {m:?}[{i:?}]"
-        );
-    }
-    let cnt_ref = pin_reference_of("count").unwrap();
-    for (n, s, step, rev) in [
-        (
-            Value::Num(4.0),
-            Value::Num(0.0),
-            Value::Num(1.0),
-            Value::Bool(false),
-        ),
-        (
-            Value::Num(4.0),
-            Value::Num(2.0),
-            Value::Num(3.0),
-            Value::Bool(true),
-        ),
-        (
-            raw_nums.clone(),
-            Value::Num(0.0),
-            Value::Num(1.0),
-            Value::Bool(false),
-        ),
-        (
-            Value::Num(0.0),
-            Value::Num(0.0),
-            Value::Num(1.0),
-            Value::Bool(false),
-        ),
-        (
-            Value::Num(2.5),
-            Value::Num(0.0),
-            Value::Num(1.0),
-            Value::Bool(false),
-        ),
-        (
-            Value::Num(2.5),
-            Value::Num(0.0),
-            Value::Num(1.0),
-            Value::Bool(true),
-        ),
-    ] {
-        let args = vec![n.clone(), s.clone(), step.clone(), rev.clone()];
-        assert!(
-            same_result(
-                &super::regions::count_val(&n, &s, &step, &rev),
-                &interpret_with_deps_consts(cnt_ref, &[], &consts, &args)
-            ),
-            "count diverged on {args:?}"
-        );
-    }
-
-    // mean — numbers, vectors (the vector-sum lane), empty (raise), inconsistent (raise).
-    let mean_ref = pin_reference_of("mean").unwrap();
-    let mean_deps = [
-        reference_of("sum").unwrap(),
-        reference_of("_sum").unwrap(),
-        reference_of("is_consistent").unwrap(),
-        reference_of("_list_pattern").unwrap(),
-        reference_of("same_shape").unwrap(),
-        reference_of("is_finite").unwrap(),
-        reference_of("is_nan").unwrap(),
-        reference_of("is_vector").unwrap(),
-    ];
-    let vecs = Value::list(vec![p(&[1.0, 2.0]), p(&[3.0, 4.0]), p(&[5.0, 6.0])]);
-    let mixed = Value::list(vec![Value::Num(1.0), p(&[2.0, 3.0])]);
-    for v in [
-        &raw_nums,
-        &vecs,
-        &mixed,
-        &Value::list(vec![]),
-        &Value::Num(2.0),
-    ] {
-        assert!(
-            same_result(
-                &super::regions::mean_val(&crate::surface::NoClosures, v),
-                &interpret_with_deps_consts(mean_ref, &mean_deps, &consts, std::slice::from_ref(v))
-            ),
-            "mean diverged on {v:?}"
-        );
-    }
-
-    // min_index / max_index — plain, ties (first match), negatives, non-vector (raise).
-    let iv_deps = [
-        reference_of("is_vector").unwrap(),
-        reference_of("is_finite").unwrap(),
-        reference_of("is_nan").unwrap(),
-        reference_of("all_nonzero").unwrap(),
-        reference_of("idx").unwrap(),
-        reference_of("posmod").unwrap(),
-    ];
-    let mini_ref = pin_reference_of("min_index").unwrap();
-    let maxi_ref = pin_reference_of("max_index").unwrap();
-    for v in [
-        &p(&[3.0, 1.0, 2.0]),
-        &p(&[1.0, 1.0, 1.0]),
-        &p(&[-5.0, 0.0, -5.0]),
-        &raw_nums,
-        &mixed,
-        &Value::Num(4.0),
-    ] {
-        assert!(
-            same_result(
-                &super::regions::min_index_val(v),
-                &interpret_with_deps_consts(mini_ref, &iv_deps, &consts, std::slice::from_ref(v))
-            ),
-            "min_index diverged on {v:?}"
-        );
-        assert!(
-            same_result(
-                &super::regions::max_index_val(v),
-                &interpret_with_deps_consts(maxi_ref, &iv_deps, &consts, std::slice::from_ref(v))
-            ),
-            "max_index diverged on {v:?}"
-        );
-    }
-
-    // transpose (1-arg shape) — matrix, vector pass-through, ragged (raise), empty (raise).
-    let tr_ref = pin_reference_of("transpose").unwrap();
-    let tr_deps: Vec<&str> = iv_deps.to_vec();
-    for m in [
-        &square_open,
-        &vecs,
-        &raw_nums,
-        &ragged,
-        &Value::list(vec![]),
-        &Value::Num(1.0),
-    ] {
-        assert!(
-            same_result(
-                &super::regions::transpose_val(m),
-                &interpret_with_deps_consts(tr_ref, &tr_deps, &consts, std::slice::from_ref(m))
-            ),
-            "transpose diverged on {m:?}"
-        );
-    }
-
-    // pointlist_bounds — 2D/3D, -0.0 coords (the 4-lane dot sign-of-zero case), invalid (raise).
-    let pb_ref = pin_reference_of("pointlist_bounds").unwrap();
-    let pb_deps: Vec<&str> = iv_deps
-        .iter()
-        .copied()
-        .chain([
-            reference_of("is_path").unwrap(),
-            reference_of("is_matrix").unwrap(),
-            reference_of("is_consistent").unwrap(),
-            reference_of("_list_pattern").unwrap(),
-            reference_of("same_shape").unwrap(),
-            reference_of("in_list").unwrap(),
-            reference_of("force_list").unwrap(),
-            reference_of("ident").unwrap(),
-            pin_reference_of("transpose").unwrap(),
-        ])
-        .collect();
-    let pts_2d = Value::list(vec![p(&[1.0, -2.0]), p(&[-3.0, 4.0]), p(&[0.5, 0.5])]);
-    let pts_negz = Value::list(vec![p(&[-0.0, 1.0]), p(&[2.0, -0.0])]);
-    let pts_3d = Value::list(vec![p(&[1.0, 2.0, 3.0]), p(&[-1.0, -2.0, -3.0])]);
-    for pts in [&pts_2d, &pts_negz, &pts_3d, &raw_nums, &Value::Num(1.0)] {
-        assert!(
-            same_result(
-                &super::regions::pointlist_bounds_val(&crate::surface::NoClosures, pts),
-                &interpret_with_deps_consts(pb_ref, &pb_deps, &consts, std::slice::from_ref(pts))
-            ),
-            "pointlist_bounds diverged on {pts:?}"
-        );
-    }
-
-    // _sort_vectors — shuffles, duplicate first columns (the _i+1 lane), -0.0/0.0 ties, NaN cells
-    // (rows in NO partition — dropped), ragged rows, singletons.
-    let sv_ref = pin_reference_of("_sort_vectors").unwrap();
-    let shuffled = Value::list(vec![
-        p(&[3.0, 1.0]),
-        p(&[1.0, 9.0]),
-        p(&[1.0, 2.0]),
-        p(&[2.0, 0.0]),
-        p(&[1.0, 2.0]),
-    ]);
-    let zero_ties = Value::list(vec![p(&[0.0, 2.0]), p(&[-0.0, 1.0]), p(&[0.0, 0.0])]);
-    let with_nan = Value::list(vec![p(&[1.0, 2.0]), p(&[f64::NAN, 0.0]), p(&[0.5, 1.0])]);
-    let ragged_rows = Value::list(vec![p(&[2.0, 1.0]), p(&[2.0]), p(&[1.0, 5.0, 9.0])]);
-    for arr in [
-        &shuffled,
-        &zero_ties,
-        &with_nan,
-        &ragged_rows,
-        &Value::list(vec![]),
-        &one_pt,
-    ] {
-        for il in [
-            &Value::Undef,
-            &Value::num_list(vec![1.0, 0.0]),
-            &Value::num_list(vec![1.0]),
-            &Value::num_list(vec![]),
-        ] {
-            let args = vec![arr.clone(), (*il).clone()];
-            assert!(
-                same_result(
-                    &super::regions::sort_vectors_val(arr, il),
-                    &interpret_with_deps_consts(sv_ref, &[], &consts, &args)
-                ),
-                "_sort_vectors diverged on {arr:?} idxlist={il:?}"
-            );
-        }
-    }
-}
-
-/// O.10b — `vector_search` + `_bt_tree`, native vs interpreted, BOTH branches: the ≤400-point
-/// quadratic scan AND the >400-point ball tree (they return indices in DIFFERENT orders — tree
-/// order is load-bearing for `_rri`'s downstream `search`/`select`), plus the pre-built
-/// `[points, tree]` target form and the empty/multi-query shapes.
-#[test]
-fn fast_equals_slow_o10_vector_search() {
-    let consts = [("_EPSILON", Value::Num(1e-9))];
-    let p = |xs: &[f64]| Value::num_list(xs.to_vec());
-    let deps: Vec<&str> = vec![
-        pin_reference_of("_bt_tree").unwrap(),
-        reference_of("_bt_search").unwrap(),
-        pin_reference_of("pointlist_bounds").unwrap(),
-        pin_reference_of("max_index").unwrap(),
-        pin_reference_of("min_index").unwrap(),
-        pin_reference_of("mean").unwrap(),
-        pin_reference_of("count").unwrap(),
-        pin_reference_of("transpose").unwrap(),
-        reference_of("ident").unwrap(),
-        reference_of("select").unwrap(),
-        reference_of("idx").unwrap(),
-        reference_of("sum").unwrap(),
-        reference_of("_sum").unwrap(),
-        reference_of("is_path").unwrap(),
-        reference_of("is_matrix").unwrap(),
-        reference_of("is_vector").unwrap(),
-        reference_of("is_consistent").unwrap(),
-        reference_of("_list_pattern").unwrap(),
-        reference_of("same_shape").unwrap(),
-        reference_of("in_list").unwrap(),
-        reference_of("force_list").unwrap(),
-        reference_of("is_finite").unwrap(),
-        reference_of("is_nan").unwrap(),
-        pin_reference_of("is_range").unwrap(),
-        reference_of("all_nonzero").unwrap(),
-        reference_of("posmod").unwrap(),
-        reference_of("approx").unwrap(),
-    ];
-    let vs_ref = pin_reference_of("vector_search").unwrap();
-
-    // A deterministic pseudo-random 2D cloud (fixed recurrence — no rand dep): 30 points for the
-    // quadratic branch, 420 for the tree branch.
-    let cloud = |n: usize| -> Value {
-        let mut pts = Vec::new();
-        let mut x: f64 = 3.7;
-        for _ in 0..n {
-            x = (x * 73.5 + 11.25) % 97.0;
-            let y = (x * 31.5 + 5.125) % 89.0;
-            pts.push(p(&[x, y]));
-        }
-        Value::list(pts)
-    };
-    let small = cloud(30);
-    let big = cloud(420);
-    let q1 = p(&[50.0, 40.0]);
-    let qs = Value::list(vec![p(&[50.0, 40.0]), p(&[10.0, 10.0])]);
-    let empty = Value::list(vec![]);
-
-    let cases: Vec<(Value, Value, Value)> = vec![
-        (q1.clone(), Value::Num(20.0), small.clone()),
-        (qs.clone(), Value::Num(20.0), small.clone()),
-        (q1.clone(), Value::Num(30.0), big.clone()), // the TREE branch
-        (qs.clone(), Value::Num(30.0), big.clone()), // tree branch, multi-query
-        (q1.clone(), Value::Num(0.0), small.clone()), // zero radius
-        (empty.clone(), Value::Num(5.0), small.clone()),
-        (q1.clone(), Value::Num(-1.0), small.clone()), // bad radius (raise)
-        (q1.clone(), Value::Num(5.0), empty.clone()),  // empty target... query is a vector
-        (qs.clone(), Value::Num(5.0), empty.clone()),  // empty target, matrix query
-        (q1.clone(), Value::Num(5.0), Value::Num(3.0)), // invalid target (raise)
-    ];
-    for (q, r, target) in &cases {
-        let args = vec![q.clone(), r.clone(), target.clone()];
-        assert!(
-            same_result(
-                &super::regions::vector_search_val(&crate::surface::NoClosures, q, r, target),
-                &interpret_with_deps_consts(vs_ref, &deps, &consts, &args)
-            ),
-            "vector_search diverged on q={q:?} r={r:?} target={target:?}"
-        );
-    }
-
-    // The pre-built [points, tree] target form: build the tree NATIVELY (bt_tree_val is itself
-    // battery-checked just below), search through both engines.
-    let n_small = 30.0;
-    let ind = super::regions::count_val(
-        &Value::Num(n_small),
-        &Value::Num(0.0),
-        &Value::Num(1.0),
-        &Value::Bool(false),
-    )
-    .unwrap();
-    let tree =
-        super::regions::bt_tree_val(&crate::surface::NoClosures, &small, &ind, &Value::Num(5.0))
-            .unwrap();
-    let prebuilt = Value::list(vec![small.clone(), tree.clone()]);
-    let args = vec![q1.clone(), Value::Num(25.0), prebuilt.clone()];
-    assert!(
-        same_result(
-            &super::regions::vector_search_val(
-                &crate::surface::NoClosures,
-                &q1,
-                &Value::Num(25.0),
-                &prebuilt
-            ),
-            &interpret_with_deps_consts(vs_ref, &deps, &consts, &args)
-        ),
-        "vector_search diverged on the pre-built tree target"
-    );
-
-    // _bt_tree itself, structurally: leaf collapse (n<=leafsize) and a real split, both vs the
-    // interpreted reference.
-    let bt_ref = pin_reference_of("_bt_tree").unwrap();
-    for (pts, leafsize) in [(&small, 50.0), (&small, 5.0), (&big, 25.0)] {
-        let n = match pts {
-            Value::List(xs) => xs.len(),
-            _ => 0,
-        };
-        #[allow(clippy::cast_precision_loss, reason = "tiny test sizes")]
-        let ind = super::regions::count_val(
-            &Value::Num(n as f64),
-            &Value::Num(0.0),
-            &Value::Num(1.0),
-            &Value::Bool(false),
-        )
-        .unwrap();
-        let args = vec![(*pts).clone(), ind.clone(), Value::Num(leafsize)];
-        assert!(
-            same_result(
-                &super::regions::bt_tree_val(
-                    &crate::surface::NoClosures,
-                    pts,
-                    &ind,
-                    &Value::Num(leafsize)
-                ),
-                &interpret_with_deps_consts(bt_ref, &deps, &consts, &args)
-            ),
-            "_bt_tree diverged on n={n} leafsize={leafsize}"
-        );
-    }
-}
-
-/// O.10c — the region monster itself: `_region_region_intersections` native vs interpreting the
-/// verbatim reference with its FULL dep closure. Crossing regions, multi-path regions, self-touching
-/// corners (the `vector_search` duplicate lane), open paths, degenerate zero-length edges, collinear
-/// non-crossings, and a >400-point region that flips the corner search onto the ball-tree branch.
-#[test]
-fn fast_equals_slow_o10_region_monster() {
-    let consts = [("_EPSILON", Value::Num(1e-9))];
-    let p = |xs: &[f64]| Value::num_list(xs.to_vec());
-    let deps: Vec<&str> = vec![
-        reference_of("idx").unwrap(),
-        pin_reference_of("list_wrap").unwrap(),
-        pin_reference_of("are_ends_equal").unwrap(),
-        reference_of("approx").unwrap(),
-        reference_of("is_finite").unwrap(),
-        reference_of("is_nan").unwrap(),
-        reference_of("posmod").unwrap(),
-        pin_reference_of("_general_line_intersection").unwrap(),
-        pin_reference_of("flatten").unwrap(),
-        pin_reference_of("vector_search").unwrap(),
-        pin_reference_of("_bt_tree").unwrap(),
-        reference_of("_bt_search").unwrap(),
-        pin_reference_of("pointlist_bounds").unwrap(),
-        reference_of("ident").unwrap(),
-        pin_reference_of("transpose").unwrap(),
-        reference_of("is_path").unwrap(),
-        reference_of("is_matrix").unwrap(),
-        reference_of("is_vector").unwrap(),
-        reference_of("is_consistent").unwrap(),
-        reference_of("_list_pattern").unwrap(),
-        reference_of("same_shape").unwrap(),
-        reference_of("in_list").unwrap(),
-        reference_of("force_list").unwrap(),
-        reference_of("all_nonzero").unwrap(),
-        pin_reference_of("is_range").unwrap(),
-        pin_reference_of("max_index").unwrap(),
-        pin_reference_of("min_index").unwrap(),
-        pin_reference_of("mean").unwrap(),
-        reference_of("sum").unwrap(),
-        reference_of("_sum").unwrap(),
-        pin_reference_of("column").unwrap(),
-        pin_reference_of("is_int").unwrap(),
-        pin_reference_of("count").unwrap(),
-        reference_of("select").unwrap(),
-        pin_reference_of("_sort_vectors").unwrap(),
-    ];
-    let rri_ref = reference_of("_region_region_intersections").unwrap();
-
-    let square = |x0: f64, y0: f64, s: f64| {
-        Value::list(vec![
-            p(&[x0, y0]),
-            p(&[x0 + s, y0]),
-            p(&[x0 + s, y0 + s]),
-            p(&[x0, y0 + s]),
-        ])
-    };
-    let r_a = Value::list(vec![square(0.0, 0.0, 10.0)]);
-    let r_b = Value::list(vec![square(5.0, 5.0, 10.0)]);
-    let r_two = Value::list(vec![square(0.0, 0.0, 4.0), square(20.0, 0.0, 4.0)]);
-    // Self-touching: a bowtie sharing its center point twice (the cornerpts lane).
-    let bowtie = Value::list(vec![Value::list(vec![
-        p(&[0.0, 0.0]),
-        p(&[4.0, 4.0]),
-        p(&[8.0, 0.0]),
-        p(&[4.0, 4.0]),
-        p(&[4.0, 8.0]),
-    ])]);
-    // Degenerate: a duplicate consecutive point (zero-length edge) + a collinear side.
-    let degen = Value::list(vec![Value::list(vec![
-        p(&[0.0, 0.0]),
-        p(&[0.0, 0.0]),
-        p(&[10.0, 0.0]),
-        p(&[10.0, 10.0]),
-    ])]);
-    // >400 points total: a 420-vertex near-circle — the corner search's TREE branch inside _rri.
-    let big_poly = {
-        let mut pts = Vec::new();
-        for k in 0..420 {
-            let th = f64::from(k) * std::f64::consts::TAU / 420.0;
-            pts.push(p(&[7.0 * th.cos(), 7.0 * th.sin()]));
-        }
-        Value::list(vec![Value::list(pts)])
-    };
-
-    let cases: Vec<(Value, Value, Value, Value, Value)> = vec![
-        (
-            r_a.clone(),
-            r_b.clone(),
-            Value::Bool(true),
-            Value::Bool(true),
-            Value::Num(1e-9),
-        ),
-        (
-            r_b.clone(),
-            r_a.clone(),
-            Value::Bool(true),
-            Value::Bool(true),
-            Value::Num(1e-9),
-        ),
-        (
-            r_two.clone(),
-            r_a.clone(),
-            Value::Bool(true),
-            Value::Bool(true),
-            Value::Num(1e-9),
-        ),
-        (
-            bowtie.clone(),
-            r_a.clone(),
-            Value::Bool(true),
-            Value::Bool(true),
-            Value::Num(1e-9),
-        ),
-        (
-            degen.clone(),
-            r_b.clone(),
-            Value::Bool(true),
-            Value::Bool(true),
-            Value::Num(1e-9),
-        ),
-        (
-            r_a.clone(),
-            r_b.clone(),
-            Value::Bool(false),
-            Value::Bool(true),
-            Value::Num(1e-9),
-        ),
-        (
-            r_a.clone(),
-            r_b.clone(),
-            Value::Bool(true),
-            Value::Bool(false),
-            Value::Num(1e-9),
-        ),
-        (
-            r_a.clone(),
-            r_a.clone(),
-            Value::Bool(true),
-            Value::Bool(true),
-            Value::Num(1e-9),
-        ), // self
-        (
-            r_a.clone(),
-            r_b.clone(),
-            Value::Bool(true),
-            Value::Bool(true),
-            Value::Num(0.5),
-        ), // fat eps
-        (
-            big_poly.clone(),
-            r_a.clone(),
-            Value::Bool(true),
-            Value::Bool(true),
-            Value::Num(1e-9),
-        ),
-    ];
-    for (r1, r2, c1, c2, eps) in &cases {
-        let args = vec![r1.clone(), r2.clone(), c1.clone(), c2.clone(), eps.clone()];
-        assert!(
-            same_result(
-                &with_native(rri_ref, &deps, &consts, |fx, f| f(fx, &args)),
-                &interpret_with_deps_consts(rri_ref, &deps, &consts, &args)
-            ),
-            "_rri diverged on closed=({c1:?},{c2:?}) eps={eps:?} r1={r1:?}"
-        );
-    }
 }
 
 /// AR.14.2 — the index AGREES with the linear scan it replaced, name for name.

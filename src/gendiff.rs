@@ -51,6 +51,16 @@ enum Outcome {
     OracleFailed(String),
     /// OUR side errored (a generated program must never do that — a generator/evaluator bug).
     OursFailed(String),
+    /// BOTH sides refused the program. On the BUILTIN surface this is unreachable by design; on a
+    /// LIBRARY surface it is the common case and not a finding — BOSL2 asserts its own preconditions
+    /// (`is_path`, `is_consistent`, `is_description`), and a generator feeding arbitrary values will
+    /// trip them constantly. Upstream raises there too, so the tiers AGREE about refusing.
+    ///
+    /// Compared on PRESENCE, not on text: our fault wording is deliberately not upstream's
+    /// (`check_assert` settled that matching it word-for-word is a non-goal), so an error CHANNEL
+    /// could only ever compare whether both refused. Counting these as `OursFailed` — which is what
+    /// the lane did before AR.36 — leaves them uncompared and reads as a generator bug.
+    BothRefused,
 }
 
 /// What `--enable` flags this oracle actually accepts.
@@ -129,6 +139,7 @@ pub fn run_surface(seeds: u32, timeout_secs: u64, md: bool, bosl2: bool) -> Resu
     }
 
     let mut matches = 0u32;
+    let mut both_refused = 0u32;
     let mut export_fails = 0u32;
     let mut ours_times = Vec::new();
     let mut oracle_times = Vec::new();
@@ -167,6 +178,9 @@ pub fn run_surface(seeds: u32, timeout_secs: u64, md: bool, bosl2: bool) -> Resu
             }
             Outcome::OracleFailed(why) => oracle_fails.push((seed, why)),
             Outcome::OursFailed(why) => ours_fails.push((seed, why)),
+            // Both refused: agreement about the program being invalid, which on a library surface
+            // is the majority of what a random generator produces.
+            Outcome::BothRefused => both_refused += 1,
         }
     }
 
@@ -199,7 +213,9 @@ pub fn run_surface(seeds: u32, timeout_secs: u64, md: bool, bosl2: bool) -> Resu
     }
     println!();
     println!(
-        "{}{matches}/{seeds} echo-match ({export_fails} oracle-export-failed with agreeing eval). {} diverged, {} version-skew (multi-swizzle), {} oracle-failed, {} ours-failed.",
+        "{}{matches}/{seeds} echo-match ({export_fails} oracle-export-failed with agreeing eval), \
+         {both_refused} both-refused. {} diverged, {} version-skew (multi-swizzle), {} \
+         oracle-failed, {} ours-failed.",
         if md { "**" } else { "" },
         diverges.len(),
         skew.len(),
@@ -248,7 +264,20 @@ fn diff_one(
     );
     let (tree, messages) = match evaluated {
         Ok(pair) => pair,
-        Err(e) => return Outcome::OursFailed(format!("{e}")),
+        Err(e) => {
+            // ASK THE ORACLE ANYWAY. Returning here without doing so is what left four of sixty
+            // BOSL2-surface seeds uncompared: a generated call into a library that asserts its own
+            // preconditions raises on BOTH engines, and refusing to look means never learning
+            // whether upstream agreed.
+            return match oracle_report(src, timeout, flags, root) {
+                Ok(r) if !r.ok || r.warnings.iter().any(|l| l.trim_start().starts_with("ERROR:")) => {
+                    Outcome::BothRefused
+                }
+                Ok(_) => Outcome::OursFailed(format!("{e}")),
+                // The oracle produced nothing comparable, so we cannot say who was right.
+                Err(_) => Outcome::OursFailed(format!("{e}")),
+            };
+        }
     };
     let _solid = build_geo(&tree, &ManifoldBackend); // None (empty) is fine — timing parity is the point
     let ours_ms = start.elapsed().as_secs_f64() * 1e3;

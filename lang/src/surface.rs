@@ -433,6 +433,21 @@ pub trait FnCtx: Console {
         name: &str,
         args: &[(Option<&'static str>, Value)],
     ) -> crate::Result<Value>;
+
+    /// Read a `$`-variable off the reaching dynamic chain. `undef` when unbound, as in the
+    /// interpreter — a missing `$`-var is not an error.
+    ///
+    /// AR.30, and the twin of [`ModuleCtx::dollar`], which has existed since AR.20.3. A `$`-read is
+    /// DYNAMIC: its value belongs to the CALLER, so baking one would freeze whatever it happened to
+    /// be when the library was transpiled. That is why it has to be a capability rather than a
+    /// constant, and why the function side declined 33 of BOSL2's functions until it had one.
+    ///
+    /// THE MEMO IS ALREADY SAFE for this, which is the question worth asking before adding it: the
+    /// eval cache keys on `Scope::dyn_ctx` — the reaching `$`-context's IDENTITY — so a call that
+    /// reads `$fn` cannot take a hit stored under a different one. Nothing here has to be declared
+    /// impure; `impure_reads` is for `parent_module`, which reads the module STACK rather than the
+    /// chain.
+    fn dollar(&self, name: &str) -> Value;
 }
 
 /// The [`FnCtx`] for call sites with NO evaluator — benches, oracles, value-level batteries. It
@@ -499,6 +514,13 @@ impl FnCtx for NoClosures {
         Err(crate::Error::Unimplemented(
             "an outward call with no evaluator — re-interpreting",
         ))
+    }
+
+    fn dollar(&self, _name: &str) -> Value {
+        // `undef`, and this one is not a refusal dressed as an answer: with no program there is no
+        // dynamic chain and therefore nothing bound, which is exactly the value the interpreter
+        // reads for an unbound `$`-name. The bench and oracle callers want that.
+        Value::Undef
     }
 
     fn call_named_shadowed(

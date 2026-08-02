@@ -527,6 +527,37 @@ pub fn generate_native(
         // declines LOUDLY as a free read.
         let default = match &p.default {
             None => "rt::Value::Undef".to_string(),
+            // A `$`-READ IN A DEFAULT IS SEVERED FROM THE CALLER, so it must not compile — the same
+            // decline the function-LITERAL path already makes, for the same reason and now on the
+            // top-level def too. AR.30 opened this by widening the `$` arm to every `em.expr` in
+            // the function emitter, and defaults go through that arm: `function f(n=$fn) = n;`
+            // emitted `unwrap_or_else(|| fx.dollar("$fn"))`, reading the CALL SITE's chain, while
+            // `push_call` evaluates an unfilled slot's default in `base` — an island global with no
+            // dynamic parent, so the interpreted read stops at that island's own `$fn`. Measured
+            // 24 versus 0 on `module m() { echo(f()); } m($fn=24);`.
+            //
+            // It also split the compiled tier against ITSELF: the all-positional branch leaves the
+            // slot absent so this default fires, while the named-arg branch evaluates the real
+            // default in `base` and passes it — one call, two spellings, two answers. And the
+            // emitted string is inlined into SIBLING call sites to fill holes, which would have
+            // falsified the premise stated above `Sibling` (that an emitted default references only
+            // literals and baked constants).
+            //
+            // ZERO COST TODAY: a depth-aware scan of all 2072 `function`/`module` headers under
+            // libs/ finds no `$` in any parameter default. This arms on a pin bump or a third-party
+            // library, which is exactly when nobody would be looking.
+            //
+            // WHICH TIER IS RIGHT IS A SEPARATE QUESTION, and the answer is uncomfortable: stock
+            // OpenSCAD answers 24, so the NATIVE was oracle-correct and the INTERPRETER carries a
+            // conformance bug (see AR.31). Declining here is still right — the tiers must agree
+            // before either is fixed — but it is a deferral, not an acquittal.
+            Some(d) if subtree_reads_dollar(d) => {
+                return Err(format!(
+                    "{name}: a `$`-read in the default of `{}` — an unfilled slot's default \
+                     evaluates in the island global, not the caller's chain",
+                    p.name
+                ));
+            }
             Some(d) => em
                 .expr(d)
                 .map_err(|e| format!("{name}: default of `{}`: {e}", p.name))?,
@@ -594,11 +625,10 @@ struct Emitter<'a, 'e> {
     fn_locals: Vec<String>,
     /// Emitting a MODULE body (so `fx` is a `ModuleCtx` in scope) rather than a function.
     ///
-    /// It gates exactly one thing today — whether a `$`-read can be answered by `fx.dollar` — and
-    /// it has to, because a generated FUNCTION has no ctx to ask (AR.17's `FnCtx` is what would
-    /// give it one). Without the flag the function emitter would emit a call to a name that is not
-    /// in scope, which is a build break rather than a decline, and only for the functions that
-    /// happen to read a `$`-var.
+    /// It no longer gates `$`-READS: both ctx shapes answer those since AR.30 gave `FnCtx` the
+    /// `dollar` capability `ModuleCtx` had from AR.20.3. What it still gates is everything that
+    /// genuinely differs between a statement body and an expression one — child rendering, the
+    /// module dispatch path, and the AN.10 arm's runtime re-check.
     in_module: bool,
     /// Spans of the body-top-level nested DEFS this emission registered through the ctx
     /// (AR.14.4.5) — matched by span in `stmt`, where a registered def is a no-op and any other
@@ -649,7 +679,7 @@ impl Emitter<'_, '_> {
                     Ok(format!("{ident}.clone()"))
                 } else if let Some((_, b)) = self.baked.iter().find(|(n, _)| n == name) {
                     b.emit()
-                } else if name.starts_with('$') && self.in_module {
+                } else if name.starts_with('$') {
                     // AR.20.3 — a `$`-read is DYNAMIC, so it is answered at run time off the
                     // inherited chain rather than baked. That is not an optimisation detail: the
                     // value depends on the CALLER, so baking one would freeze whatever it happened
@@ -660,9 +690,13 @@ impl Emitter<'_, '_> {
                     // (`bind_call_bookkeeping`), so reading it through the chain gets the call
                     // site's real child count.
                     //
-                    // MODULES ONLY. A generated FUNCTION has no ctx to ask (that is AR.17's
-                    // `FnCtx`), so it keeps declining rather than silently reading a different
-                    // variable.
+                    // BOTH TIERS since AR.30. This was modules-only for the stated reason that "a
+                    // generated FUNCTION has no ctx to ask", which stopped being true when AR.17
+                    // gave it one — the capability was simply never added on that side. It was the
+                    // single largest remaining decline band: 33 of BOSL2's 69, and the ratchet
+                    // filed them under "an unbaked library CONSTANT", which is what made them look
+                    // like a baking problem for a phase. `$fn` is not a constant anybody could
+                    // bake; it belongs to the caller.
                     Ok(format!("fx.dollar({name:?})"))
                 } else {
                     Err(format!("free read `{name}` has no baked value"))
@@ -4233,9 +4267,17 @@ mod tests {
         /// exactly what the rule turns on. Fixed where binding belongs: `duplicate_rebind` applies the
         /// two-phase rule in the runtime and hands every slot the value it bound.
         ///
-        /// The tail is 37 free reads (33 of them `$`-VARIABLE reads — dynamic scope, not constants,
-        /// and the single biggest remaining band), 11 C-style comprehensions, 8 `rands`, 6 nested
-        /// comprehension forms, and 4 GENUINE FREE VARIABLES that are upstream bugs rather than gaps:
+        /// 1294 (97.3%) at AR.30, which took the `$`-VARIABLE read band — 33 functions, the single
+        /// largest that remained. They had been filed under "an unbaked library CONSTANT", which is
+        /// what made them look like a baking problem for a whole phase: `$fn` is not a constant
+        /// anybody could bake, it belongs to the CALLER. `ModuleCtx` has answered `$`-reads off the
+        /// inherited chain since AR.20.3; the function side simply never got the capability, and the
+        /// comment saying it had no ctx to ask stopped being true at AR.17. 29 of the 33 landed
+        /// outright; the other four moved on to their next construct.
+        ///
+        /// The tail is 11 C-style comprehensions, 8 `rands`, 5 range forms, 3 nested comprehension
+        /// forms, 2 `$`-BINDINGS (a dynamic SET, which is not the same problem as a read), and 4
+        /// GENUINE FREE VARIABLES that are upstream bugs rather than gaps:
         /// `gear_shorten_skew` reads `helical` where its parameters are `helical1`/`helical2`,
         /// `mb_torus` reads `maj_rad` for `r_maj`, `path_to_bezcornerpath` passes a `tangents` it does
         /// not declare, and `_turtle3d_list_command` uses `v` ten lines before binding it. Compiling
@@ -4248,7 +4290,7 @@ mod tests {
         /// `cargo check --workspace` builds all 1260 of these natives. THE TWO GATES ARE A PAIR —
         /// if fab-bosl2 ever leaves the workspace, this number silently goes back to being a
         /// measure of the emitter's optimism.
-        const FLOOR: usize = 1265;
+        const FLOOR: usize = 1294;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -5082,6 +5124,31 @@ mod tests {
         let err =
             super::generate_native("function t(a, b=a) = b;", &[], &[]).expect_err("declines");
         assert!(err.contains("free read `a`"), "{err}");
+    }
+
+    /// A `$`-READ IN A PARAMETER DEFAULT DECLINES, and it is the one shape AR.30 had to take back.
+    ///
+    /// Widening the `$` arm to the function emitter caught parameter defaults too, which go through
+    /// the same `em.expr`. That emitted `unwrap_or_else(|| fx.dollar("$fn"))` — the CALL SITE's
+    /// chain — where `push_call` evaluates an unfilled slot's default in the callee's island global,
+    /// which has no dynamic parent. Measured 24 versus 0. The BODY read is fine and is the whole
+    /// win; only the default is severed.
+    ///
+    /// Found by adversarial review, latent in both vendored libraries (no `$` appears in any of
+    /// 2072 parameter defaults), and therefore exactly the kind of thing that arms on a pin bump
+    /// with nobody watching.
+    #[test]
+    fn a_dollar_read_in_a_parameter_default_declines() {
+        let err = super::generate_native("function f(n=$fn) = n;", &[], &[])
+            .expect_err("a `$`-read in a default is severed from the caller — decline");
+        assert!(err.contains("default of `n`"), "{err}");
+        assert!(err.contains("island global"), "{err}");
+
+        // The BODY read still compiles — the decline is about defaults, not about `$` at all.
+        assert!(
+            super::generate_native("function f(n) = n * $fn;", &[], &[]).is_ok(),
+            "a `$`-read in the BODY is AR.30's whole point"
+        );
     }
 
     /// A DUPLICATE PARAMETER NAME COMPILES (AR.29), where it used to decline.

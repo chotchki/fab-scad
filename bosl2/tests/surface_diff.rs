@@ -266,6 +266,94 @@ fn the_duplicate_parameter_functions_bind_like_the_interpreter() {
     );
 }
 
+/// AR.30 — `$`-VARIABLE READS in a function body, against the shapes that discriminate.
+///
+/// A `$`-read is DYNAMICALLY scoped: its value belongs to the CALLER, reached through the dynamic
+/// chain at call time. That is why it can never be baked, and why 33 BOSL2 functions declined until
+/// `FnCtx` grew the `dollar` capability `ModuleCtx` has had since AR.20.3. `segs($fn)` is the poster
+/// child and it is called from everywhere.
+///
+/// THE SHAPES MATTER MORE THAN THE COUNT. An unset `$fn`, a top-level one, a `let`-bound one, and one
+/// set by an enclosing module instantiation are four different chains; a native that snapshotted the
+/// wrong scope would agree with the interpreter on some of them and not others, which is exactly the
+/// failure a single case would miss.
+#[test]
+fn dollar_reads_resolve_on_the_callers_chain() {
+    if !have_bosl2() {
+        return;
+    }
+    let (registry, _surface) = harness();
+    let programs = [
+        // Unset: `$fn` is undef, and `segs` falls to its `$fa`/`$fs` arm.
+        "echo(segs(10));",
+        // Top level — the simplest chain.
+        "$fn = 32;\necho(segs(10));",
+        // `let`-bound: a DYNAMIC binding that exists only for the call, so a native reading the
+        // island global instead of the caller's chain would miss it entirely.
+        "echo(let($fn = 8) segs(10));",
+        // Set by an enclosing module instantiation — the chain a real model actually builds.
+        "module m() { echo(segs(10)); }\nm($fn = 16);",
+        // Nested, inner wins.
+        "$fn = 32;\necho(let($fn = 5) segs(10));",
+        // A `$`-read behind another function call, so it arrives one frame deeper.
+        "$fn = 12;\nfunction outer(r) = segs(r);\necho(outer(10));",
+        // The other big `$`-reading band: the mask2d family reads `$edge_angle`.
+        "echo(is_undef(mask2d_roundover(2)));",
+        "echo(let($edge_angle = 60) is_undef(mask2d_roundover(2)));",
+    ];
+    let mut failures = Vec::new();
+    for body in programs {
+        let src = format!("include <BOSL2/std.scad>\n{body}\n");
+        match (run(&src, &registry, false), run(&src, &registry, true)) {
+            (Leg::Ok(a), Leg::Ok(b)) if a == b => {}
+            (Leg::Err(a), Leg::Err(b)) if a == b => {}
+            (a, b) => {
+                let show = |l: &Leg| match l {
+                    Leg::Ok(m) => format!("ok {m:?}"),
+                    Leg::Err(e) => format!("err {e}"),
+                };
+                failures.push(format!("{body}\n  interp: {}\n  native: {}", show(&a), show(&b)));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} $-read shapes diverged:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// NON-VACUITY for the `$`-read band: `segs` must actually have a generated row and WIRE, or the
+/// comparison above is the interpreter against itself. It declined for the whole phase, so its
+/// presence is the property under test as much as its answers are.
+#[test]
+fn the_dollar_reading_functions_are_compiled() {
+    if !have_bosl2() {
+        return;
+    }
+    let rows = fab_bosl2::Bosl2.rows();
+    for n in ["segs", "mask2d_roundover", "get_slop", "_is_shown"] {
+        let compiled = rows.functions.iter().any(|e| e.name == n);
+        assert!(
+            compiled || n == "_is_shown",
+            "`{n}` reads a `$`-variable and should now compile"
+        );
+    }
+    // And the band armed on a real program.
+    let (registry, _s) = harness();
+    let _ = run(
+        "include <BOSL2/std.scad>\n$fn=16;\necho(segs(10));\n",
+        &registry,
+        true,
+    );
+    assert!(
+        fab_lang::wired_count() > 800,
+        "only {} natives wired",
+        fab_lang::wired_count()
+    );
+}
+
 /// NON-VACUITY, and this file is worthless without it. Two interpreted runs agree perfectly, so a
 /// tier differential that armed nothing — or generated programs that call nothing — passes while
 /// testing nothing. Three separate ways it could be hollow, each checked.

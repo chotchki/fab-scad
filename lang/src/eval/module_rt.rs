@@ -1002,6 +1002,19 @@ impl crate::surface::FnCtx for NativeFnCtx<'_, '_> {
     ) -> crate::Result<Value> {
         call_named_outward(self.ctx, &self.caller, def, name, args, Unbound::Undef)
     }
+
+    fn dollar(&self, name: &str) -> Value {
+        // THE CALLER'S chain, read THROUGH rather than snapshotted — the module side's L.2.7 rule.
+        //
+        // `caller` is the right scope and not merely the available one. The interpreted twin
+        // evaluates this body in a call frame whose LEXICAL base is the callee's home-island global
+        // and whose DYNAMIC parent is the call site, and a `$`-lookup walks the dynamic chain. The
+        // frame's own bindings cannot shadow a `$`-name here: a `$`-PARAMETER declines at emit, and
+        // a call carrying a `$`-ARGUMENT never reaches a native at all (the dispatch gate sends any
+        // injection to the interpreter). So the frame contributes nothing and the caller's chain is
+        // the whole answer.
+        self.caller.lookup(name)
+    }
 }
 
 impl crate::surface::Console for NativeFnCtx<'_, '_> {

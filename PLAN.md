@@ -186,7 +186,7 @@ added 2026-07-07.
 - [ ] SZ.3 - Measure the real load tax now that the browser actually receives the band
 - [ ] SZ.4 - Dynamic library loading so nobody pays for a library they don't use
 - [ ] SZ.5 - A gate that fails when native and web disagree about which libraries exist
-- [ ] SZ.6 - Precompress libs.json in the release — 4.29 MB shipped raw beside brotli'd wasm
+- [x] SZ.6 - Precompress libs.json in the release — 4.29 MB shipped raw beside brotli'd wasm
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)
 - [ ] V.1 - V.1 - per-part parallelism: render/slice/print-layout each part on its own worker thread
 ## Phase Y - Y - Verification hardening: 100%-Rust re-derivation — shrink the unsafe surface, aim each tier where it uniquely covers

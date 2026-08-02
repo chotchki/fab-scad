@@ -434,6 +434,21 @@ pub trait FnCtx: Console {
         args: &[(Option<&'static str>, Value)],
     ) -> crate::Result<Value>;
 
+    /// `rands` — the one builtin whose answer depends on WHEN it is called.
+    ///
+    /// AR.33. Seeded (`rands(a, b, n, seed)`) is a fresh engine and pure; SEEDLESS draws from the
+    /// run's ONE advancing stream, so consecutive calls differ and a fresh engine per call would be
+    /// a different program. The seed is a runtime value, so a native cannot tell the two apart at
+    /// emit time — hence a capability rather than a `rt::bi` call.
+    ///
+    /// DRAW ORDER IS THE CONTRACT, and it is why this routes to the interpreter's own
+    /// implementation instead of reimplementing the argument treatment: two copies would be two
+    /// sequences, and a divergence in a random stream reads as noise rather than as a bug.
+    ///
+    /// The eval memo needs nothing added for this — its purity fence already snapshots
+    /// `rand_stream.draws` around a call and declines to store one that moved.
+    fn rands(&self, args: &[Value]) -> Value;
+
     /// Read a `$`-variable off the reaching dynamic chain. `undef` when unbound, as in the
     /// interpreter — a missing `$`-var is not an error.
     ///
@@ -514,6 +529,13 @@ impl FnCtx for NoClosures {
         Err(crate::Error::Unimplemented(
             "an outward call with no evaluator — re-interpreting",
         ))
+    }
+
+    fn rands(&self, _args: &[Value]) -> Value {
+        // No run, so no stream. `undef` rather than a fresh engine: a ctx-less caller that got real
+        // numbers would be getting a DIFFERENT sequence from the one the run would have drawn, which
+        // is the failure this capability exists to prevent.
+        Value::Undef
     }
 
     fn dollar(&self, _name: &str) -> Value {

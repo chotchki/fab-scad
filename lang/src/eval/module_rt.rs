@@ -1003,6 +1003,13 @@ impl crate::surface::FnCtx for NativeFnCtx<'_, '_> {
         call_named_outward(self.ctx, &self.caller, def, name, args, Unbound::Undef)
     }
 
+    fn rands(&self, args: &[Value]) -> Value {
+        // The run's ONE stream (I.2.8b), through the interpreter's own implementation — so the
+        // compiled tier draws from the same sequence, in the same order, with the same argument
+        // treatment. A second copy would be a second sequence.
+        crate::eval::builtins::rands_with_stream(args, &mut self.ctx.rand_stream.borrow_mut())
+    }
+
     fn dollar(&self, name: &str) -> Value {
         // THE CALLER'S chain, read THROUGH rather than snapshotted — the module side's L.2.7 rule.
         //

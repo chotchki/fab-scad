@@ -454,6 +454,91 @@ fn the_c_style_functions_are_compiled() {
     }
 }
 
+/// AR.33 — `rands`, the one builtin whose answer depends on WHEN it is called.
+///
+/// SEEDED is a fresh engine and pure; SEEDLESS draws from the run's ONE advancing stream, so
+/// consecutive calls differ. That makes draw ORDER and draw COUNT part of the contract: a native
+/// that draws once where the interpreter drew twice shifts every later value in the program, and the
+/// result still looks like a plausible list of random numbers. There is no mesh comparison that
+/// catches it and no eyeball that would either — only an exact console diff against the tier that
+/// did not compile.
+///
+/// THE LAST CASE IS THE LOAD-BEARING ONE: a compiled BOSL2 call followed by a RAW `rands()`. If the
+/// native drew from anywhere but the run's stream, or by the wrong amount, the raw draw afterwards
+/// comes out different — which is the only way to observe a stream the native has to itself.
+#[test]
+fn rands_draws_from_the_runs_stream_in_the_interpreters_order() {
+    if !have_bosl2() {
+        return;
+    }
+    let (registry, _surface) = harness();
+    let programs = [
+        // SEEDED — deterministic, so this pins VALUES and not merely agreement.
+        "echo(rand_int(0, 10, 5, seed = 42));",
+        "echo(gaussian_rands(0, 1, 4, seed = 7));",
+        "echo(exponential_rands(1, 4, seed = 11));",
+        "echo(shuffle([1, 2, 3, 4, 5], seed = 3));",
+        "echo(random_points(4, seed = 5));",
+        "echo(spherical_random_points(4, 1, seed = 9));",
+        // SEEDLESS, twice — the second draw only matches if the first advanced the stream by
+        // exactly the amount the interpreter advances it.
+        "echo(rand_int(0, 10, 3));\necho(rand_int(0, 10, 3));",
+        // SEEDLESS through two DIFFERENT compiled functions, interleaved.
+        "echo(rand_int(0, 10, 2));\necho(shuffle([1, 2, 3, 4]));\necho(rand_int(0, 10, 2));",
+        // THE ONE THAT MATTERS: a compiled call, then a RAW `rands()`. A native holding its own
+        // engine agrees with itself on everything above and fails here.
+        "echo(rand_int(0, 100, 3));\necho(rands(0, 1, 3));",
+        "echo(rands(0, 1, 2));\necho(shuffle([1, 2, 3]));\necho(rands(0, 1, 2));",
+    ];
+    let mut failures = Vec::new();
+    for body in programs {
+        let src = format!("include <BOSL2/std.scad>\n{body}\n");
+        match (run(&src, &registry, false), run(&src, &registry, true)) {
+            (Leg::Ok(a), Leg::Ok(b)) if a == b => {
+                assert!(!a.is_empty(), "{body}: no console — nothing was compared");
+            }
+            (a, b) => {
+                let show = |l: &Leg| match l {
+                    Leg::Ok(m) => format!("ok {m:?}"),
+                    Leg::Err(e) => format!("err {e}"),
+                };
+                failures.push(format!("{body}\n  interp: {}\n  native: {}", show(&a), show(&b)));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} rands case(s) diverged:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// NON-VACUITY for the `rands` band: all eight must be COMPILED, or the draw-order comparison above
+/// is the interpreter against itself and would pass no matter what `fx.rands` did.
+#[test]
+fn the_rands_functions_are_compiled() {
+    if !have_bosl2() {
+        return;
+    }
+    let rows = fab_bosl2::Bosl2.rows();
+    for n in [
+        "rand_int",
+        "gaussian_rands",
+        "exponential_rands",
+        "spherical_random_points",
+        "random_points",
+        "random_polygon",
+        "shuffle",
+        "vnf_vertex_array",
+    ] {
+        assert!(
+            rows.functions.iter().any(|e| e.name == n),
+            "`{n}` calls `rands` and should now compile"
+        );
+    }
+}
+
 /// NON-VACUITY, and this file is worthless without it. Two interpreted runs agree perfectly, so a
 /// tier differential that armed nothing — or generated programs that call nothing — passes while
 /// testing nothing. Three separate ways it could be hollow, each checked.

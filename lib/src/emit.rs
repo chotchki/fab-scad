@@ -1111,6 +1111,23 @@ impl Emitter<'_, '_> {
                 b.decl.name == name && b.capability == fab_lang::surface::BuiltinCapability::Pure
             });
             if !pure {
+                // AR.33 — `rands` is the one context builtin a FUNCTION native can carry, and it
+                // gets a capability rather than a `rt::bi` call for a reason: SEEDLESS draws come
+                // from the run's ONE advancing stream, so consecutive calls differ and a fresh
+                // engine per call would be a different program. The seed is a runtime value, so the
+                // emitter cannot tell the seeded form from the seedless one and must defer both.
+                //
+                // The other context builtins stay declined and are NOT the same problem:
+                // `parent_module` reads the live module-instantiation stack, and the metrics pair
+                // and `object` need the ARGUMENT NAMES, which the flat native ABI drops by
+                // construction (it takes values, in slot order).
+                if name == "rands" {
+                    let emitted: Vec<String> = args
+                        .iter()
+                        .map(|a| self.expr(&a.value))
+                        .collect::<Result<_, _>>()?;
+                    return Ok(format!("fx.rands(&[{}])", emitted.join(", ")));
+                }
                 return Err(format!(
                     "a call to `{name}`, which needs evaluator context (a non-Pure builtin)"
                 ));
@@ -4385,9 +4402,18 @@ mod tests {
         /// comes from `rt::cfor_tick`, the interpreter's OWN function, so an oracle-probed constant
         /// and upstream's verbatim message have one declaration between the tiers.
         ///
-        /// The tail is 8 `rands`, 5 range forms, 3 nested comprehension forms, 2 `$`-BINDINGS (a
-        /// dynamic SET, which is not the same problem as a read), and 4 GENUINE FREE VARIABLES that
-        /// are upstream bugs rather than gaps:
+        /// 1312 (98.7%) at AR.33, which took all 8 `rands` callers. It is a CAPABILITY and not a
+        /// `rt::bi` call because seedless draws come from the run's ONE advancing stream — so
+        /// consecutive calls differ, and a fresh engine per call would be a different program — while
+        /// the seed is a runtime value the emitter cannot see. Routed to the interpreter's own
+        /// implementation, because two copies would be two draw SEQUENCES and that divergence reads
+        /// as noise. The other context builtins stay declined and are not the same problem:
+        /// `parent_module` reads the live module stack, and the metrics pair and `object` need
+        /// ARGUMENT NAMES, which the flat native ABI drops by construction.
+        ///
+        /// The tail is 5 range forms, 3 nested comprehension forms, 2 `$`-BINDINGS (a dynamic SET,
+        /// which is not the same problem as a read), and 4 GENUINE FREE VARIABLES that are upstream
+        /// bugs rather than gaps:
         /// `gear_shorten_skew` reads `helical` where its parameters are `helical1`/`helical2`,
         /// `mb_torus` reads `maj_rad` for `r_maj`, `path_to_bezcornerpath` passes a `tangents` it does
         /// not declare, and `_turtle3d_list_command` uses `v` ten lines before binding it. Compiling
@@ -4400,7 +4426,7 @@ mod tests {
         /// `cargo check --workspace` builds all 1260 of these natives. THE TWO GATES ARE A PAIR —
         /// if fab-bosl2 ever leaves the workspace, this number silently goes back to being a
         /// measure of the emitter's optimism.
-        const FLOOR: usize = 1304;
+        const FLOOR: usize = 1312;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

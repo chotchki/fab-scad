@@ -1120,6 +1120,16 @@ fn column(elem: &Value, i: usize) -> Option<Value> {
 /// consecutive seedless calls DIFFER (OpenSCAD draws seedless from a single global engine — BOSL2 needs
 /// two `rands()` calls to make a non-degenerate line). Called via the [`run_builtin`](super::run_builtin)
 /// seam that holds the stream, not the pure `apply` dispatch.
+/// `rands`, for a caller that holds the run's stream but not the builtin dispatch — the compiled
+/// tier (AR.33).
+///
+/// A thin named door onto the SAME implementation rather than a second one: `rands` is the only
+/// builtin whose result depends on evaluation ORDER, so two copies would be two draw sequences and
+/// the divergence would look like noise. See [`crate::surface::FnCtx::rands`].
+pub(crate) fn rands_with_stream(pos: &[Value], stream: &mut super::rng::RandStream) -> Value {
+    rands(pos, stream)
+}
+
 fn rands(pos: &[Value], stream: &mut super::rng::RandStream) -> Value {
     // Upstream's argument treatment verbatim (AH.2.11, the rands golden's bizarro sweep):
     // arity 3-or-4, all numbers; a non-finite BOUND substitutes ±DBL_MAX/2 (warn + reset), then

@@ -815,6 +815,10 @@ enum Task<'a> {
         /// The call site's scope — the dynamic chain a closure the native INVOKES reads (AR.17's
         /// `FnCtx`), exactly the `caller` an interpreted `CallValue` would thread.
         scope: Scope,
+        /// AR.29 — where each slot must READ its value, when the callee declares one name TWICE.
+        /// `None` for every function that does not, which is all but five of BOSL2's 1329, so the
+        /// ordinary call allocates nothing and does no extra work. See [`duplicate_rebind`].
+        rebind: Option<Vec<usize>>,
     },
     /// AB.2: pop `args.len()` evaluated echo-arg values, emit the `ECHO:` line, then schedule `body`
     /// (or push undef). Scheduling the body as a TASK is the point — an `echo(…) body` chain (or a
@@ -1604,13 +1608,29 @@ fn eval_with_global<'a>(
                 values.truncate(start);
                 values.push(result);
             }
-            Task::Intrinsic { func, nargs, scope } => {
+            Task::Intrinsic {
+                func,
+                nargs,
+                scope,
+                rebind,
+            } => {
                 // Same shape as run_builtin: the args are the top `nargs` of the value stack. Fallible — an
                 // intrinsic for a function with an inline `assert` raises exactly where the interpreted body
                 // would (the `?` aborts the whole eval, same as a failed interpreted assert).
                 let start = values.len().saturating_sub(nargs);
                 let fx = module_rt::NativeFnCtx { ctx, caller: scope };
-                let result = func(&fx, &values[start..])?;
+                // AR.29 — the two-phase bind, applied HERE because this is the first moment the slot
+                // VALUES exist. Every slot has already been evaluated exactly once (a duplicate's
+                // default still raises where the interpreter's does); all this does is decide which
+                // of them each slot carries into the native.
+                let result = match rebind {
+                    None => func(&fx, &values[start..])?,
+                    Some(map) => {
+                        let bound: Vec<Value> =
+                            map.iter().map(|&j| values[start + j].clone()).collect();
+                        func(&fx, &bound)?
+                    }
+                };
                 values.truncate(start);
                 values.push(result);
             }
@@ -2355,7 +2375,16 @@ fn dispatch_call<'a>(
             if ctx.suppress_intrinsics.get() == 0
                 && let Some(&func) = ctx.intrinsics.get(name.as_str())
             {
-                if args.iter().all(|a| a.name.is_none()) {
+                // AR.29 — a duplicate-name callee takes the FULL-SLOT branch below instead, because
+                // this one hands the native a TRUNCATED prefix: an unprovided later slot is simply
+                // absent, so the two-phase rule (which needs to know a slot was not provided in order
+                // to fall back to the earlier one) has nothing to read. The other branch materialises
+                // every slot, which is what makes the rebind expressible.
+                let duplicated = params
+                    .iter()
+                    .enumerate()
+                    .any(|(i, p)| params[..i].iter().any(|q| q.name == p.name));
+                if args.iter().all(|a| a.name.is_none()) && !duplicated {
                     fnprofile::record_intrinsic(name.as_str()); // dev probe: the already-native side of the worklist
                     // EXTRA positional args (beyond arity) are dropped UNEVALUATED, like `push_call`'s
                     // slot filling — evaluating them here would fire side effects (echo, seedless rands)
@@ -2371,6 +2400,7 @@ fn dispatch_call<'a>(
                         func,
                         nargs,
                         scope: scope.clone(),
+                        rebind: None, // no duplicate reaches this branch — see `duplicated` above
                     });
                     for arg in args[..nargs].iter().rev() {
                         tasks.push(Task::Eval(&arg.value, scope.clone()));
@@ -2397,10 +2427,12 @@ fn dispatch_call<'a>(
                     }
                     fnprofile::record_intrinsic(name.as_str());
                     let base = ctx.island_globals.borrow()[home].clone();
+                    let provided: Vec<bool> = arg_slots.iter().map(Option::is_some).collect();
                     tasks.push(Task::Intrinsic {
                         func,
                         nargs: params.len(),
                         scope: scope.clone(),
+                        rebind: duplicate_rebind(params, &provided),
                     });
                     for (slot, param) in arg_slots.into_iter().zip(params).rev() {
                         match (slot, &param.default) {
@@ -3391,6 +3423,47 @@ fn record_wired(n: usize) {
 }
 
 static WIRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Where each parameter SLOT must read its value when the callee declares one name more than once —
+/// OpenSCAD's two-phase bind, as a permutation the native never has to know about.
+///
+/// AR.29. BOSL2 declares five of these and every one is an upstream editing accident: `linear_sweep`
+/// lists `h` at two separate positions, `path_copies` lists `dist` twice on ONE line, and
+/// `zcyl`/`ycyl`/`regular_prism` each duplicate `length`. Upstream is unbothered because the language
+/// resolves it silently; a native could not, because the ABI hands it one value per SLOT and the rule
+/// is about NAMES.
+///
+/// THE RULE, matching `Task::Apply`'s bind exactly: provided arguments bind first and a later
+/// duplicate OVERWRITES an earlier one; then defaults fill only the still-unset names, where a later
+/// duplicate is SKIPPED. So the winner for a name is the LAST slot that was provided, or — if none
+/// was — the FIRST slot bearing it, whose default binds.
+///
+/// Every slot maps to that winner rather than only the last one, so the answer does not depend on
+/// which slot the emitted body happens to read. (It reads the last, via Rust `let` shadowing; that is
+/// an artifact of emission order and not something this should rely on.)
+///
+/// Returns `None` when no name repeats — the answer for all but five of BOSL2's 1329 functions, after
+/// one pass and no allocation. Evaluation is untouched either way: every slot's source still evaluates
+/// exactly once, so a duplicate's default raises exactly where the interpreted twin's does.
+fn duplicate_rebind(params: &[Parameter], provided: &[bool]) -> Option<Vec<usize>> {
+    let repeats = params
+        .iter()
+        .enumerate()
+        .any(|(i, p)| params[..i].iter().any(|q| q.name == p.name));
+    if !repeats {
+        return None;
+    }
+    let winner = |name: &str| {
+        params
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(j, p)| &*p.name == name && provided.get(*j).copied().unwrap_or(false))
+            .or_else(|| params.iter().enumerate().find(|(_, p)| &*p.name == name))
+            .map_or(0, |(j, _)| j)
+    };
+    Some(params.iter().map(|p| winner(&p.name)).collect())
+}
 
 fn needs_post_hoist(registry: &Registry, entry: &intrinsics::Entry) -> bool {
     !entry.consts.is_empty()
@@ -5027,6 +5100,55 @@ mod tests {
                 .join("\n"),
             other @ Resolution::Incomplete { .. } => panic!("expected Complete, got {other:?}"),
         }
+    }
+
+    /// AR.29 — [`duplicate_rebind`] states OpenSCAD's two-phase bind for a repeated parameter name,
+    /// and this is that rule written out case by case. It is a pure function of the declaration and
+    /// which slots were provided, so it can be checked exactly rather than inferred from a render.
+    ///
+    /// The case that matters is the THIRD: the earlier slot provided and the later one not. Rust
+    /// `let` shadowing — what the emitter does — takes the last slot unconditionally and would read
+    /// the later slot's DEFAULT there, which is the wrong answer and the reason these five functions
+    /// declined for the whole phase.
+    #[test]
+    fn the_two_phase_bind_picks_last_provided_then_first_default() {
+        use super::duplicate_rebind;
+        let params = |names: &[&str]| -> Vec<crate::parser::Parameter> {
+            names
+                .iter()
+                .map(|n| crate::parser::Parameter {
+                    name: std::rc::Rc::from(*n),
+                    default: None,
+                    span: crate::parser::Span::default(),
+                })
+                .collect()
+        };
+        // No repeat: no work, no allocation, and every other function in the library takes this arm.
+        let plain = params(&["a", "b", "c"]);
+        assert_eq!(duplicate_rebind(&plain, &[true, true, true]), None);
+
+        // `a` at slots 0 and 2 — BOSL2's `zcyl`/`linear_sweep` shape, minimised.
+        let dup = params(&["a", "b", "a"]);
+        // BOTH provided: the LATER wins, so both slots read slot 2.
+        assert_eq!(
+            duplicate_rebind(&dup, &[true, true, true]),
+            Some(vec![2, 1, 2])
+        );
+        // ONLY THE EARLIER provided: it wins. Slot 2 must read slot 0 — the case last-wins breaks.
+        assert_eq!(
+            duplicate_rebind(&dup, &[true, true, false]),
+            Some(vec![0, 1, 0])
+        );
+        // NEITHER provided: the FIRST slot's default binds and the later duplicate is SKIPPED.
+        assert_eq!(
+            duplicate_rebind(&dup, &[false, true, false]),
+            Some(vec![0, 1, 0])
+        );
+        // Only the later provided: it wins, which last-wins also gets right.
+        assert_eq!(
+            duplicate_rebind(&dup, &[false, true, true]),
+            Some(vec![2, 1, 2])
+        );
     }
 
     /// O.6 — the named-arg rebind at intrinsic dispatch mirrors `push_call`'s slot semantics: named args

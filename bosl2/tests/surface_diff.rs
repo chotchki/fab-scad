@@ -191,6 +191,81 @@ fn a_non_callable_local_is_silent_like_the_interpreter() {
     );
 }
 
+/// AR.29 — the five DUPLICATE-PARAMETER functions, end to end, across the argument shapes that
+/// discriminate.
+///
+/// `zcyl`/`ycyl`/`regular_prism` each declare `length` twice, `linear_sweep` declares `h` at two
+/// separate positions, and `path_copies` declares `dist` twice on one line. All five are upstream
+/// editing accidents that OpenSCAD resolves silently with a two-phase bind: provided arguments bind
+/// first and a later duplicate overwrites, then defaults fill only the still-unset names with a later
+/// duplicate skipped. The emitter lays out one `let` per SLOT, so Rust shadowing takes the LAST — the
+/// mismatch that declined these for the whole phase, until `duplicate_rebind` moved the resolution
+/// into the runtime where binding belongs.
+///
+/// SHAPES, not one call: named and positional, the duplicated name given and omitted. The case that
+/// used to be wrong is "the earlier slot provided, the later not", which last-wins reads as the later
+/// slot's default.
+#[test]
+fn the_duplicate_parameter_functions_bind_like_the_interpreter() {
+    if !have_bosl2() {
+        return;
+    }
+    let (registry, _surface) = harness();
+    let calls = [
+        // zcyl / ycyl: `length` at two slots.
+        "zcyl(h=10, d=5)",
+        "zcyl(d=5, length=8)",
+        "zcyl(10, 5)",
+        "ycyl(h=10, d=5)",
+        "ycyl(d=5, length=8)",
+        // regular_prism: same, with `n` in front.
+        "regular_prism(6, h=4, side=3)",
+        "regular_prism(6, side=3, length=7)",
+        // linear_sweep: `h` twice.
+        "linear_sweep(square(5), height=3)",
+        "linear_sweep(square(5), h=3)",
+        // path_copies: `dist` twice.
+        "path_copies(square(10), n=4, p=[[0,0]])",
+        "path_copies(square(10), spacing=3, p=[[0,0]])",
+    ];
+    // NON-VACUITY FIRST: all five must have a generated row, or this compares the interpreter
+    // against itself and passes. They declined for the whole phase, so their presence is the
+    // property under test as much as their answers are.
+    for n in [
+        "zcyl",
+        "ycyl",
+        "regular_prism",
+        "linear_sweep",
+        "path_copies",
+    ] {
+        assert!(
+            fab_bosl2::Bosl2.rows().functions.iter().any(|e| e.name == n),
+            "`{n}` has no generated row — the duplicate-parameter band declined again"
+        );
+    }
+    let mut failures = Vec::new();
+    for call in calls {
+        let src = format!("include <BOSL2/std.scad>\necho({call});\n");
+        match (run(&src, &registry, false), run(&src, &registry, true)) {
+            (Leg::Ok(a), Leg::Ok(b)) if a == b => {}
+            (Leg::Err(a), Leg::Err(b)) if a == b => {}
+            (a, b) => {
+                let show = |l: &Leg| match l {
+                    Leg::Ok(m) => format!("ok {m:?}"),
+                    Leg::Err(e) => format!("err {e}"),
+                };
+                failures.push(format!("{call}\n  interp: {}\n  native: {}", show(&a), show(&b)));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} duplicate-parameter calls diverged:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
 /// NON-VACUITY, and this file is worthless without it. Two interpreted runs agree perfectly, so a
 /// tier differential that armed nothing — or generated programs that call nothing — passes while
 /// testing nothing. Three separate ways it could be hollow, each checked.

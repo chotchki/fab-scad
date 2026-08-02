@@ -496,15 +496,13 @@ pub fn generate_native(
          \x20   }};\n"
     );
     for (i, p) in params.iter().enumerate() {
-        // A duplicate name has NO native shape: `Task::Apply` binds it two-phase (a provided arg
-        // beats a later slot's default, AN.6), while Rust `let` shadowing would take the LAST
-        // slot unconditionally. Decline; the entry stays interpreted.
-        if params[..i].iter().any(|q| q.name == p.name) {
-            return Err(format!(
-                "{name}: duplicate parameter `{}` — AN.6 two-phase binding has no native shape",
-                p.name
-            ));
-        }
+        // A DUPLICATE NAME needs no shape here (AR.29). It used to decline: `Task::Apply` binds it
+        // two-phase — a provided arg beats a later slot's default, AN.6 — while the `let` shadowing
+        // below takes the LAST slot unconditionally. That mismatch is now resolved BEFORE the native
+        // runs: binding is the runtime's job, so `duplicate_rebind` hands every slot the value the
+        // two-phase rule bound, and reading the last one is then correct by construction. The
+        // shadowed earlier `let`s stay (the file allows `unused_variables`) rather than being
+        // suppressed, so slot indices keep matching the ABI one-for-one.
         // A `$`-named PARAMETER is no more a Rust local than a `$`-named `let` binder is — and it
         // matters MORE here, because `function_band`'s fixpoint uses `generate_native` returning
         // `Ok` as its liveness probe: an emitted `let p_$fn = …` stays LIVE in the batch and takes
@@ -4224,8 +4222,24 @@ mod tests {
         /// stopped being true the moment WARNINGS needed one: `echo` moved onto the `Console`
         /// supertrait both ctx shapes carry, and the emission is now identical on both sides.
         ///
-        /// The tail is 37 free reads, 11 C-style comprehensions, 8 `rands`, 5 duplicate parameters
-        /// (a CORRECT decline), 3 range forms, and a handful of singletons.
+        /// 1265 (95.1%) at AR.29, which recovered the five DUPLICATE-PARAMETER functions —
+        /// `zcyl`, `ycyl`, `regular_prism`, `length` apiece, plus `linear_sweep`'s doubled `h` and
+        /// `path_copies`'s doubled `dist`, every one an upstream editing accident. They had declined
+        /// on "two-phase binding has no native shape", which described the SYMPTOM: the emitter lays
+        /// out one `let` per SLOT, so Rust shadowing takes the last one, while the language binds by
+        /// NAME. The sharper reason was an ABI erasure — since O.6 a named call reaches a native
+        /// through a full slot vector whose holes are already filled from defaults, so "provided" and
+        /// "defaulted" are indistinguishable by the time the native runs, and that distinction is
+        /// exactly what the rule turns on. Fixed where binding belongs: `duplicate_rebind` applies the
+        /// two-phase rule in the runtime and hands every slot the value it bound.
+        ///
+        /// The tail is 37 free reads (33 of them `$`-VARIABLE reads — dynamic scope, not constants,
+        /// and the single biggest remaining band), 11 C-style comprehensions, 8 `rands`, 6 nested
+        /// comprehension forms, and 4 GENUINE FREE VARIABLES that are upstream bugs rather than gaps:
+        /// `gear_shorten_skew` reads `helical` where its parameters are `helical1`/`helical2`,
+        /// `mb_torus` reads `maj_rad` for `r_maj`, `path_to_bezcornerpath` passes a `tangents` it does
+        /// not declare, and `_turtle3d_list_command` uses `v` ten lines before binding it. Compiling
+        /// those would mean faithfully reproducing an `undef`.
         ///
         /// WHAT THIS NUMBER IS AND IS NOT, because four corrections came from getting it wrong.
         /// This test PROBES the emitter; it does not COMPILE what the emitter writes, and every
@@ -4234,7 +4248,7 @@ mod tests {
         /// `cargo check --workspace` builds all 1260 of these natives. THE TWO GATES ARE A PAIR —
         /// if fab-bosl2 ever leaves the workspace, this number silently goes back to being a
         /// measure of the emitter's optimism.
-        const FLOOR: usize = 1260;
+        const FLOOR: usize = 1265;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -5070,13 +5084,27 @@ mod tests {
         assert!(err.contains("free read `a`"), "{err}");
     }
 
-    /// Duplicate parameter names bind two-phase in the machine (AN.6, arg-over-default); Rust
-    /// `let` shadowing would take the LAST slot unconditionally. No native shape — decline.
+    /// A DUPLICATE PARAMETER NAME COMPILES (AR.29), where it used to decline.
+    ///
+    /// It binds two-phase in the machine (AN.6: a provided arg beats a later slot's default) while
+    /// the `let` shadowing below takes the LAST slot unconditionally — so for years the emitter
+    /// refused. The mismatch is gone because the resolution moved to where binding belongs:
+    /// `duplicate_rebind` applies the rule in the runtime and hands every slot the value it bound,
+    /// which makes reading the last one correct by construction.
+    ///
+    /// ONE `let` PER SLOT still, deliberately: slot indices have to keep matching the ABI
+    /// one-for-one, so the earlier binding is shadowed rather than skipped. `fab-lang`'s
+    /// `the_two_phase_bind_picks_last_provided_then_first_default` pins the rule itself, and
+    /// `bosl2/tests/surface_diff.rs` pins the five real BOSL2 functions end to end.
     #[test]
-    fn a_duplicate_parameter_declines() {
-        let err =
-            super::generate_native("function t(a, a=9) = a;", &[], &[]).expect_err("declines");
-        assert!(err.contains("duplicate parameter `a`"), "{err}");
+    fn a_duplicate_parameter_compiles() {
+        let out = super::generate_native("function t(a, a=9) = a;", &[], &[])
+            .expect("a duplicate name is the runtime's to resolve, not a decline");
+        assert_eq!(
+            out.matches("let p_a").count(),
+            2,
+            "one binding per SLOT, so the native's indices still line up with the ABI:\n{out}"
+        );
     }
 
     /// The `NumList` const arm refuses non-finite elements as loudly as the scalar arm: `{:?}`

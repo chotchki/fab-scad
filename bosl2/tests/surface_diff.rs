@@ -539,6 +539,99 @@ fn the_rands_functions_are_compiled() {
     }
 }
 
+/// AR.34 — COMPREHENSION DISPATCH: two shapes the emitter could always compile and never routed to.
+///
+/// Neither was a missing construct. `[let(x=…) for(…) …]` is a comprehension under an
+/// element-position `let`, and the vector's all-plain check looked only at the TOP of each item — so
+/// it took the fast path into `expr()`, which has no comprehension arm, and bottomed out at
+/// "construct outside the v0 subset". The interpreter's own `is_comprehension` peels `let` and says
+/// why: a `let` in a vector is TRANSPARENT, it splices iff its body does.
+///
+/// `each if(c) X` is the other: `each` DISTRIBUTES into the guard, and the emitter sent its inner
+/// through `expr()` instead. Together they were 8 of the last 17 declines — the constructs were
+/// inside the subset the whole time, the dispatcher just never reached them.
+#[test]
+fn comprehension_dispatch_shapes_agree_across_tiers() {
+    if !have_bosl2() {
+        return;
+    }
+    let (registry, _surface) = harness();
+    let cases: &[(&str, &str)] = &[
+        // A `let` wrapping a `for` — the element is a loop, not a single value.
+        ("[let(n = 3) for(i = [0:n-1]) i * 2]", "[0, 2, 4]"),
+        // Two `let`s deep, because the peel is a loop and not one level.
+        ("[let(a = 2) let(b = a + 1) for(i = [0:b-1]) i]", "[0, 1, 2]"),
+        // A `let` whose body is NOT a comprehension stays ONE element — the transparency cuts both
+        // ways, and getting it wrong would flatten a single-point list into the enclosing path.
+        ("[let(x = 1) [x, x + 1]]", "[[1, 2]]"),
+        // `each` distributing into a guard, both arms.
+        ("[each if (true) [1, 2], 9]", "[1, 2, 9]"),
+        ("[each if (false) [1, 2], 9]", "[9]"),
+        ("[each if (true) [1, 2] else [3], 9]", "[1, 2, 9]"),
+        ("[each if (false) [1, 2] else [3], 9]", "[3, 9]"),
+        // `each` distributing into a loop.
+        ("[each for(i = [0:2]) [i, i]]", "[0, 0, 1, 1, 2, 2]"),
+        // `each` over a `let`-wrapped comprehension — both peels at once.
+        ("[each let(n = 2) for(i = [0:n-1]) [i]]", "[0, 1]"),
+        // And the real BOSL2 functions the two shapes were blocking.
+        ("len(_rounded_arc(10, rounding = 1, angle = 90, n = 8)) > 0", "true"),
+        ("len(squircle(10, squareness = 0.5, style = \"fg\")) > 0", "true"),
+    ];
+    let mut failures = Vec::new();
+    for (call, want) in cases {
+        let src = format!("include <BOSL2/std.scad>\necho({call});\n");
+        match (run(&src, &registry, false), run(&src, &registry, true)) {
+            (Leg::Ok(a), Leg::Ok(b)) if a == b => {
+                if !a.iter().any(|m| m.contains(want)) {
+                    failures.push(format!("{call}: expected {want}, got {a:?}"));
+                }
+            }
+            (a, b) => {
+                let show = |l: &Leg| match l {
+                    Leg::Ok(m) => format!("ok {m:?}"),
+                    Leg::Err(e) => format!("err {e}"),
+                };
+                failures.push(format!("{call}\n  interp: {}\n  native: {}", show(&a), show(&b)));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} comprehension-dispatch case(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// NON-VACUITY for AR.34's two bands: the functions they unblocked must be COMPILED.
+#[test]
+fn the_comprehension_dispatch_functions_are_compiled() {
+    if !have_bosl2() {
+        return;
+    }
+    let rows = fab_bosl2::Bosl2.rows();
+    for n in [
+        // the `let`-wrapped comprehension band
+        "_squircle_fg",
+        "_squircle_se",
+        "qr_factor",
+        "texture",
+        "bevel_gear",
+        // `each <comprehension>`
+        "_rounded_arc",
+        "nurbs_curve",
+        "_region_region_intersections",
+        // and the two sibling-binding shapes that now dispatch
+        "half_of",
+        "mask2d_chamfer",
+    ] {
+        assert!(
+            rows.functions.iter().any(|e| e.name == n),
+            "`{n}` should now compile"
+        );
+    }
+}
+
 /// NON-VACUITY, and this file is worthless without it. Two interpreted runs agree perfectly, so a
 /// tier differential that armed nothing — or generated programs that call nothing — passes while
 /// testing nothing. Three separate ways it could be hollow, each checked.

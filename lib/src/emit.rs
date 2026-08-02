@@ -939,19 +939,35 @@ impl Emitter<'_, '_> {
         Ok(block)
     }
 
-    /// A vector literal. All-plain elements go straight through `build_vector` (the stack
+    /// Does this vector element behave as a COMPREHENSION? The emitter's mirror of the interpreter's
+/// `is_comprehension`, INCLUDING the rule that a `let` is TRANSPARENT — it comprehends iff its body
+/// does, so `[let(x=…) for(…) …]` is a loop and not a single element.
+///
+/// AR.34, and missing that peel was worth 8 of the last 17 declines. The check looked only at the
+/// TOP of each item, so a `let`-wrapped comprehension took the all-plain fast path into `expr()`,
+/// which has no comprehension arm and bottoms out at "construct outside the v0 subset". The
+/// construct was inside the subset the whole time; the dispatcher just never routed to it.
+///
+/// A loop rather than recursion, matching the interpreter's own note: deep `let`-chains parse.
+fn comprehends(e: &Expr) -> bool {
+    let mut cur = e;
+    loop {
+        match &cur.kind {
+            ExprKind::LcFor { .. }
+            | ExprKind::LcForC { .. }
+            | ExprKind::LcIf { .. }
+            | ExprKind::LcEach(_) => return true,
+            ExprKind::Let { body, .. } => cur = body,
+            _ => return false,
+        }
+    }
+}
+
+/// A vector literal. All-plain elements go straight through `build_vector` (the stack
     /// machine's repr normalization — all-numeric collapses to `NumList`); any comprehension
     /// element switches to the accumulator block the interpreter's `LcFor` walk mirrors.
     fn vector(&mut self, items: &[Expr]) -> Result<String, String> {
-        let plain = items.iter().all(|i| {
-            !matches!(
-                i.kind,
-                ExprKind::LcFor { .. }
-                    | ExprKind::LcForC { .. }
-                    | ExprKind::LcIf { .. }
-                    | ExprKind::LcEach(_)
-            )
-        });
+        let plain = items.iter().all(|i| !Self::comprehends(i));
         if plain {
             let emitted: Vec<String> = items
                 .iter()
@@ -1084,6 +1100,55 @@ impl Emitter<'_, '_> {
     /// The STATIC half of a function native's call resolution: a pure builtin by direct `rt::bi`
     /// call, or a generated sibling with the compile-time binding rules. What runs when no local
     /// binding shadows the name — or when one does and holds a non-function at runtime (AD.1/p8).
+    /// Emit a call as a RUNTIME dispatch — the callee resolved against the running program rather
+    /// than bound here.
+    ///
+    /// AR.27's lever, extracted at AR.34 so the two SIBLING-BINDING failures can reach it too. Both
+    /// declined on a compile-time claim about a callee that resolves at runtime: a named arg the
+    /// library's parameter list does not have (`half_of` calls `offset`, which its own PARAMETER
+    /// `offset` shadows), and a name supplied twice (`mask2d_chamfer`). Matching against the
+    /// LIBRARY's signature for a call the USER's program resolves is AN.10 wearing a function's hat,
+    /// and it is the reasoning AR.20.8 removed on the module side: make no claim about the callee
+    /// and there is nothing left to violate. Upstream's own argument diagnostics come free.
+    ///
+    /// ARGUMENTS EVALUATE EAGERLY HERE and the interpreter does not always evaluate them at all: an
+    /// UNKNOWN callee's args are never scheduled, and `fill_arg_slots` drops a duplicated name or a
+    /// surplus positional UNEVALUATED. Where the argument is pure that difference is unobservable;
+    /// where it ECHOES or ASSERTS it is a console line the twin never prints, or a run-killing error
+    /// where it merely warns. Those refuse.
+    ///
+    /// The residue, stated rather than hidden: an arithmetic type error inside a dropped argument
+    /// still warns compiled and not interpreted. It needs an unknown-or-overflowing callee AND a
+    /// mistyped argument, and closing it properly means handing the runtime THUNKS instead of
+    /// values — a real ABI change, not a patch.
+    fn dispatch_call(&mut self, name: &str, args: &[Arg]) -> Result<String, String> {
+        for a in args {
+            if has_side_effect(&a.value) {
+                return Err(format!(
+                    "a side-effecting argument to the dispatched callee `{name}` (the \
+                     interpreter may never evaluate it)"
+                ));
+            }
+        }
+        let emitted: Vec<String> = args
+            .iter()
+            .map(|a| {
+                let v = self.expr(&a.value)?;
+                Ok(match &a.name {
+                    Some(n) => format!("(Some({:?}), {v})", &**n),
+                    None => format!("(None, {v})"),
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        let def = self
+            .def_name
+            .ok_or("an outward call from a body with no definition name")?;
+        Ok(format!(
+            "fx.call_named({def:?}, {name:?}, &[{}])?",
+            emitted.join(", ")
+        ))
+    }
+
     fn static_call(&mut self, name: &str, args: &[Arg]) -> Result<String, String> {
         // The FILE-VALUE builtins resolve paths off the calling FILE's directory binding and are
         // NOT in `BUILTIN_SURFACE` (they are expression forms of statements), so `is_builtin` is
@@ -1172,33 +1237,7 @@ impl Emitter<'_, '_> {
             // argument still warns compiled and not interpreted. It needs an unknown-or-overflowing
             // callee AND a mistyped argument, and closing it properly means handing the runtime
             // THUNKS instead of values — a real ABI change, not a patch.
-            for a in args {
-                if has_side_effect(&a.value) {
-                    return Err(format!(
-                        "a side-effecting argument to the dispatched callee `{name}` (the \
-                         interpreter may never evaluate it)"
-                    ));
-                }
-            }
-            let emitted: Vec<String> = args
-                .iter()
-                .map(|a| {
-                    let v = self.expr(&a.value)?;
-                    Ok(match &a.name {
-                        Some(n) => format!("(Some({:?}), {v})", &**n),
-                        None => format!("(None, {v})"),
-                    })
-                })
-                .collect::<Result<_, String>>()?;
-            // The CALLING def's own name goes over too: the runtime resolves a bound callee in
-            // THIS function's lexical base, which is the only chain the interpreted twin walks.
-            let def = self
-                .def_name
-                .ok_or("an outward call from a body with no definition name")?;
-            return Ok(format!(
-                "fx.call_named({def:?}, {name:?}, &[{}])?",
-                emitted.join(", ")
-            ));
+            return self.dispatch_call(name, args);
         };
         // A generated sibling: everything is static, so the FULL binding rules run at COMPILE
         // time — a positional takes the lowest unfilled slot (AN.2), a named arg its declared
@@ -1216,10 +1255,12 @@ impl Emitter<'_, '_> {
                     return Err(format!("$-arg in sibling call `{name}`"));
                 }
                 let Some(i) = params.iter().position(|p| p == &**n) else {
-                    return Err(format!("named arg `{n}` unknown to sibling `{name}`"));
+                    // Not this library's parameter — but the call resolves against the USER's
+                    // program, so dispatch rather than claim the callee's shape (`dispatch_call`).
+                    return self.dispatch_call(name, args);
                 };
                 if slots[i].is_some() {
-                    return Err(format!("arg `{n}` supplied more than once to `{name}`"));
+                    return self.dispatch_call(name, args);
                 }
                 i
             } else {
@@ -1992,6 +2033,29 @@ impl Emitter<'_, '_> {
                     }
                     None => Ok(format!("if ({c}).is_truthy() {{ {t} }} ")),
                 }
+            }
+            // `each <comprehension>` DISTRIBUTES the splice into the guard or loop — `each if(c) X`
+            // means `if(c) each X`, and `each for(i=…) X` means `for(i=…) each X`. The AST says so
+            // and the interpreter implements it; the emitter used to send the inner through
+            // `expr()`, which has no comprehension arm, so `each if(…) arc(…)` declined as a
+            // "construct outside the v0 subset" (AR.34 — `_rounded_arc`, `nurbs_curve`,
+            // `_region_region_intersections`).
+            //
+            // Emitted as COLLECT-THEN-SPLICE rather than by rewriting the tree: the inner
+            // comprehension contributes into a temporary accumulator exactly as it would anywhere
+            // else, and each contribution is then iterated into `acc`. Same values, same order, and
+            // the same `iter_values_warned` diagnostics in the same places — which the rewrite would
+            // have had to reproduce by hand for every shape `each` can wrap.
+            ExprKind::LcEach(inner) if Self::comprehends(inner) => {
+                let tmp = self.fresh_ident("eacc")?;
+                let inner_stmts = self.element(inner, &tmp)?;
+                let item = self.fresh_ident("eitem")?;
+                let each = self.fresh_ident("each")?;
+                Ok(format!(
+                    "{{ let mut {tmp}: Vec<rt::Value> = Vec::new(); {inner_stmts} \
+                     for {item} in {tmp} {{ for {each} in rt::iter_values_warned(fx, &{item}) {{ \
+                     {acc}.push({each}); }} }} }} "
+                ))
             }
             ExprKind::LcEach(inner) => {
                 let v = self.expr(inner)?;
@@ -4411,9 +4475,25 @@ mod tests {
         /// `parent_module` reads the live module stack, and the metrics pair and `object` need
         /// ARGUMENT NAMES, which the flat native ABI drops by construction.
         ///
-        /// The tail is 5 range forms, 3 nested comprehension forms, 2 `$`-BINDINGS (a dynamic SET,
-        /// which is not the same problem as a read), and 4 GENUINE FREE VARIABLES that are upstream
-        /// bugs rather than gaps:
+        /// 1322 (99.4%) at AR.34, and NONE of it was a missing construct — all ten were the
+        /// dispatcher failing to reach code that already existed. `[let(x=…) for(…) …]` is a
+        /// comprehension under an element-position `let`, and the vector's all-plain check looked
+        /// only at the TOP of each item, so it took the fast path into `expr()`, which has no
+        /// comprehension arm. The interpreter's `is_comprehension` peels `let` and says why: a `let`
+        /// in a vector is TRANSPARENT, it splices iff its body does. `each if(c) X` is the second —
+        /// `each` DISTRIBUTES into the guard, emitted here as collect-then-splice so the values, the
+        /// order and the `iter_values_warned` diagnostics all come from the existing arms. And two
+        /// SIBLING-BINDING declines became dispatches: a named arg the library's signature lacks
+        /// (`half_of` calls `offset`, which its own PARAMETER shadows) and a name supplied twice
+        /// (`mask2d_chamfer`) were compile-time claims about a callee the USER's program resolves —
+        /// AR.27's argument, reused.
+        ///
+        /// THE TAIL IS 7 AND FOUR OF THEM ARE NOT OURS. The honest ceiling is ~1325, not 1329.
+        /// `_skin_distance_match` needs a C-style update temporary to survive into the next
+        /// iteration; `reorient` and `_is_shown` perform a `$`-BINDING, a dynamic SET, which a
+        /// function native has no call frame to hold — `ModuleCtx::set_dollar` writes into the
+        /// module's own frame and a flat Rust call has none, so that one is an ABI limit rather than
+        /// an emitter gap. The last four are GENUINE FREE VARIABLES, upstream bugs rather than gaps:
         /// `gear_shorten_skew` reads `helical` where its parameters are `helical1`/`helical2`,
         /// `mb_torus` reads `maj_rad` for `r_maj`, `path_to_bezcornerpath` passes a `tangents` it does
         /// not declare, and `_turtle3d_list_command` uses `v` ten lines before binding it. Compiling
@@ -4426,7 +4506,7 @@ mod tests {
         /// `cargo check --workspace` builds all 1260 of these natives. THE TWO GATES ARE A PAIR —
         /// if fab-bosl2 ever leaves the workspace, this number silently goes back to being a
         /// measure of the emitter's optimism.
-        const FLOOR: usize = 1312;
+        const FLOOR: usize = 1322;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

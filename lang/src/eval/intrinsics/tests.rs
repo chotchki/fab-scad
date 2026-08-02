@@ -4225,8 +4225,6 @@ fn a_rebound_baked_constant_vetoes_the_module_native() {
     );
 }
 
-
-
 /// AR.14.4.3 — a compiled module's FUNCTION calls dispatch at runtime: `helper` resolves to the
 /// PROGRAM's definition (no sibling table, no callee fingerprint) and `max` to the builtin, and
 /// the rendered geometry matches interpreting exactly. Non-vacuity is the resolve check plus the
@@ -4351,7 +4349,6 @@ fn a_compiled_module_dollar_set_reaches_callees_and_children() {
         "`_fab_poc_dollarset`'s native never ran to completion"
     );
 }
-
 
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
@@ -4582,7 +4579,6 @@ fn a_param_holding_a_closure_is_invoked_by_the_native() {
         "no geometry — empty trees would agree"
     );
 }
-
 
 /// The thunk-bridge lexical split (AR.14.4.5's adversarial finding 1): a registered nested fn
 /// called from INSIDE a compiled child block, rendered under ANOTHER module's ctx. The AR.22
@@ -5235,8 +5231,7 @@ fn a_sibling_call_with_a_hole_takes_the_callees_default() {
 fn the_emitted_rows_agree_with_the_hand_registry() {
     use std::collections::{BTreeMap, BTreeSet};
 
-    let hand: BTreeMap<&str, &super::Entry> =
-        super::REGISTRY.iter().map(|e| (e.name, e)).collect();
+    let hand: BTreeMap<&str, &super::Entry> = super::REGISTRY.iter().map(|e| (e.name, e)).collect();
     let mut checked = 0_usize;
     for row in super::generated::REGISTRY {
         let Some(h) = hand.get(row.name) else {
@@ -5343,22 +5338,25 @@ fn an_outward_call_resolves_against_the_running_program() {
     };
 
     // (1) AGREEMENT. Compiled caller + interpreted callee == fully interpreted.
-    let src = format!("function _fab_poc_absent(x) = x * 10;\n{reference}\necho(_fab_poc_outward(4));\n");
+    let src =
+        format!("function _fab_poc_absent(x) = x * 10;\n{reference}\necho(_fab_poc_outward(4));\n");
     let fast = run(&src, true);
     let slow = run(&src, false);
     assert_eq!(fast, slow, "the outward call diverged across tiers");
-    assert!(
-        fast.contains("41"),
-        "4 * 10 + 1 = 41, got {fast:?}"
-    );
+    assert!(fast.contains("41"), "4 * 10 + 1 = 41, got {fast:?}");
 
     // (2) THE REDEFINE, which is the whole argument. A DIFFERENT callee body must change the
     // answer, identically on both tiers. A baked static call would have kept the old semantics and
     // this is the case that would have caught it.
-    let redefined =
-        format!("function _fab_poc_absent(x) = x + 100;\n{reference}\necho(_fab_poc_outward(4));\n");
+    let redefined = format!(
+        "function _fab_poc_absent(x) = x + 100;\n{reference}\necho(_fab_poc_outward(4));\n"
+    );
     let fast2 = run(&redefined, true);
-    assert_eq!(fast2, run(&redefined, false), "redefinition diverged across tiers");
+    assert_eq!(
+        fast2,
+        run(&redefined, false),
+        "redefinition diverged across tiers"
+    );
     assert!(
         fast2.contains("105"),
         "4 + 100 + 1 = 105 — the native answered from a BAKED callee, got {fast2:?}"
@@ -5370,7 +5368,11 @@ fn an_outward_call_resolves_against_the_running_program() {
     // promises never to produce.
     let missing = format!("{reference}\necho(_fab_poc_outward(4));\n");
     let fast3 = run(&missing, true);
-    assert_eq!(fast3, run(&missing, false), "the unknown-callee path diverged");
+    assert_eq!(
+        fast3,
+        run(&missing, false),
+        "the unknown-callee path diverged"
+    );
     assert!(
         fast3.contains("Ignoring unknown function"),
         "an absent callee must WARN like the interpreter: {fast3:?}"
@@ -5381,7 +5383,11 @@ fn an_outward_call_resolves_against_the_running_program() {
     let as_value =
         format!("_fab_poc_absent = function(x) x - 3;\n{reference}\necho(_fab_poc_outward(4));\n");
     let fast4 = run(&as_value, true);
-    assert_eq!(fast4, run(&as_value, false), "the function-value arm diverged");
+    assert_eq!(
+        fast4,
+        run(&as_value, false),
+        "the function-value arm diverged"
+    );
     assert!(
         fast4.contains("Echo(\"2\")"),
         "4 - 3 + 1 = 2, got {fast4:?}"
@@ -5413,7 +5419,11 @@ fn an_echo_expression_in_a_function_reaches_the_console() {
     // must land BEFORE the caller's, exactly as evaluation order demands.
     let src = format!("{reference}\necho(out=_fab_poc_echo(4));\n");
     let fast = run(&src, true);
-    assert_eq!(fast, run(&src, false), "the echo-expression diverged across tiers");
+    assert_eq!(
+        fast,
+        run(&src, false),
+        "the echo-expression diverged across tiers"
+    );
     assert!(
         fast.contains("v = 4") && fast.contains("out = 5"),
         "both lines must appear: {fast}"
@@ -5483,7 +5493,9 @@ fn an_outward_call_resolves_in_the_natives_own_scope() {
 
     // (2) A TOP-LEVEL BINDING IS visible, because it IS the native's island base — the other half
     // of the same rule, and the case that would break if the fix over-corrected into "never look".
-    let at_top = format!("_fab_poc_absent = function(y) y * 100;\n{reference}\necho(_fab_poc_outward(4));\n");
+    let at_top = format!(
+        "_fab_poc_absent = function(y) y * 100;\n{reference}\necho(_fab_poc_outward(4));\n"
+    );
     let top = run(&at_top, true);
     assert_eq!(top, run(&at_top, false), "the island binding diverged");
     assert!(top.contains("401"), "4 * 100 + 1 = 401, got {top}");
@@ -5500,4 +5512,3 @@ fn an_outward_call_resolves_in_the_natives_own_scope() {
         "a BOUND name is not the unknown case: {bound}"
     );
 }
-

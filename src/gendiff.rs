@@ -115,9 +115,7 @@ pub fn run_surface(seeds: u32, timeout_secs: u64, md: bool, bosl2: bool) -> Resu
         .as_ref()
         .map(|r| vec![r.join("libs"), r.join("scad-lib")])
         .unwrap_or_default();
-    let surface = bosl2.then(|| {
-        fab_gen::NativeSurface::from_library(&fab_bosl2::Bosl2)
-    });
+    let surface = bosl2.then(|| fab_gen::NativeSurface::from_library(&fab_bosl2::Bosl2));
 
     let flags = negotiate_flags(timeout);
 
@@ -270,7 +268,12 @@ fn diff_one(
             // preconditions raises on BOTH engines, and refusing to look means never learning
             // whether upstream agreed.
             return match oracle_report(src, timeout, flags, root) {
-                Ok(r) if !r.ok || r.warnings.iter().any(|l| l.trim_start().starts_with("ERROR:")) => {
+                Ok(r)
+                    if !r.ok
+                        || r.warnings
+                            .iter()
+                            .any(|l| l.trim_start().starts_with("ERROR:")) =>
+                {
                     Outcome::BothRefused
                 }
                 Ok(_) => Outcome::OursFailed(format!("{e}")),

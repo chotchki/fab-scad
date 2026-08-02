@@ -506,7 +506,6 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         self.call_scope.borrow_mut().bind(name, value);
     }
 
-
     #[allow(
         clippy::too_many_lines,
         reason = "push_user_module's setup, mirrored deliberately and in its order — splitting \
@@ -578,7 +577,9 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         super::bind_call_bookkeeping(&mut call, n_children, self.ctx);
 
         let native = if self.ctx.config.intrinsics {
-            self.ctx.registry.resolve_module(name, params, body, &home_global)
+            self.ctx
+                .registry
+                .resolve_module(name, params, body, &home_global)
         } else {
             None
         };
@@ -1098,7 +1099,6 @@ pub(super) fn reinterpret_named(
     let call = bind_values(params, &slots, &[], caller, &base, ctx)?;
     super::eval_with_ctx(body, &call, ctx)
 }
-
 
 /// AR.27 — the OUTWARD CALL: `name` resolved AT RUNTIME against the running program, for a callee
 /// the emitter did not compile.

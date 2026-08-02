@@ -18,9 +18,6 @@ libfuzzer-sys = "0.4"
 [dependencies.fab-lang]
 path = ".."
 
-# The `jit_diff` target compiles a numeric function to native code and diffs it against the interpreter.
-[dependencies.fab-jit]
-path = "../../jit"
 
 # The `gen_diff` target (AJ.6) drives the grammar generator from fuzzer bytes and A/Bs the eval
 # across cache configs — the Config bit-identity contract as a continuous oracle.
@@ -49,13 +46,6 @@ test = false
 doc = false
 bench = false
 
-# Fuzz the JIT for bit-identity with the interpreter — the only tool that executes the JIT's native code.
-[[bin]]
-name = "jit_diff"
-path = "fuzz_targets/jit_diff.rs"
-test = false
-doc = false
-bench = false
 
 [[bin]]
 name = "gen_diff"
@@ -64,15 +54,6 @@ test = false
 doc = false
 bench = false
 
-# The tier differential ONE LEVEL UP from `jit_diff`: a whole generated program through the real
-# dispatch, jit off vs on. `jit_diff` calls `compile_function` directly with positional binding, so it
-# cannot see a call-machinery divergence — the AN.16 gap that let four binding bugs through.
-[[bin]]
-name = "jit_dispatch_diff"
-path = "fuzz_targets/jit_dispatch_diff.rs"
-test = false
-doc = false
-bench = false
 
 # AR.2 — jit_dispatch_diff's twin, aimed at the NATIVE tier: intrinsics off vs on through the real
 # dispatch. Could not exist until `Config::intrinsics` gave the interpreter oracle an off-switch; every

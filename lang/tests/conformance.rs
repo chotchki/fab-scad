@@ -220,7 +220,6 @@ fn use_of_a_font_file_is_a_silent_no_op() {
         &std::fs::read_to_string(&scad).expect("read"),
         &dir,
         &[],
-        None,
         fab_lang::Config::default(),
         |_| Err(fab_lang::Error::Load("no meshes in this test".into())),
     )

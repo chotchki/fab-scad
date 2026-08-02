@@ -19,7 +19,7 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use fab_lang::{Error, Program, Scope, StmtKind, Value, eval_expr, parse, tier_eq};
+use fab_lang::{Error, parse};
 
 /// The eval budget the R.1 cost metric runs each program under: high enough that any bounded generated
 /// program completes with its TRUE `eval_steps` cost, but a cap so a runaway (the grammar bounds ranges, so
@@ -103,10 +103,6 @@ fn main() {
         let src = fab_gen::generate(seed);
         fs::write(scad_dir.join(format!("{seed}.scad")), &src).expect("write program");
         let label = label(&src);
-        if label.jit == "MISMATCH" {
-            fs::write(div_dir.join(format!("{seed}.scad")), &src).expect("write divergence");
-            eprintln!("!! JIT DIVERGENCE at seed {seed} — copied to divergences/{seed}.scad");
-        }
         writeln!(manifest, "{}", label.to_json(seed, src.len())).expect("write manifest line");
         stats.record(&label, seed);
         if i > 0 && i % 5000 == 0 {
@@ -132,11 +128,10 @@ struct Label {
     /// R.1 perf success-function SCORE: deterministic `eval_steps` cost (machine-independent, reproducible).
     /// Interpreter work only — the `Geo` tree isn't tessellated, so this is NOT geometry-kernel cost.
     cost: u64,
-    jit: &'static str,
     err: Option<String>,
 }
 
-/// Evaluate + cost + JIT-diff one program into its label. Uses `evaluate_geometry_metered` (→ the resolved
+/// Evaluate + cost one program into its label. Uses `evaluate_geometry_metered` (→ the resolved
 /// `Geo` CSG tree PLUS the `eval_steps` cost), NOT `evaluate` (→ `Mesh`, which rejects transforms/booleans as
 /// `Unimplemented` — the grammar emits those constantly). `Geo` resolution is the real "did it evaluate"
 /// signal and needs no Manifold backend; the metered path is the raw-AST driver, exact for the self-contained
@@ -156,7 +151,6 @@ fn label(src: &str) -> Label {
                 status: "err_parse",
                 ms: 0,
                 cost: 0,
-                jit: "n/a",
                 err: Some(first_line(&e)),
             };
         }
@@ -172,7 +166,6 @@ fn label(src: &str) -> Label {
         status,
         ms,
         cost,
-        jit: jit_label(&prog),
         err,
     }
 }
@@ -195,62 +188,6 @@ fn class_of(e: &Error) -> &'static str {
     }
 }
 
-/// The interp==JIT label: compile the first JIT-eligible numeric function and diff it bitwise against the
-/// interpreter over the IEEE battery. `match` = compiled + agreed everywhere; `n/a` = nothing JIT-eligible;
-/// `MISMATCH` = a real divergence. Mirrors the `jit_diff` fuzz target exactly (conservative: only compares
-/// when both tiers yield a number).
-fn jit_label(prog: &Program) -> &'static str {
-    for stmt in &prog.stmts {
-        let StmtKind::FunctionDef { params, body, .. } = &stmt.kind else {
-            continue;
-        };
-        let names: Vec<&str> = params.iter().map(|p| p.name.as_ref()).collect();
-        if names.is_empty() || names.len() > 4 {
-            continue;
-        }
-        let Ok(jitted) = fab_jit::compile_function(&names, body) else {
-            continue; // not in the numeric subset
-        };
-        for args in sample_args(names.len()) {
-            let Some(j) = jitted.call(&args) else {
-                continue;
-            };
-            let mut scope = Scope::new();
-            for (name, &v) in names.iter().zip(&args) {
-                scope.bind(*name, Value::Num(v));
-            }
-            if let Ok(Value::Num(s)) = eval_expr(body, &scope)
-                && !tier_eq(j, s)
-            {
-                // `tier_eq` (doctrine #36): bitwise for information-carrying values, NaN as a class. A
-                // `(-NaN)²`-shaped body no longer labels MISMATCH — only a real finite/±inf divergence does.
-                return "MISMATCH";
-            }
-        }
-        return "match"; // first eligible function compiled + agreed on every sample
-    }
-    "n/a"
-}
-
-/// The IEEE-corner arg battery, replicated across the arity (same corners the JIT proptest/fuzzer probe).
-fn sample_args(arity: usize) -> Vec<Vec<f64>> {
-    const CORNERS: &[f64] = &[
-        0.0,
-        -0.0,
-        1.0,
-        -1.0,
-        2.5,
-        -3.75,
-        100.0,
-        1e8,
-        1e-8,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NAN,
-    ];
-    CORNERS.iter().map(|&c| vec![c; arity]).collect()
-}
-
 impl Label {
     fn to_json(&self, seed: u32, bytes: usize) -> String {
         let err = match &self.err {
@@ -258,8 +195,8 @@ impl Label {
             None => String::new(),
         };
         format!(
-            "{{\"seed\":{seed},\"file\":\"scad/{seed}.scad\",\"status\":\"{}\",\"cost\":{},\"ms\":{},\"jit\":\"{}\",\"bytes\":{bytes}{err}}}",
-            self.status, self.cost, self.ms, self.jit
+            "{{\"seed\":{seed},\"file\":\"scad/{seed}.scad\",\"status\":\"{}\",\"cost\":{},\"ms\":{},\"bytes\":{bytes}{err}}}",
+            self.status, self.cost, self.ms
         )
     }
 }
@@ -285,9 +222,6 @@ struct Stats {
     total: u64,
     ok: u64,
     errors: u64,
-    jit_match: u64,
-    jit_mismatch: u64,
-    jit_na: u64,
     /// (cost, seed) per program — the R.1 perf success-function samples, ranked into [`Stats::perf_report`].
     costs: Vec<(u64, u32)>,
 }
@@ -299,11 +233,6 @@ impl Stats {
             self.ok += 1;
         } else {
             self.errors += 1;
-        }
-        match l.jit {
-            "match" => self.jit_match += 1,
-            "MISMATCH" => self.jit_mismatch += 1,
-            _ => self.jit_na += 1,
         }
         self.costs.push((l.cost, seed));
     }
@@ -369,14 +298,7 @@ impl Stats {
                 100.0 * n as f64 / self.total as f64
             }
         };
-        format!(
-            "ok {:.0}%, err {:.0}% | jit: match {} / n/a {} / MISMATCH {}",
-            pct(self.ok),
-            pct(self.errors),
-            self.jit_match,
-            self.jit_na,
-            self.jit_mismatch,
-        )
+        format!("ok {:.0}%, err {:.0}%", pct(self.ok), pct(self.errors),)
     }
 }
 
@@ -410,7 +332,6 @@ mod tests {
             status: "ok",
             ms: 0,
             cost,
-            jit: "n/a",
             err: None,
         };
         s.record(&lbl(10), 1);

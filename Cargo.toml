@@ -56,7 +56,7 @@ path = "src/bin/echo_repro.rs"
 required-features = ["native"]
 
 [workspace]
-members = ["bosl2", "gen", "geom", "gui", "jit", "lang", "lib", "manifold", "types"]
+members = ["bosl2", "gen", "geom", "gui", "lang", "lib", "manifold", "types"]
 # The fuzz crate is nightly-only (cargo-fuzz) — kept out of the workspace so stable builds never see it.
 exclude = ["manifold/fuzz"]
 
@@ -100,10 +100,7 @@ mesh-io = ["geometry", "dep:zip", "dep:serde_json"]
 # fab-lang (the scad-rs evaluator) ALONE — the geometry backend + its miri interface test need `Mesh`
 # without the OS-heavy native deps (reqwest/clap/rayon choke miri). `native` implies it.
 geometry = ["dep:fab-lang"]
-# The desktop Cranelift JIT (P.1) — pulls fab-jit (cranelift) alongside the evaluator. Its OWN feature (not
-# folded into `geometry`) so the lean/miri geometry build never compiles cranelift; `native` implies it.
-jit = ["geometry", "dep:fab-jit"]
-native = ["dep:reqwest", "dep:clap", "dep:rayon", "dep:fab-gen", "jit", "geometry"]
+native = ["dep:reqwest", "dep:clap", "dep:rayon", "dep:fab-gen", "geometry"]
 
 [dependencies]
 # scad-rs, our OpenSCAD reimplementation — the differential harness's OTHER engine (G.3.7). Pure
@@ -114,8 +111,6 @@ fab-lang = { path = "lang", optional = true }
 fab-bosl2 = { path = "bosl2", optional = true }
 # AJ.8 gen-diff: the grammar generator feeding the oracle differential (native harness only).
 fab-gen = { path = "gen", optional = true }
-# The desktop numeric JIT (P.1) — native-only (cranelift can't JIT in-wasm), so gated behind `jit`/`native`.
-fab-jit = { path = "jit", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

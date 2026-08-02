@@ -173,10 +173,7 @@ fn a_non_callable_local_is_silent_like_the_interpreter() {
     // No `include` needed: the shape is about a call through a parameter, and keeping the program
     // this small is what makes the console comparison readable when it fails.
     let src = "function g(fnobody, x) = fnobody(x);\necho(g(5, 3));\n";
-    let (interp, native) = (
-        run(src, &registry, false),
-        run(src, &registry, true),
-    );
+    let (interp, native) = (run(src, &registry, false), run(src, &registry, true));
     let (Leg::Ok(interp), Leg::Ok(native)) = (interp, native) else {
         panic!("both tiers must render this")
     };
@@ -239,7 +236,11 @@ fn the_duplicate_parameter_functions_bind_like_the_interpreter() {
         "path_copies",
     ] {
         assert!(
-            fab_bosl2::Bosl2.rows().functions.iter().any(|e| e.name == n),
+            fab_bosl2::Bosl2
+                .rows()
+                .functions
+                .iter()
+                .any(|e| e.name == n),
             "`{n}` has no generated row — the duplicate-parameter band declined again"
         );
     }
@@ -254,7 +255,11 @@ fn the_duplicate_parameter_functions_bind_like_the_interpreter() {
                     Leg::Ok(m) => format!("ok {m:?}"),
                     Leg::Err(e) => format!("err {e}"),
                 };
-                failures.push(format!("{call}\n  interp: {}\n  native: {}", show(&a), show(&b)));
+                failures.push(format!(
+                    "{call}\n  interp: {}\n  native: {}",
+                    show(&a),
+                    show(&b)
+                ));
             }
         }
     }
@@ -312,7 +317,11 @@ fn dollar_reads_resolve_on_the_callers_chain() {
                     Leg::Ok(m) => format!("ok {m:?}"),
                     Leg::Err(e) => format!("err {e}"),
                 };
-                failures.push(format!("{body}\n  interp: {}\n  native: {}", show(&a), show(&b)));
+                failures.push(format!(
+                    "{body}\n  interp: {}\n  native: {}",
+                    show(&a),
+                    show(&b)
+                ));
             }
         }
     }
@@ -395,7 +404,10 @@ fn c_style_comprehensions_agree_across_tiers() {
             "[0, 0, 2]",
         ),
         // The body is an ELEMENT here and a SPLICE below — `each` goes through a different seam.
-        ("[for(i = 0; i < 3; i = i + 1) each [i, -i]]", "[0, 0, 1, -1, 2, -2]"),
+        (
+            "[for(i = 0; i < 3; i = i + 1) each [i, -i]]",
+            "[0, 0, 1, -1, 2, -2]",
+        ),
         // A guarded body contributes conditionally, and an empty condition yields an empty list.
         ("[for(i = 0; i < 4; i = i + 1) if (i % 2 == 0) i]", "[0, 2]"),
         ("[for(i = 0; i < 0; i = i + 1) i]", "[]"),
@@ -415,7 +427,11 @@ fn c_style_comprehensions_agree_across_tiers() {
                     Leg::Ok(m) => format!("ok {m:?}"),
                     Leg::Err(e) => format!("err {e}"),
                 };
-                failures.push(format!("{call}\n  interp: {}\n  native: {}", show(&a), show(&b)));
+                failures.push(format!(
+                    "{call}\n  interp: {}\n  native: {}",
+                    show(&a),
+                    show(&b)
+                ));
             }
         }
     }
@@ -502,7 +518,11 @@ fn rands_draws_from_the_runs_stream_in_the_interpreters_order() {
                     Leg::Ok(m) => format!("ok {m:?}"),
                     Leg::Err(e) => format!("err {e}"),
                 };
-                failures.push(format!("{body}\n  interp: {}\n  native: {}", show(&a), show(&b)));
+                failures.push(format!(
+                    "{body}\n  interp: {}\n  native: {}",
+                    show(&a),
+                    show(&b)
+                ));
             }
         }
     }
@@ -560,7 +580,10 @@ fn comprehension_dispatch_shapes_agree_across_tiers() {
         // A `let` wrapping a `for` — the element is a loop, not a single value.
         ("[let(n = 3) for(i = [0:n-1]) i * 2]", "[0, 2, 4]"),
         // Two `let`s deep, because the peel is a loop and not one level.
-        ("[let(a = 2) let(b = a + 1) for(i = [0:b-1]) i]", "[0, 1, 2]"),
+        (
+            "[let(a = 2) let(b = a + 1) for(i = [0:b-1]) i]",
+            "[0, 1, 2]",
+        ),
         // A `let` whose body is NOT a comprehension stays ONE element — the transparency cuts both
         // ways, and getting it wrong would flatten a single-point list into the enclosing path.
         ("[let(x = 1) [x, x + 1]]", "[[1, 2]]"),
@@ -574,8 +597,14 @@ fn comprehension_dispatch_shapes_agree_across_tiers() {
         // `each` over a `let`-wrapped comprehension — both peels at once.
         ("[each let(n = 2) for(i = [0:n-1]) [i]]", "[0, 1]"),
         // And the real BOSL2 functions the two shapes were blocking.
-        ("len(_rounded_arc(10, rounding = 1, angle = 90, n = 8)) > 0", "true"),
-        ("len(squircle(10, squareness = 0.5, style = \"fg\")) > 0", "true"),
+        (
+            "len(_rounded_arc(10, rounding = 1, angle = 90, n = 8)) > 0",
+            "true",
+        ),
+        (
+            "len(squircle(10, squareness = 0.5, style = \"fg\")) > 0",
+            "true",
+        ),
     ];
     let mut failures = Vec::new();
     for (call, want) in cases {
@@ -591,7 +620,11 @@ fn comprehension_dispatch_shapes_agree_across_tiers() {
                     Leg::Ok(m) => format!("ok {m:?}"),
                     Leg::Err(e) => format!("err {e}"),
                 };
-                failures.push(format!("{call}\n  interp: {}\n  native: {}", show(&a), show(&b)));
+                failures.push(format!(
+                    "{call}\n  interp: {}\n  native: {}",
+                    show(&a),
+                    show(&b)
+                ));
             }
         }
     }

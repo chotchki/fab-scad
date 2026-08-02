@@ -915,7 +915,9 @@ fn try_native_module<'a>(
     if !ctx.config.intrinsics {
         return Ok(None);
     }
-    let Some(native) = ctx.registry.resolve_module(&mi.name, params, body, home_global)
+    let Some(native) = ctx
+        .registry
+        .resolve_module(&mi.name, params, body, home_global)
     else {
         return Ok(None);
     };

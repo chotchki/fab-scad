@@ -39,26 +39,23 @@ jobs:
       # differential targets carry the doctrine-#36 contract and get the most; lex is a thin tokenizer
       # over a corpus that has long since stopped yielding.
       #
-      # AR.2 rebalance — the two JIT lanes gave up 7 points to the new intrinsics differential, on the
-      # ground that they guard a tier that SHIPS DISABLED. FAB_JIT is off in released binaries (the L.4
-      # measurement: 34-334x per call and still a wash on real geometry), so jit_diff/jit_dispatch_diff
-      # are a correctness asset for a code path no user executes. The ~55 hand-written natives are ON in
-      # every build, and AR.5a found three of their guard lists WRONG — that is the tier where a
-      # divergence reaches somebody's print.
+      # AR.21.1 rebalance — the two JIT lanes are GONE with the tier they guarded, freeing 18 points.
+      # 15 go to intrinsics_dispatch_diff and 3 to eval. That is not generosity, it is where the risk
+      # moved: AR.2's differential used to be one of two tier oracles, and after the deletion it is the
+      # ONLY thing between the transpiled tier and a silent wrong answer. There is no second
+      # implementation left to disagree with, so the interpreter-vs-compiled console diff IS the spec.
       SHARE_PARSE: 14
       SHARE_LEX: 5
-      SHARE_EVAL: 14
-      SHARE_JIT_DIFF: 10
+      SHARE_EVAL: 17
       SHARE_GEN_DIFF: 11
-      SHARE_JIT_DISPATCH: 8
-      SHARE_INTRINSICS_DISPATCH: 7
+      SHARE_INTRINSICS_DISPATCH: 22
       SHARE_GEO_LOWER: 11
       SHARE_CSG_TREE: 14
       SHARE_POLYGON: 6
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive # BOSL2 — the seed corpus for eval/jit_diff is sliced from it
+          submodules: recursive # BOSL2 — the seed corpus for eval is sliced from it
       # rust-src is precautionary insurance for -Zbuild-std (not the blocker — see FUZZ_TARGET above).
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -66,20 +63,25 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      # Seed the eval/jit_diff corpora from ~1300 real BOSL2 function defs before fuzzing — starts the
-      # campaign on dense, valid numeric/list bodies (took jit_diff coverage ~1k → ~13k on the first run)
-      # instead of rediscovering SCAD syntax from raw bytes. No-op for parse/lex (their corpora are curated).
+      # Seed the eval corpus from ~1300 real BOSL2 function defs before fuzzing — starts the campaign on
+      # dense, valid numeric/list bodies instead of rediscovering SCAD syntax from raw bytes. No-op for
+      # parse/lex (their corpora are curated).
       # AO.9 — the shares are a BUDGET ALLOCATION, so they have to sum to the whole budget. Checked in CI
       # because the failure is silent otherwise: shares summing to 90 quietly gives back 10% of the
       # campaign, and shares summing to 130 quietly overruns the job's time target. Neither shows up as
       # anything except a job that mysteriously takes the wrong amount of time.
+      #
+      # It ENUMERATES `SHARE_*` out of the environment rather than restating the list, because the
+      # hand-written sum drifted: AR.2 added SHARE_INTRINSICS_DISPATCH and did not add it to the addends,
+      # so the guard totalled 93 and failed the job on a budget that was actually correct. A check whose
+      # own maintenance can break it is worse than no check — this one cannot miss a share.
       - name: fuzz budget shares sum to 100
         run: |
-          total=$(( SHARE_PARSE + SHARE_LEX + SHARE_EVAL + SHARE_JIT_DIFF + SHARE_GEN_DIFF \
-                  + SHARE_JIT_DISPATCH + SHARE_GEO_LOWER + SHARE_CSG_TREE + SHARE_POLYGON ))
+          total=$(env | sed -n 's/^SHARE_[A-Z_]*=//p' | paste -sd+ - | bc)
           echo "fuzz budget ${FUZZ_BUDGET_S}s split across shares totalling ${total}%"
           if [ "$total" -ne 100 ]; then
             echo "::error::fuzz shares sum to ${total}, not 100 — the campaign would run short or long"
+            env | grep '^SHARE_' | sort
             exit 1
           fi
       - name: seed fuzz corpora from BOSL2
@@ -99,33 +101,21 @@ jobs:
       - name: fuzz eval
         working-directory: lang
         run: cargo fuzz run eval --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_EVAL / 100 )) -rss_limit_mb=2048 -max_len=4096 -timeout=10
-      # The JIT vs the interpreter, BITWISE — the only tool that executes the JIT's native code (miri/Kani
-      # can't). A divergence is a doctrine-#36 violation, a crash under ASan is a memory bug in the JIT seam.
-      # No in-target size guard (Q.7 made compile crash-proof — a deep body DECLINES, never overflows); -max_len
-      # is the THROUGHPUT knob (a numeric function is small, so a large input is slow garbage, not coverage).
-      - name: fuzz jit_diff
-        working-directory: lang
-        run: cargo fuzz run jit_diff --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_JIT_DIFF / 100 )) -rss_limit_mb=2048 -max_len=4096 -timeout=10
       # AJ.6 — the GENERATOR x Config A/B: fuzzer bytes pick a seed, the seed builds a whole-surface
       # valid program (the AJ.1 coverage gate guards the grammar), and eval must be bit-identical with
       # the caches off and on. Deep VALID programs, cheap; the Config contract as the semantic oracle.
       - name: fuzz gen_diff
         working-directory: lang
         run: cargo fuzz run gen_diff --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_GEN_DIFF / 100 )) -rss_limit_mb=2048 -max_len=8 -timeout=15
-      # AN.16 — the tier differential ONE LEVEL UP from jit_diff. That target calls compile_function
-      # directly and binds params POSITIONALLY, so it structurally cannot see a divergence that lives in
-      # the CALL MACHINERY; Phase AN found four such bugs by hand, every one invisible to it. This runs a
-      # whole generated program through the real dispatch with the JIT off vs on and compares the console
-      # verbatim — warnings included, since a tier that computes the right number while swallowing a
-      # diagnostic still diverges. Same -max_len=8 as gen_diff: the bytes are just a seed.
-      - name: fuzz jit_dispatch_diff
-        working-directory: lang
-        run: cargo fuzz run jit_dispatch_diff --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_JIT_DISPATCH / 100 )) -rss_limit_mb=4096 -max_len=8 -timeout=15
-      # AR.2 — jit_dispatch_diff's twin for the NATIVE tier: intrinsics off vs on, whole generated
-      # program, real dispatch, console compared verbatim. Could not exist until `Config::intrinsics`
-      # gave the interpreter oracle an off-switch — every other accelerator had one, the natives did
-      # not, so "compiled tier == interpreter" was unfalsifiable at the dispatch level for the one tier
-      # that actually ships. This is also the contract the AR transpiler inherits wholesale.
+      # AR.2, and since AR.21.1 the one that cannot be lost: intrinsics off vs on, whole generated program,
+      # real dispatch, console compared VERBATIM — warnings included, because a tier that computes the
+      # right number while swallowing a diagnostic still diverges. It could not exist until
+      # `Config::intrinsics` gave the interpreter oracle an off-switch; every other accelerator had one,
+      # the natives did not, so "compiled tier == interpreter" was unfalsifiable at the dispatch level
+      # for the one tier that actually ships. It binds through the REAL call machinery rather than
+      # positionally, which is the distinction that matters: Phase AN found four divergences living in
+      # the binding, every one invisible to a positional harness. That contract is what the AR
+      # transpiler inherited wholesale, and with both hand tiers deleted it is the whole guard.
       - name: fuzz intrinsics_dispatch_diff
         working-directory: lang
         run: cargo fuzz run intrinsics_dispatch_diff --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_INTRINSICS_DISPATCH / 100 )) -rss_limit_mb=4096 -max_len=8 -timeout=15
@@ -156,7 +146,6 @@ jobs:
           cargo fuzz cmin parse --target "$FUZZ_TARGET"
           cargo fuzz cmin lex --target "$FUZZ_TARGET"
           cargo fuzz cmin eval --target "$FUZZ_TARGET"
-          cargo fuzz cmin jit_diff --target "$FUZZ_TARGET"
           cargo fuzz cmin intrinsics_dispatch_diff --target "$FUZZ_TARGET"
       - name: upload minimized corpus
         if: always()

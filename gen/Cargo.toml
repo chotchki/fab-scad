@@ -11,8 +11,6 @@ publish = false
 # MT19937 (fab-lang's own RandStream) is the seed source — same portable/deterministic PRNG the evaluator
 # uses, so a generator seed replays bit-identically on every platform. No new rand dependency.
 fab-lang = { path = "../lang" }
-# The interp==JIT label: compile a generated numeric function to native code and diff it against the interpreter.
-fab-jit = { path = "../jit" }
 
 [lib]
 path = "src/lib.rs"

@@ -66,24 +66,22 @@ mod webcolors;
 
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Failure, Result, RunResult};
+pub use eval::intrinsics::native_rt::peak_native_depth;
 /// AR.3 — the native registry's CALL SURFACE, parsed from the same references the fingerprint gate
 /// checks, so a consumer's picture of "what can I call" cannot drift from what actually dispatches.
 /// The generator (AO), transpiled-library fuzzing (AR.1) and the registry read ONE declaration.
 pub use eval::intrinsics::surface::{
     SurfaceDomain, SurfaceFn, SurfaceParam, native_surface, widest_domain,
 };
-pub use eval::jit_abi::{jit_math, jit_math_id};
+pub use eval::module_rt::native_module_runs;
 pub use eval::rng::RandStream;
 pub use eval::{
     Config, Contour, Evaluation, ExtrudeKind, FileTable, FnOracle, Geo, GeoNode, Imported,
-    IntrinsicMatrixRow, IntrinsicMatrixStatus, JitConst, JitDef, JitOutcome, Join2D, Message,
-    NumericJit, NumericJitFactory, RANGE_MAX, RangeIter, Resolution, Scope, Shape2D, SourceNeed,
-    Value, bench_intrinsic, eval_expr, eval_program, eval_program_with_registry,
-    evaluate_geometry_metered, fragments,
-    interpret_fn, range_iter, range_len, wired_count,
+    IntrinsicMatrixRow, IntrinsicMatrixStatus, Join2D, Message, RANGE_MAX, RangeIter, Resolution,
+    Scope, Shape2D, SourceNeed, Value, bench_intrinsic, eval_expr, eval_program,
+    eval_program_with_registry, evaluate_geometry_metered, fragments, interpret_fn, range_iter,
+    range_len, wired_count,
 };
-pub use eval::intrinsics::native_rt::peak_native_depth;
-pub use eval::module_rt::native_module_runs;
 /// AR.14.3 — a function's structural identity, for tools that need to ask "is this the same
 /// function" the way dispatch asks it. Spans excluded, so reformatting survives.
 #[must_use]
@@ -229,8 +227,7 @@ pub fn evaluate_with_base_full(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> RunResult<Evaluation> {
-    let (tree, messages) =
-        eval::evaluate_source(
+    let (tree, messages) = eval::evaluate_source(
         source,
         base_dir,
         None,
@@ -286,7 +283,8 @@ pub fn evaluate_geometry_with_base(
         library_paths,
         registry::Registry::builtin(),
         Config::from_env(),
-    )?.0)
+    )?
+    .0)
 }
 
 /// Like [`evaluate_geometry`], but returns the geometry tree PLUS the ordered `echo`/warning
@@ -389,7 +387,6 @@ pub fn resolve_geometry_with_base<R>(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     config: Config,
     mesh_reader: R,
 ) -> Result<Geo>
@@ -401,7 +398,6 @@ where
         base_dir,
         None,
         library_paths,
-        jit_factory,
         registry::Registry::builtin(),
         config,
         mesh_reader,
@@ -422,7 +418,6 @@ pub fn resolve_geometry_with_base_with_registry<R>(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     registry: &registry::Registry,
     config: Config,
     mesh_reader: R,
@@ -435,7 +430,6 @@ where
         base_dir,
         None,
         library_paths,
-        jit_factory,
         registry,
         config,
         mesh_reader,
@@ -502,14 +496,20 @@ pub fn decode_scad_source(bytes: Vec<u8>) -> String {
 pub fn resolve_geometry_from_sources<R>(
     source: &str,
     sources: &std::collections::BTreeMap<PathBuf, String>,
-    jit_factory: Option<&dyn NumericJitFactory>,
     config: Config,
     mesh_reader: R,
 ) -> Result<Geo>
 where
     R: FnMut(&str) -> Result<Imported>,
 {
-    Ok(eval::io::drive_from_map(source, sources, jit_factory, registry::Registry::builtin(), config, mesh_reader)?.0)
+    Ok(eval::io::drive_from_map(
+        source,
+        sources,
+        registry::Registry::builtin(),
+        config,
+        mesh_reader,
+    )?
+    .0)
 }
 
 /// Like [`resolve_geometry_with_base`], but ALSO returns the ordered `echo`/warning [`Message`]s — the
@@ -521,7 +521,6 @@ pub fn resolve_geometry_with_base_full<R>(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     config: Config,
     mesh_reader: R,
 ) -> RunResult<(Geo, Vec<Message>)>
@@ -533,7 +532,6 @@ where
         base_dir,
         None,
         library_paths,
-        jit_factory,
         registry::Registry::builtin(),
         config,
         mesh_reader,
@@ -553,7 +551,6 @@ pub fn resolve_geometry_with_base_full_with_registry<R>(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     registry: &registry::Registry,
     config: Config,
     mesh_reader: R,
@@ -566,7 +563,6 @@ where
         base_dir,
         None,
         library_paths,
-        jit_factory,
         registry,
         config,
         mesh_reader,
@@ -581,14 +577,19 @@ where
 pub fn resolve_geometry_from_sources_full<R>(
     source: &str,
     sources: &std::collections::BTreeMap<PathBuf, String>,
-    jit_factory: Option<&dyn NumericJitFactory>,
     config: Config,
     mesh_reader: R,
 ) -> RunResult<(Geo, Vec<Message>)>
 where
     R: FnMut(&str) -> Result<Imported>,
 {
-    eval::io::drive_from_map(source, sources, jit_factory, registry::Registry::builtin(), config, mesh_reader)
+    eval::io::drive_from_map(
+        source,
+        sources,
+        registry::Registry::builtin(),
+        config,
+        mesh_reader,
+    )
 }
 
 /// Like [`resolve_geometry_with_base_full`], but `use`/`include` consult an in-memory OVERLAY
@@ -614,7 +615,6 @@ pub fn resolve_geometry_hybrid_full<R>(
     base_dir: &Path,
     overlay: &std::collections::BTreeMap<PathBuf, String>,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     config: Config,
     mesh_reader: R,
 ) -> RunResult<(Geo, Vec<Message>)>
@@ -626,7 +626,6 @@ where
         base_dir,
         overlay,
         library_paths,
-        jit_factory,
         registry::Registry::builtin(),
         config,
         mesh_reader,
@@ -655,7 +654,6 @@ pub fn resolve_geometry_hybrid_full_with_registry<R>(
     base_dir: &Path,
     overlay: &std::collections::BTreeMap<PathBuf, String>,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     registry: &registry::Registry,
     config: Config,
     mesh_reader: R,
@@ -668,7 +666,6 @@ where
         base_dir,
         overlay,
         library_paths,
-        jit_factory,
         registry,
         config,
         mesh_reader,
@@ -686,7 +683,6 @@ where
 pub fn resolve_geometry_file_full<R>(
     path: &Path,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     config: Config,
     mesh_reader: R,
 ) -> RunResult<(Geo, Vec<Message>)>
@@ -696,7 +692,6 @@ where
     resolve_geometry_file_full_with_registry(
         path,
         library_paths,
-        jit_factory,
         registry::Registry::builtin(),
         config,
         mesh_reader,
@@ -711,7 +706,6 @@ where
 pub fn resolve_geometry_file_full_with_registry<R>(
     path: &Path,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     registry: &registry::Registry,
     config: Config,
     mesh_reader: R,
@@ -726,7 +720,6 @@ where
         base_dir,
         Some(path),
         library_paths,
-        jit_factory,
         registry,
         config,
         mesh_reader,
@@ -741,7 +734,6 @@ where
 pub fn resolve_geometry_file<R>(
     path: &Path,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     config: Config,
     mesh_reader: R,
 ) -> Result<Geo>
@@ -751,7 +743,6 @@ where
     resolve_geometry_file_with_registry(
         path,
         library_paths,
-        jit_factory,
         registry::Registry::builtin(),
         config,
         mesh_reader,
@@ -771,7 +762,6 @@ where
 pub fn resolve_geometry_file_with_registry<R>(
     path: &Path,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     registry: &registry::Registry,
     config: Config,
     mesh_reader: R,
@@ -786,7 +776,6 @@ where
         base_dir,
         Some(path),
         library_paths,
-        jit_factory,
         registry,
         config,
         mesh_reader,

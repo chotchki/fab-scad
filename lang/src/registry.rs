@@ -23,8 +23,8 @@
 //! needs no public constructor.
 
 use std::collections::BTreeMap;
-use std::sync::{LazyLock, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, OnceLock};
 
 use crate::surface::Fingerprint;
 use crate::{Expr, Parameter, Scope, Value};
@@ -829,7 +829,9 @@ mod tests {
             }]
         );
         assert_eq!(reg.function_count(), 1);
-        let kept = reg.entry_by_name("_reg_dup").expect("the first row is kept");
+        let kept = reg
+            .entry_by_name("_reg_dup")
+            .expect("the first row is kept");
         assert_eq!(kept.reference, "function _reg_dup(x) = x + 1;");
     }
 
@@ -924,7 +926,10 @@ mod tests {
             Some(function_fingerprint("function _reg_probe(x) = x + 99;").expect("parses")),
             "B anchors on B's own row"
         );
-        assert_ne!(both.anchor_fp(a, "_reg_probe"), both.anchor_fp(b, "_reg_probe"));
+        assert_ne!(
+            both.anchor_fp(a, "_reg_probe"),
+            both.anchor_fp(b, "_reg_probe")
+        );
         assert_eq!(
             both.dep_row(a, "_reg_probe").map(|e| e.reference),
             None,
@@ -1036,7 +1041,11 @@ mod tests {
             1,
             "the second library must be visible after the first forced an index"
         );
-        assert_eq!(reg.faults().len(), 1, "and the first library's fault survives");
+        assert_eq!(
+            reg.faults().len(),
+            1,
+            "and the first library's fault survives"
+        );
     }
 
     /// The SAME library may declare a name as both a row and a pin — fab-lang ships nine that way

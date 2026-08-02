@@ -22,9 +22,9 @@
 
 use std::path::{Path, PathBuf};
 
+use fab_lang::Config;
 use fab_lang::registry::Registry;
 use fab_lang::surface::LibrarySurface;
-use fab_lang::Config;
 
 /// Small enough that an unbounded native ladder cannot survive it, large enough for the DAG's
 /// measured height (22 levels) plus the evaluator. In DEBUG a native level is ~200 KiB, so this
@@ -101,7 +101,10 @@ fn a_data_driven_recursion_does_not_grow_the_host_stack() {
     let (on, off, peak) = run_small(src);
 
     assert_eq!(on, off, "tiers disagree on a deep recursion");
-    assert!(on.contains("ECHO: 12"), "lcm of 2/3/4/6 repeated is 12: {on}");
+    assert!(
+        on.contains("ECHO: 12"),
+        "lcm of 2/3/4/6 repeated is 12: {on}"
+    );
     // THE DAG'S HEIGHT, NOT THE DATA'S LENGTH — and the bound is deliberately far below the old
     // `MAX_NATIVE_DEPTH` of 32, because "under the counter" is not the property being tested. 400
     // elements buying a constant handful of frames is. Measured: 2.

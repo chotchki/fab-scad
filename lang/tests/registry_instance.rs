@@ -109,7 +109,11 @@ const MOD_SRC: &str = "module _reg_probe_mod() { cube(1); }\n_reg_probe_mod();";
 #[test]
 fn a_handed_in_row_wires_where_the_builtin_registry_does_not() {
     let probe = probe_registry();
-    assert_eq!(edge(FN_SRC, &probe), 1000.0, "the handed-in row must dispatch");
+    assert_eq!(
+        edge(FN_SRC, &probe),
+        1000.0,
+        "the handed-in row must dispatch"
+    );
     assert_eq!(
         edge(FN_SRC, Registry::builtin()),
         1.0,

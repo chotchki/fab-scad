@@ -51,14 +51,9 @@ fn run(src: &str, registry: &Registry, intrinsics: bool) -> (String, Vec<String>
         intrinsics,
         ..Config::default()
     };
-    let (geo, messages) = fab_lang::evaluate_geometry_with_registry(
-        src,
-        Path::new("."),
-        &[libs()],
-        registry,
-        config,
-    )
-    .expect("the program evaluates");
+    let (geo, messages) =
+        fab_lang::evaluate_geometry_with_registry(src, Path::new("."), &[libs()], registry, config)
+            .expect("the program evaluates");
     let echoes = messages
         .iter()
         .filter_map(|m| match m {
@@ -136,7 +131,10 @@ fn bosl2_geometry_agrees_across_tiers() {
         fast, slow,
         "the compiled tier built a different geometry tree than the interpreter"
     );
-    assert_eq!(fast_echo, slow_echo, "the two tiers printed different consoles");
+    assert_eq!(
+        fast_echo, slow_echo,
+        "the two tiers printed different consoles"
+    );
     assert!(
         fast.len() > 500,
         "the program must actually build something — got {} bytes of tree",

@@ -402,10 +402,7 @@ impl OpenScad {
     /// `warnings_file`, so neither channel can drift from the other about which render it read.
     /// `library_paths` become `OPENSCADPATH`, which is the only way a `use <lib.scad>` resolves
     /// against anywhere but the root file's own directory.
-    fn file_report(
-        root: &Path,
-        library_paths: &[PathBuf],
-    ) -> Option<crate::openscad::Report> {
+    fn file_report(root: &Path, library_paths: &[PathBuf]) -> Option<crate::openscad::Report> {
         let os = if library_paths.is_empty() {
             crate::openscad::Openscad::discover(None)
         } else {
@@ -450,16 +447,13 @@ impl Driver for OpenScad {
         })
     }
     fn warnings_file(&self, root: &Path, library_paths: &[PathBuf]) -> Vec<String> {
-        Self::file_report(root, library_paths).map_or_else(
-            Vec::new,
-            |r| {
-                r.warnings
-                    .iter()
-                    .filter(|l| !l.trim_start().starts_with("ERROR:"))
-                    .map(|l| normalize_warning(l))
-                    .collect()
-            },
-        )
+        Self::file_report(root, library_paths).map_or_else(Vec::new, |r| {
+            r.warnings
+                .iter()
+                .filter(|l| !l.trim_start().starts_with("ERROR:"))
+                .map(|l| normalize_warning(l))
+                .collect()
+        })
     }
     fn warnings(&self, scad: &str) -> Vec<String> {
         oracle::run(scad, Duration::from_secs(30))
@@ -603,10 +597,7 @@ pub fn diff_warnings(scad: &str) -> std::result::Result<(), String> {
 ///
 /// # Errors
 /// The first `(baseline vs driver)` disagreement, as a human-readable reason.
-pub fn diff_echo_file(
-    root: &Path,
-    library_paths: &[PathBuf],
-) -> std::result::Result<(), String> {
+pub fn diff_echo_file(root: &Path, library_paths: &[PathBuf]) -> std::result::Result<(), String> {
     let drivers = drivers();
     let base = drivers[0].echo_file(root, library_paths);
     for d in &drivers[1..] {

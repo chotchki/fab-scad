@@ -870,4 +870,3 @@ pub enum Children<'a> {
 ///
 /// Named because the bare type appears on both sides of the ABI and reads as noise inline.
 pub type ChildThunk<'a> = &'a dyn Fn(&dyn ModuleCtx) -> crate::Result<Geo>;
-

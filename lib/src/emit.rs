@@ -550,9 +550,7 @@ pub fn generate_native(
         let bind = if default == "rt::Value::Undef" {
             format!("{getter}.cloned().unwrap_or(rt::Value::Undef)")
         } else if default.contains('?') {
-            format!(
-                "match {getter}.cloned() {{ Some(v) => v, None => {default} }}"
-            )
+            format!("match {getter}.cloned() {{ Some(v) => v, None => {default} }}")
         } else {
             format!("{getter}.cloned().unwrap_or_else(|| {default})")
         };
@@ -940,30 +938,30 @@ impl Emitter<'_, '_> {
     }
 
     /// Does this vector element behave as a COMPREHENSION? The emitter's mirror of the interpreter's
-/// `is_comprehension`, INCLUDING the rule that a `let` is TRANSPARENT — it comprehends iff its body
-/// does, so `[let(x=…) for(…) …]` is a loop and not a single element.
-///
-/// AR.34, and missing that peel was worth 8 of the last 17 declines. The check looked only at the
-/// TOP of each item, so a `let`-wrapped comprehension took the all-plain fast path into `expr()`,
-/// which has no comprehension arm and bottoms out at "construct outside the v0 subset". The
-/// construct was inside the subset the whole time; the dispatcher just never routed to it.
-///
-/// A loop rather than recursion, matching the interpreter's own note: deep `let`-chains parse.
-fn comprehends(e: &Expr) -> bool {
-    let mut cur = e;
-    loop {
-        match &cur.kind {
-            ExprKind::LcFor { .. }
-            | ExprKind::LcForC { .. }
-            | ExprKind::LcIf { .. }
-            | ExprKind::LcEach(_) => return true,
-            ExprKind::Let { body, .. } => cur = body,
-            _ => return false,
+    /// `is_comprehension`, INCLUDING the rule that a `let` is TRANSPARENT — it comprehends iff its body
+    /// does, so `[let(x=…) for(…) …]` is a loop and not a single element.
+    ///
+    /// AR.34, and missing that peel was worth 8 of the last 17 declines. The check looked only at the
+    /// TOP of each item, so a `let`-wrapped comprehension took the all-plain fast path into `expr()`,
+    /// which has no comprehension arm and bottoms out at "construct outside the v0 subset". The
+    /// construct was inside the subset the whole time; the dispatcher just never routed to it.
+    ///
+    /// A loop rather than recursion, matching the interpreter's own note: deep `let`-chains parse.
+    fn comprehends(e: &Expr) -> bool {
+        let mut cur = e;
+        loop {
+            match &cur.kind {
+                ExprKind::LcFor { .. }
+                | ExprKind::LcForC { .. }
+                | ExprKind::LcIf { .. }
+                | ExprKind::LcEach(_) => return true,
+                ExprKind::Let { body, .. } => cur = body,
+                _ => return false,
+            }
         }
     }
-}
 
-/// A vector literal. All-plain elements go straight through `build_vector` (the stack
+    /// A vector literal. All-plain elements go straight through `build_vector` (the stack
     /// machine's repr normalization — all-numeric collapses to `NumList`); any comprehension
     /// element switches to the accumulator block the interpreter's `LcFor` walk mirrors.
     fn vector(&mut self, items: &[Expr]) -> Result<String, String> {
@@ -1211,7 +1209,11 @@ fn comprehends(e: &Expr) -> bool {
         let dynamic_arg = args
             .iter()
             .any(|a| a.name.as_deref().is_some_and(|n| n.starts_with('$')));
-        let Some(sib) = self.siblings.iter().find(|s| s.name == name).filter(|_| !dynamic_arg)
+        let Some(sib) = self
+            .siblings
+            .iter()
+            .find(|s| s.name == name)
+            .filter(|_| !dynamic_arg)
         else {
             // AR.27 — the callee is not in this batch, so DISPATCH instead of declining. Measured:
             // this is the difference between 866 and 1162 of BOSL2's 1329 functions, because a
@@ -1667,14 +1669,18 @@ fn comprehends(e: &Expr) -> bool {
                         let save = self.fresh_ident("sd")?;
                         let _ = writeln!(out, "    let {save} = fx.dollar({bn:?});");
                         let ident = self.fresh_ident("dv")?;
-                        let _ =
-                            writeln!(out, "    for {ident} in rt::iter_values_warned(fx, &{iter}) {{");
+                        let _ = writeln!(
+                            out,
+                            "    for {ident} in rt::iter_values_warned(fx, &{iter}) {{"
+                        );
                         let _ = writeln!(out, "    fx.set_dollar({bn:?}, {ident}.clone());");
                         restores = format!("    fx.set_dollar({bn:?}, {save});\n{restores}");
                     } else {
                         let ident = self.fresh_ident(bn)?;
-                        let _ =
-                            writeln!(out, "    for {ident} in rt::iter_values_warned(fx, &{iter}) {{");
+                        let _ = writeln!(
+                            out,
+                            "    for {ident} in rt::iter_values_warned(fx, &{iter}) {{"
+                        );
                         self.locals.push((bn.to_string(), ident));
                     }
                     depth += 1;
@@ -1890,7 +1896,10 @@ fn comprehends(e: &Expr) -> bool {
                     // iterable sees the earlier binders — the interpreter's nesting order.
                     let iter = self.expr(&b.value)?;
                     let ident = self.fresh_ident(bn)?;
-                    let _ = write!(open, "for {ident} in rt::iter_values_warned(fx, &{iter}) {{ ");
+                    let _ = write!(
+                        open,
+                        "for {ident} in rt::iter_values_warned(fx, &{iter}) {{ "
+                    );
                     self.locals.push((bn.to_string(), ident));
                     depth += 1;
                 }
@@ -2750,11 +2759,8 @@ pub struct FunctionBand<'a> {
 fn cycle_groups<'a>(
     live: &[(&'a str, &'a BTreeSet<String>)],
 ) -> BTreeMap<&'a str, BTreeSet<&'a str>> {
-    let index_of: BTreeMap<&str, usize> = live
-        .iter()
-        .enumerate()
-        .map(|(i, (n, _))| (*n, i))
-        .collect();
+    let index_of: BTreeMap<&str, usize> =
+        live.iter().enumerate().map(|(i, (n, _))| (*n, i)).collect();
     let succ: Vec<Vec<usize>> = live
         .iter()
         .map(|(_, deps)| {
@@ -2867,9 +2873,7 @@ fn table_for<'s>(
 ///
 /// # Errors
 /// Only a bake failure that is not a decline — a library whose constants cannot be folded at all.
-pub fn function_band<'a>(
-    lib: &'a crate::library::Library,
-) -> Result<FunctionBand<'a>, String> {
+pub fn function_band<'a>(lib: &'a crate::library::Library) -> Result<FunctionBand<'a>, String> {
     let folded = lib.fold_constants();
     let fns: Vec<&'a crate::library::LibFn> = lib.functions.values().collect();
     // Bakes are a property of the FUNCTION and its library, never of the live set, so they are
@@ -3230,7 +3234,11 @@ pub fn generate_batch(subjects: &[Subject<'_>], declared: &[&str]) -> Result<Str
              /// constants it names; a rebound constant interprets instead.\n",
         );
         for (n, b) in &expectations {
-            let _ = write!(rows, "fn __bake_{n}() -> rt::Value {{\n    {}\n}}\n", b.emit()?);
+            let _ = write!(
+                rows,
+                "fn __bake_{n}() -> rt::Value {{\n    {}\n}}\n",
+                b.emit()?
+            );
         }
         rows.push('\n');
     }
@@ -4251,7 +4259,11 @@ mod tests {
         let analyzed: Vec<BTreeSet<String>> = band
             .subjects
             .iter()
-            .map(|s| super::analyze_function(s.source).expect("subject analyzes").deps)
+            .map(|s| {
+                super::analyze_function(s.source)
+                    .expect("subject analyzes")
+                    .deps
+            })
             .collect();
         let graph: Vec<(&str, &BTreeSet<String>)> = band
             .subjects
@@ -4523,7 +4535,9 @@ mod tests {
 
         let mut by_reason: BTreeMap<String, (usize, String)> = BTreeMap::new();
         for (name, reason) in &band.declined {
-            let slot = by_reason.entry(classify(reason)).or_insert((0, String::new()));
+            let slot = by_reason
+                .entry(classify(reason))
+                .or_insert((0, String::new()));
             slot.0 += 1;
             if slot.1.is_empty() {
                 slot.1 = (*name).to_string();
@@ -4599,8 +4613,6 @@ mod tests {
         );
     }
 
-
-
     /// AR.26.2 — the three emitter bugs a library-scale batch exposed, pinned so they cannot
     /// reopen. All three were invisible for months for one reason: nothing had ever COMPILED a
     /// batch this wide, and every gate the emitter had asserted on substrings of its own output.
@@ -4651,8 +4663,8 @@ mod tests {
             "a `?` inside a closure returning Value does not type-check"
         );
         // and a CHEAP default still takes the eager path
-        let plain = super::generate_native("function plain(a, b=2) = a + b;", &[], &[])
-            .expect("emits");
+        let plain =
+            super::generate_native("function plain(a, b=2) = a + b;", &[], &[]).expect("emits");
         assert!(
             plain.contains("unwrap_or_else"),
             "a constant default should stay lazy-but-infallible"
@@ -4683,7 +4695,6 @@ mod tests {
         );
     }
 
-
     /// AR.27 SKEPTIC ROUND — two shapes the emitter must keep DECLINING, because dispatching them
     /// would answer where the interpreter reads a file, or fire a side effect the interpreter never
     /// reaches. Both were regressions the cascade lever introduced, and both are emit-time refusals, so
@@ -4708,7 +4719,7 @@ mod tests {
                 "a file-reading builtin must decline, not dispatch: {src} emitted {out:?}"
             );
         }
-    
+
         // A SIDE-EFFECTING ARGUMENT to a dispatched callee. The interpreter never evaluates an unknown
         // callee's arguments, and drops a duplicated name or a surplus positional unevaluated — so an
         // echo would print where it should not, and an assert would KILL a render the interpreter
@@ -4728,7 +4739,7 @@ mod tests {
             super::generate_native("function _p(x) = _absent(x + 1);", &[], &[]).is_ok(),
             "a pure argument to an out-of-batch callee must still compile"
         );
-    
+
         // A `$`-NAMED PARAMETER is not a Rust local, and `function_band`'s liveness probe is
         // `generate_native` returning Ok — so emitting one would keep the function in the batch and
         // break the whole generated crate rather than just itself.
@@ -4813,7 +4824,6 @@ mod tests {
             "generated.rs is stale — refresh with FAB_REGEN=1 (see the file header)"
         );
     }
-
 
     /// AR.20.8 — the generated MODULE file is current, and (because it is checked in and compiled)
     /// the emitter's module output is known to build rather than merely to contain the right

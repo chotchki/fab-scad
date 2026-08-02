@@ -99,7 +99,8 @@ fn armed_bosl2_band_modules_match_the_interpreter() {
     good.bind("BACK", fab_lang::Value::num_list(vec![0.0, 1.0, 0.0]));
     good.bind("TOP", fab_lang::Value::num_list(vec![0.0, 0.0, 1.0]));
     assert!(
-        reg.resolve_module("top_half", params, body, &good).is_some(),
+        reg.resolve_module("top_half", params, body, &good)
+            .is_some(),
         "`top_half` with the library's own `BACK`/`TOP` did not arm"
     );
     let mut rebound = fab_lang::Scope::new();

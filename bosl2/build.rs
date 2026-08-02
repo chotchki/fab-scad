@@ -98,16 +98,17 @@ fn main() {
     // file nobody can diff.
     let mut fixed = String::new();
     for line in spine.lines() {
-        if let Some(ident) = line
-            .strip_prefix("mod ")
-            .and_then(|r| r.strip_suffix(';'))
-        {
+        if let Some(ident) = line.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')) {
             // The FILE is named for the ident VERBATIM — `r#move.rs` when the source stem is a
             // Rust keyword — so the path must not strip the escape. Stripping it worked only
             // because no BOSL2 source is named after a keyword today, and `scad_mod_ident`'s whole
             // promise is that an upstream RENAME cannot produce an unbuildable regen.
             let path = module_dir.join(format!("{ident}.rs"));
-            let _ = writeln!(fixed, "#[path = {:?}] mod {ident};", path.display().to_string());
+            let _ = writeln!(
+                fixed,
+                "#[path = {:?}] mod {ident};",
+                path.display().to_string()
+            );
         } else {
             fixed.push_str(line);
             fixed.push('\n');

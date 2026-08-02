@@ -232,8 +232,11 @@ fn the_matrix_actually_reaches_both_engines() {
     std::fs::create_dir_all(&lib).expect("scratch dir");
     std::fs::write(lib.join("mylib.scad"), LIB).expect("write lib");
     let root = dir.join("root.scad");
-    std::fs::write(&root, "use <mylib.scad>\nG = 24;\necho(f_global());\ncube(1);\n")
-        .expect("write root");
+    std::fs::write(
+        &root,
+        "use <mylib.scad>\nG = 24;\necho(f_global());\ncube(1);\n",
+    )
+    .expect("write root");
 
     let libs = vec![lib];
     let drivers = fab_scad::differ::drivers();

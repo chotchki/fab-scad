@@ -14,8 +14,9 @@
 //!
 //! # The legs
 //!
-//! Five in-process configurations plus the oracle. `interp` is the floor every other leg is measured
-//! against; `hand` and `hand+jit` are what AR.21 would delete; `transpiler` is what replaces them; and
+//! Four in-process configurations plus the oracle. `interp` is the floor every other leg is measured
+//! against; `hand` is what AR.21 deletes (`hand+jit` went out with AR.21.1 — see below); `transpiler`
+//! is what replaces it; and
 //! `shipped` is the registry the product actually builds today (fab-lang's rows first, then BOSL2 —
 //! so its 66 hand rows win the names they share, which is what makes the deletion inert).
 //!
@@ -59,12 +60,15 @@ fn libs() -> Vec<PathBuf> {
     vec![manifest().join("libs"), manifest().join("scad-lib")]
 }
 
-/// The tier configurations under test. `jit` is separate from the registry because they are
-/// independent accelerators that AR.21 removes together.
+/// The tier configurations under test.
+///
+/// The `hand+jit` leg is GONE with AR.21.1 — measured at 38.6 s against `hand`'s 38.2 s, i.e. inside
+/// the noise, which is what made deleting the JIT cost nothing. The `hand` leg follows it out at
+/// AR.21.2 and this reduces to interpreter-versus-transpiler, which is the comparison that keeps
+/// meaning something afterwards.
 struct Leg {
     name: &'static str,
     intrinsics: bool,
-    jit: bool,
     /// `None` = fab-lang's own rows (`Registry::builtin()`); `Some(true)` = BOSL2 only;
     /// `Some(false)` = fab-lang's rows THEN BOSL2's, which is what `import::registry()` builds.
     bosl2: Option<bool>,
@@ -72,14 +76,29 @@ struct Leg {
 
 const LEGS: &[Leg] = &[
     // The floor. Everything else is measured against this.
-    Leg { name: "interp", intrinsics: false, jit: false, bosl2: None },
+    Leg {
+        name: "interp",
+        intrinsics: false,
+        bosl2: None,
+    },
     // What AR.21 deletes.
-    Leg { name: "hand", intrinsics: true, jit: false, bosl2: None },
-    Leg { name: "hand+jit", intrinsics: true, jit: true, bosl2: None },
+    Leg {
+        name: "hand",
+        intrinsics: true,
+        bosl2: None,
+    },
     // What replaces it.
-    Leg { name: "transpiler", intrinsics: true, jit: false, bosl2: Some(true) },
+    Leg {
+        name: "transpiler",
+        intrinsics: true,
+        bosl2: Some(true),
+    },
     // What ships today: both, hand first.
-    Leg { name: "shipped", intrinsics: true, jit: true, bosl2: Some(false) },
+    Leg {
+        name: "shipped",
+        intrinsics: true,
+        bosl2: Some(false),
+    },
 ];
 
 fn registry_for(leg: &Leg) -> Registry {
@@ -97,7 +116,6 @@ fn registry_for(leg: &Leg) -> Registry {
 fn time_eval(model: &Path, leg: &Leg, registry: &Registry) -> Option<Duration> {
     let config = fab_lang::Config {
         intrinsics: leg.intrinsics,
-        jit: leg.jit,
         // A DETERMINISTIC bound (eval STEPS, not wall time), so the same model fails at the same
         // point on every machine and every leg gets the identical allowance. Without it the
         // `interp` leg simply does not finish on the heavy BOSL2 models — which the models harness
@@ -188,14 +206,19 @@ fn sweep() {
             .map(|(leg, reg)| time_eval(m, leg, reg))
             .collect();
         rows.push((
-            m.strip_prefix(manifest()).unwrap_or(m).display().to_string(),
+            m.strip_prefix(manifest())
+                .unwrap_or(m)
+                .display()
+                .to_string(),
             times,
         ));
     }
 
     // A model that failed on ANY leg is not comparable — dropped, and counted.
-    let complete: Vec<&(String, Vec<Option<Duration>>)> =
-        rows.iter().filter(|(_, t)| t.iter().all(Option::is_some)).collect();
+    let complete: Vec<&(String, Vec<Option<Duration>>)> = rows
+        .iter()
+        .filter(|(_, t)| t.iter().all(Option::is_some))
+        .collect();
     let dropped = rows.len() - complete.len();
 
     println!("\n=== AR.35 tier EVAL time, {} models ===", complete.len());
@@ -206,7 +229,11 @@ fn sweep() {
     // most, so excluding them biases the ratio AGAINST the natives. Say so with numbers.
     for (i, leg) in LEGS.iter().enumerate() {
         let done = rows.iter().filter(|(_, t)| t[i].is_some()).count();
-        println!("  {:<11} completed {done}/{} within the budget", leg.name, rows.len());
+        println!(
+            "  {:<11} completed {done}/{} within the budget",
+            leg.name,
+            rows.len()
+        );
     }
     let mut totals: Vec<u128> = vec![0; LEGS.len()];
     for (_, times) in &complete {
@@ -269,13 +296,10 @@ fn sweep() {
     // not be slower than the hand tiers it replaces. A regression here is the one result that would
     // make AR.21 cost a user something.
     let idx = |n: &str| LEGS.iter().position(|l| l.name == n).expect("leg");
-    let (hand, transpiler) = (totals[idx("hand+jit")], totals[idx("transpiler")]);
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "microsecond totals; see above"
-    )]
+    let (hand, transpiler) = (totals[idx("hand")], totals[idx("transpiler")]);
+    #[allow(clippy::cast_precision_loss, reason = "microsecond totals; see above")]
     let ratio = transpiler as f64 / hand.max(1) as f64;
-    println!("\n  transpiler / hand+jit = {ratio:.2}x  (< 1 is faster)");
+    println!("\n  transpiler / hand = {ratio:.2}x  (< 1 is faster)");
     assert!(
         ratio < 1.25,
         "the transpiler is {ratio:.2}x the hand tiers' eval time — AR.21 would cost real time, \

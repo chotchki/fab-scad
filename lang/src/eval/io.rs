@@ -16,9 +16,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use super::loader::{ProvidedSource, SourceMap};
-use super::{
-    FileTable, Geo, Imported, Message, NumericJitFactory, Resolution, SourceNeed, resolve_source,
-};
+use super::{FileTable, Geo, Imported, Message, Resolution, SourceNeed, resolve_source};
 use crate::parser::{Program, parse};
 
 /// An empty program — the stand-in a tolerated missing/broken `use`/`include` contributes (no statements,
@@ -84,7 +82,6 @@ pub(crate) fn drive<R>(
     base_dir: &Path,
     root_path: Option<&Path>,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     registry: &crate::registry::Registry,
     config: super::Config,
     mut mesh_reader: R,
@@ -111,7 +108,6 @@ where
             root_id.as_deref(),
             &scad,
             &files,
-            jit_factory,
             registry,
             config,
         ) {
@@ -210,7 +206,6 @@ pub(crate) fn drive_intrinsic_matrix(
 pub(crate) fn drive_from_map<R>(
     source: &str,
     sources: &std::collections::BTreeMap<PathBuf, String>,
-    jit_factory: Option<&dyn NumericJitFactory>,
     registry: &crate::registry::Registry,
     config: super::Config,
     mut mesh_reader: R,
@@ -226,7 +221,7 @@ where
         // AP.2 parity with `drive`: a failing round owes the console the loader warnings this loop
         // accumulated — they printed before eval started, so they read first (a bare `?` dropped them).
         let resolution =
-            match resolve_source(source, base_dir, None, &scad, &files, jit_factory, registry, config) {
+            match resolve_source(source, base_dir, None, &scad, &files, registry, config) {
                 Ok(resolution) => resolution,
                 Err(failure) => return Err(behind(warnings, failure)),
             };
@@ -291,7 +286,6 @@ pub(crate) fn drive_hybrid<R>(
     base_dir: &Path,
     overlay: &std::collections::BTreeMap<PathBuf, String>,
     library_paths: &[PathBuf],
-    jit_factory: Option<&dyn NumericJitFactory>,
     registry: &crate::registry::Registry,
     config: super::Config,
     mut mesh_reader: R,
@@ -315,19 +309,11 @@ where
     let mut files = FileTable::new();
     let mut warnings: Vec<Message> = Vec::new();
     loop {
-        let resolution = match resolve_source(
-            source,
-            virtual_root,
-            None,
-            &scad,
-            &files,
-            jit_factory,
-            registry,
-            config,
-        ) {
-            Ok(resolution) => resolution,
-            Err(failure) => return Err(behind(warnings, failure)),
-        };
+        let resolution =
+            match resolve_source(source, virtual_root, None, &scad, &files, registry, config) {
+                Ok(resolution) => resolution,
+                Err(failure) => return Err(behind(warnings, failure)),
+            };
         match resolution {
             Resolution::Complete { geo, messages } => {
                 warnings.extend(messages);

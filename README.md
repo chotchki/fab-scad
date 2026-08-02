@@ -75,8 +75,9 @@ kernel gets its `SharedArrayBuffer`: `python3 packaging/web/dev-server.py gui/we
   (a deps-free leaf so the two never accidentally unify their trig oracles).
 - `gui/` `geom/` — the app, and `geom/` its geometry worker: the kernel behind one byte-envelope
   (`handle(&[u8]) -> Vec<u8>`), a ~1.7 MB wasm that runs in a Web Worker (a kernel thread on native).
-- `jit/` — a desktop-only Cranelift JIT for the numeric long tail, bit-identical to the interpreter
-  (fuzz-proven). Mostly idle on real models — see the writeup for why.
+- `lib/` `bosl2/` — the build-time transpiler and what it produces: BOSL2 compiled to Rust into
+  `OUT_DIR` at build time, nothing checked in. It replaced the hand-written natives AND the Cranelift
+  JIT that used to live in `jit/` (both deleted — see the writeup for why the JIT never paid).
 - `gen/` — a grammar-directed `.scad` generator (valid-by-construction programs; the fuzzer's corpus).
 - `scad-lib/` — my MIT SCAD modules (the slicer + connector lib). `libs/` — BOSL2 and friends as pinned
   submodules. `models/` — the designs, a SEPARATE repo (CC BY-NC-SA), pinned as a submodule.

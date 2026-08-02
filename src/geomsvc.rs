@@ -372,7 +372,6 @@ fn eval_source(
             let (tree, messages) = fab_lang::resolve_geometry_from_sources_full(
                 &wrap,
                 &sources,
-                None, // no JIT on the wasm worker — interp only (the web execution tier)
                 fab_lang::Config::from_env(),
                 |raw| {
                     // import()/surface() asset (W.3.24): the app packs referenced assets into the closure

@@ -18,9 +18,6 @@
               typed enum would fuse knobs that vary freely"
 )]
 pub struct Config {
-    /// Route numeric user-function calls through the Cranelift JIT (desktop only; needs a
-    /// [`NumericJitFactory`](super::NumericJitFactory) — wasm passes none, so this is a no-op there). `FAB_JIT`.
-    pub jit: bool,
     /// Dispatch registry-covered user functions to their NATIVE implementations — the hand-written
     /// intrinsics and the transpiler's generated ones (AR). `FAB_INTRINSICS=0` disables.
     ///
@@ -82,7 +79,6 @@ impl Default for Config {
     /// exception, ON by default; see its field doc.
     fn default() -> Self {
         Self {
-            jit: false,
             // ON, breaking this block's otherwise-uniform "accelerators off" rule — see the field doc.
             intrinsics: true,
             eval_cache: false,
@@ -113,7 +109,6 @@ impl Config {
     pub fn from_env() -> Self {
         let d = Self::default();
         Self {
-            jit: env_on("FAB_JIT"),
             intrinsics: !env_is("FAB_INTRINSICS", "0"),
             eval_cache: env_on("FAB_EVAL_CACHE"),
             eval_cache_argcap: env_usize("FAB_EVAL_CACHE_ARGCAP", d.eval_cache_argcap),
@@ -156,10 +151,10 @@ mod tests {
 
     /// The CONSERVATIVE baseline ([`Config::default`]) is all-off — the A/B differential's reference lane, and
     /// what the raw-AST/oracle tests run on. The app path ([`Config::from_env`]) defaults the CSG cache ON
-    /// (N.2c.2.3); the eval cache + JIT stay opt-in there. Here everything is off.
+    /// (N.2c.2.3); the eval cache stays opt-in there. Here everything is off.
     #[test]
     fn default_is_all_off() {
         let d = Config::default();
-        assert!(!d.jit && !d.eval_cache && !d.csg_cache && d.eval_budget.is_none());
+        assert!(!d.eval_cache && !d.csg_cache && d.eval_budget.is_none());
     }
 }

@@ -111,7 +111,6 @@ pub fn resolve_geometry_with_base(
         source,
         base_dir,
         library_paths,
-        jit_factory(),
         registry(),
         config,
         |raw| read_import(base_dir, raw),
@@ -130,7 +129,6 @@ pub fn resolve_geometry_with_base_full(
         source,
         base_dir,
         library_paths,
-        jit_factory(),
         registry(),
         config,
         |raw| read_import(base_dir, raw),
@@ -160,27 +158,10 @@ pub fn resolve_geometry_hybrid_full(
         base_dir,
         overlay,
         library_paths,
-        jit_factory(),
         registry(),
         config,
         |raw| read_import(import_dir, raw),
     )
-}
-
-/// The desktop numeric-JIT factory the eval entry threads into `Ctx` (P.1) — `Some` on a `jit` build (which
-/// `native` implies), `None` on a lean/miri build so cranelift is never a dependency there. The JIT is a
-/// pure native accelerator: `fast == JIT` is bit-identical, so its presence only changes speed. The RUN gate is
-/// now [`fab_lang::Config::jit`] (the caller's `config`, from `FAB_JIT` on the CLI path), passed to `compile`.
-fn jit_factory() -> Option<&'static dyn fab_lang::NumericJitFactory> {
-    #[cfg(feature = "jit")]
-    {
-        static FACTORY: fab_jit::JitFactory = fab_jit::JitFactory;
-        Some(&FACTORY)
-    }
-    #[cfg(not(feature = "jit"))]
-    {
-        None
-    }
 }
 
 /// THE LIBRARIES THIS PRODUCT LOADS (AR.26.4.3) — one definition, so there is one answer to "what
@@ -244,14 +225,9 @@ pub fn resolve_geometry_file_with(
     config: fab_lang::Config,
 ) -> Result<Geo, Error> {
     let base_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    fab_lang::resolve_geometry_file_with_registry(
-        path,
-        library_paths,
-        jit_factory(),
-        registry,
-        config,
-        |raw| read_import(&base_dir, raw),
-    )
+    fab_lang::resolve_geometry_file_with_registry(path, library_paths, registry, config, |raw| {
+        read_import(&base_dir, raw)
+    })
 }
 
 /// Like [`resolve_geometry_file`], but ALSO returns the console (AQ.1) — the file-rooted warning channel.
@@ -267,7 +243,6 @@ pub fn resolve_geometry_file_full(
     fab_lang::resolve_geometry_file_full_with_registry(
         path,
         library_paths,
-        jit_factory(),
         registry(),
         config,
         |raw| read_import(&base_dir, raw),

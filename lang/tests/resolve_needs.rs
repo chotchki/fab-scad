@@ -37,7 +37,6 @@ fn resolve<R: FnMut(&str) -> Result<Imported, Error>>(src: &str, reader: R) -> R
         src,
         Path::new("."),
         &[],
-        None,
         fab_lang::Config::default(),
         reader,
     )
@@ -123,7 +122,7 @@ fn resolve_geometry_file_reads_the_root_then_the_mesh() {
     let root = dir.join("imports_one.scad");
     std::fs::write(&root, "import(\"part.stl\");\n").expect("write root");
 
-    let geo = resolve_geometry_file(&root, &[], None, fab_lang::Config::default(), |raw| {
+    let geo = resolve_geometry_file(&root, &[], fab_lang::Config::default(), |raw| {
         assert_eq!(raw, "part.stl");
         Ok(an_import())
     })

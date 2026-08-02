@@ -39,7 +39,7 @@ fn overlay(entries: &[(&str, &str)]) -> BTreeMap<PathBuf, String> {
 /// returning the run's messages. Panics on failure — every case here is expected to render.
 fn run(source: &str, base_dir: &Path, ovl: &BTreeMap<PathBuf, String>) -> Vec<Message> {
     let (_, messages) =
-        resolve_geometry_hybrid_full(source, base_dir, ovl, &[], None, Config::default(), |raw| {
+        resolve_geometry_hybrid_full(source, base_dir, ovl, &[], Config::default(), |raw| {
             panic!("unexpected import of '{raw}'")
         })
         .expect("hybrid run renders");
@@ -203,7 +203,6 @@ fn a_disk_library_include_never_consults_the_overlay() {
         &project,
         &ovl,
         std::slice::from_ref(&libroot),
-        None,
         Config::default(),
         |raw| panic!("unexpected import of '{raw}'"),
     )

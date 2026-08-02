@@ -12,8 +12,8 @@
 //! **Precision floor:** the export quantizes (OFF ~6 significant digits, STL f32). Exact-f64
 //! comparison is therefore impossible through a file — the metric tiers are tolerance-based (G.3.7).
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};

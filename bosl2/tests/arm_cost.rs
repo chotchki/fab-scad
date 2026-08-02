@@ -21,9 +21,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use fab_lang::Config;
 use fab_lang::registry::Registry;
 use fab_lang::surface::LibrarySurface;
-use fab_lang::Config;
 
 fn libs() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -83,7 +83,10 @@ fn arming_a_transpiled_library_costs() {
         builtin.function_count(),
         builtin.module_count()
     );
-    for (label, src) in [("thin (include + cube)", THIN), ("fat (real geometry)", FAT)] {
+    for (label, src) in [
+        ("thin (include + cube)", THIN),
+        ("fat (real geometry)", FAT),
+    ] {
         let off = best(src, &empty, false, 7);
         let none = best(src, &empty, true, 7);
         let hand = best(src, builtin, true, 7);

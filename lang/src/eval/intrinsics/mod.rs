@@ -29,7 +29,6 @@ use crate::registry::ModuleNative;
 
 use super::value::Value;
 
-
 mod affine;
 pub(crate) mod fingerprint;
 
@@ -75,13 +74,11 @@ use generated::{point2d, vector_axis};
 use generated::same_shape;
 #[cfg(test)]
 use generated::{
-    _none_inside as none_inside, _point_dist as point_dist,
+    _group_sort_by_index as group_sort_by_index, _list_pattern as list_pattern,
+    _tri_class as tri_class, num_defined,
 };
 #[cfg(test)]
-use generated::{
-    _group_sort_by_index as group_sort_by_index, _list_pattern as list_pattern, _tri_class as tri_class,
-    num_defined,
-};
+use generated::{_none_inside as none_inside, _point_dist as point_dist};
 #[cfg(test)]
 use lists::{force_list, in_list};
 #[cfg(test)]

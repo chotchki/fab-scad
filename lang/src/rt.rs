@@ -30,6 +30,10 @@ pub use crate::eval::builtins::bi;
 pub use crate::eval::geo2d::Geo;
 pub use crate::eval::intrinsics::native_rt::{DepthGuard, run_interpreted};
 pub use crate::eval::intrinsics::{assert_decline, assert_failed, bosl_assert};
+/// AR.27 — the for/each expansion WITH its diagnostic. What generated code emits; the silent
+/// `iter_values_native` stays for the builtin seams that genuinely have no "for statement" to warn
+/// about.
+pub use crate::eval::iter_values_warned;
 pub use crate::eval::ops::{apply_binary, apply_unary, index, member};
 /// AR.27 — the value algebra WITH its console. `binary`/`unary` are what generated code emits:
 /// same bits as `apply_binary`/`apply_unary`, plus the SV warning routed to the run instead of
@@ -37,20 +41,16 @@ pub use crate::eval::ops::{apply_binary, apply_unary, index, member};
 pub use crate::eval::ops::{binary, unary};
 pub use crate::eval::value::Value;
 pub use crate::eval::{build_range, build_vector, cfor_tick, iter_values_native};
-/// AR.27 — the for/each expansion WITH its diagnostic. What generated code emits; the silent
-/// `iter_values_native` stays for the builtin seams that genuinely have no "for statement" to warn
-/// about.
-pub use crate::eval::iter_values_warned;
 pub use crate::parser::{BinOp, UnOp};
+/// The REGISTRY ROWS a generated library declares (AR.26.2). Emitted as static struct literals
+/// beside the natives they name, so a generated crate hands over its own dispatch table rather
+/// than having one hand-written for it somewhere else.
+pub use crate::registry::{Entry, ModuleEntry, Rows};
 /// The MODULE half of the ABI (AR.20). A generated module takes a `&dyn ModuleCtx` and hands
 /// `Children` to the modules it calls — both have to be nameable through `rt`, or the emitted
 /// signature does not compile outside fab-lang. They were missing here until AR.20.5: module
 /// emission was exercised as generated TEXT, which never proved the text would build.
 pub use crate::surface::{
-    ChildThunk, Children, Decl, Domain, FnCall, FnCtx, Kind, ModuleCall, ModuleCtx, NoClosures,
-    Console, Param,
+    ChildThunk, Children, Console, Decl, Domain, FnCall, FnCtx, Kind, ModuleCall, ModuleCtx,
+    NoClosures, Param,
 };
-/// The REGISTRY ROWS a generated library declares (AR.26.2). Emitted as static struct literals
-/// beside the natives they name, so a generated crate hands over its own dispatch table rather
-/// than having one hand-written for it somewhere else.
-pub use crate::registry::{Entry, ModuleEntry, Rows};

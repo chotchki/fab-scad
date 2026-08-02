@@ -19,7 +19,7 @@ jobs:
           tool: cargo-nextest,cargo-llvm-cov
       - run: cargo fmt --all -- --check
       # --workspace on EVERY cargo step (W.7): in a root-package workspace, bare `cargo clippy/test`
-      # resolves to fab-scad ONLY — gen/geom/gui/jit/lang/web silently skipped this gate for months.
+      # resolves to fab-scad ONLY — bosl2/gen/geom/gui/lang/lib/web silently skipped this gate for months.
       # One flag, the whole tree gates; the old per-crate -p test lanes were the workaround and are gone.
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace --verbose
@@ -50,8 +50,9 @@ jobs:
       # — uncoverable without a panic the ban forbids. Regions are already ungated for the same reason
       # (infallible-in-context `?` arms); the 1% line/function slack is that carve-out at line level.
       - run: cargo llvm-cov -p fab-lang --ignore-filename-regex 'src/eval/|src/[a-z_]+\.rs$' --fail-under-lines 99 --fail-under-functions 99
-      # fab-jit (I.8) rides the workspace lint + nextest steps; its suite IS the fast==JIT
-      # bit-identity gate (+ the speedup benchmark).
+      # fab-bosl2 rides the workspace lint + nextest steps, and that is not a formality: its build.rs
+      # transpiles the pinned BOSL2 submodule, so `cargo build --workspace` is what proves the emitted
+      # band still COMPILES. A coverage number is a lie until it does.
 
   # Kani proofs on the evaluator kernels (I.7): panic-freedom on the exact loop that runs untrusted
   # SCAD — range termination, stack pop/pop discipline, tessellation index bounds, guarded shifts. A

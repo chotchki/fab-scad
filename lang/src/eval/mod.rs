@@ -24,7 +24,6 @@ mod geo_stack;
 mod geometry;
 pub(crate) mod intrinsics;
 pub(crate) mod io;
-pub(crate) mod jit_abi;
 mod json;
 mod loader;
 mod message;
@@ -58,8 +57,8 @@ use std::rc::Rc;
 
 use crate::Mesh;
 use crate::geom::{Affine, Affine2};
-use crate::registry::Registry;
 use crate::parser::{Arg, BinOp, Expr, ExprKind, Parameter, Program, Stmt, StmtKind, UnOp};
+use crate::registry::Registry;
 
 /// The caller-supplied table that fulfills `import`/`surface` [`SourceNeed::File`]s (M.3): the literal
 /// `file=` path a call named → the [`Imported`] payload the caller read for it. fab-lang does ZERO IO, so it
@@ -224,7 +223,8 @@ fn resolve_intrinsic_matrix(
     };
     let islands = loader::islands(&loaded);
     let functions = tagged_functions(&islands);
-    let rows = registry.matrix_targets()
+    let rows = registry
+        .matrix_targets()
         .map(|(name, reference_fp, pin)| {
             let defined_fp = functions
                 .get(name)
@@ -244,108 +244,6 @@ fn resolve_intrinsic_matrix(
         })
         .collect();
     Ok(MatrixResolution::Complete(rows))
-}
-
-/// A desktop-only numeric JIT hook (P.1.2). The interpreter offers a user-function call to this BEFORE
-/// interpreting the body, but ONLY when the call is all-positional and arity-exact (a named arg sets
-/// `jit=None` at dispatch). The hook itself decides whether the ARGUMENTS are scalarizable — a number or a
-/// fixed-small numeric vector (P.1.6 rung B) — and DECLINES (`None`) anything it can't compile for this
-/// arg shape; the interpreter then runs the real body.
-///
-/// Defined here so the eval loop can dispatch to it, but the crate stays wasm-clean: the trait carries no
-/// Cranelift, and the native `fab-jit` crate implements it over its compiled `JitRegistry`. The contract
-/// is `fast == JIT` — a `Some(r)` MUST be bit-identical to interpreting the body (the JIT crate's
-/// differential proves it), so routing a call here can only change SPEED, never the result. wasm builds
-/// (which can't JIT in-sandbox) simply leave [`Ctx::jit`] `None` and interpret everything.
-pub trait NumericJit {
-    /// The compiled result of `name(args)` if a specialization for this arg SHAPE is registered (or compiles
-    /// on demand), else `None`. The hook receives the evaluated [`Value`] args and scalarizes them itself
-    /// (P.1.6 rung B): a [`Value::Num`] is a scalar, a [`Value::NumList`] a fixed-length vector; a
-    /// non-scalarizable arg (a nested list, string, undef, range, function, or an over-long vector) → `None`.
-    /// A [`JitOutcome`] carries the result's TYPE tag (P.1.4e) — the JIT return ABI is untyped `f64`, so the
-    /// compiled function reports whether that `f64` is a number/boolean/vector and the dispatch re-wraps it in
-    /// the matching [`Value`]. `None` means "not compiled / declined / raised" — the interpreter takes over.
-    ///
-    /// `rand` is the eval's live [`rng::RandStream`] woven in by pointer (P.1.6 rung-D piece 1): a JIT'd
-    /// SEEDLESS `rands()` advances it through [`jit_rand_next`], exactly as the interpreter would, so the draw
-    /// sequence stays bit-identical. The dispatch passes `Ctx::rand_stream`'s cell pointer; a body that never
-    /// calls `rands` leaves it untouched. It is a raw pointer (not `&mut`) because the native ABI carries it as
-    /// one, and the caller guarantees exclusive single-threaded access for the call's duration.
-    fn call_numeric(
-        &self,
-        name: &str,
-        args: &[Value],
-        rand: *mut core::ffi::c_void,
-    ) -> Option<JitOutcome>;
-}
-
-/// A JIT-compiled call's result, TYPE-TAGGED (P.1.4e). The native return ABI is a single untyped `f64` (plus
-/// the raise out-byte, plus — for a vector result — a sink buffer the JIT writes); this reconstructs the tag
-/// that [`Value`] carries for free in the interpreter but that evaporates crossing `extern "C"`, so the
-/// dispatch wraps a `Num` result in [`Value::Num`], a `Bool` (a comparison / `&&`/`||`/`!` / bool literal —
-/// the JIT computes these as an `i8`, returned as `0.0`/`1.0`) in [`Value::Bool`], and a `Vec` (a fixed-shape
-/// vector return, P.1.6 rung C) in [`Value::NumList`]. Returning the wrong tag would DIVERGE (`Num(1.0) !=
-/// Bool(true)`), so the tag is load-bearing, not cosmetic.
-#[derive(Debug, Clone, PartialEq)]
-pub enum JitOutcome {
-    /// A numeric result → [`Value::Num`].
-    Num(f64),
-    /// A boolean result → [`Value::Bool`].
-    Bool(bool),
-    /// A fixed-shape numeric vector (rung C) → [`Value::NumList`]. Owned — the JIT wrote it into a sink buffer.
-    Vec(Vec<f64>),
-    /// A fixed-shape NESTED value — a matrix / list-of-vectors (P.1.6 rung-D 2c.1). The JIT wrote its flat leaf
-    /// scalars to the sink buffer and rebuilt the nesting from a compile-time shape tree, applying the SAME
-    /// `build_vector` rule (all-`Num` children → `NumList`, else `List`) the interpreter does — so the value is
-    /// bit-identical, and the dispatch just hands it through. Carries a fully-built [`Value`] rather than a flat
-    /// buffer because the nesting can't survive the flat-`f64` return ABI a [`JitOutcome::Vec`] rides.
-    Nested(Value),
-}
-
-/// One user function offered to the JIT factory: its name, its parameter names (in order), and its body
-/// AST. The wasm-clean hand-off shape — the factory ([`NumericJitFactory`]) compiles the numeric-subset
-/// ones and ignores the rest. Borrowed from the loaded program; the compiled result retains no AST refs.
-pub struct JitDef<'a> {
-    /// The function's name (its registry key).
-    pub name: &'a str,
-    /// The parameters, in declaration order — names AND defaults, so the JIT can bind an unfilled param to
-    /// its default when INLINING a short call.
-    pub params: &'a [Parameter],
-    /// The function body to compile.
-    pub body: &'a Expr,
-}
-
-/// One top-level CONSTANT offered to the JIT factory (P.1.4 globals): its name and its value expression. A
-/// numeric function body that references a top-level constant — BOSL2's `_EPSILON`, `INF`, `PHI`, all over
-/// its math — resolves it by INLINING the constant's value-expr (`_EPSILON` → `1e-9`, `INF` → `1/0` = +inf),
-/// so the function COMPILES instead of declining on the free variable. The JIT compiles the value-expr in an
-/// EMPTY scope: a self-contained numeric constant inlines; one that references ANOTHER global (or a vector /
-/// string constant like `LEFT = [-1,0,0]`) makes the referrer DECLINE — harmless, so the factory is handed
-/// EVERY top-level assignment, unfiltered. Borrowed from the loaded program; the compiled result keeps no refs.
-pub struct JitConst<'a> {
-    /// The constant's name — the free variable a function body reads.
-    pub name: &'a str,
-    /// The value expression the reference resolves to.
-    pub value: &'a Expr,
-}
-
-/// Builds a [`NumericJit`] from a program's function set (P.1.2). Called ONCE per eval round, after the
-/// loader closes the `use`/`include` graph so every function is known. The native `fab-jit` crate
-/// implements this over Cranelift; `None` return means "nothing compiled, interpret everything". Kept a
-/// trait (not a closure) so the crate boundary carries no Cranelift and the method's elided lifetime lets
-/// it accept defs of any lifetime. wasm passes no factory at all → [`Ctx::jit`] stays `None`.
-pub trait NumericJitFactory {
-    /// Compile the numeric-subset functions in `defs` to a [`NumericJit`], or `None` if none compiled / the
-    /// JIT is disabled. `enabled` is the RUN gate ([`Config::jit`]) — the caller's authoritative on/off, so the
-    /// factory no longer sniffs its own env; a factory MAY still compile-for-coverage when `enabled` is false
-    /// (its own report-only probe) but must return `None` there. `consts` are the program's top-level constants
-    /// (P.1.4 globals) — a body reading one inlines its value-expr instead of declining on the free variable.
-    fn compile(
-        &self,
-        defs: &[JitDef<'_>],
-        consts: &[JitConst<'_>],
-        enabled: bool,
-    ) -> Option<Box<dyn NumericJit>>;
 }
 
 /// The evaluation context, borrowed from the `Program`:
@@ -486,14 +384,6 @@ pub(super) struct Ctx<'a> {
     /// growth per level, the exact class the interpreter designed out. A count, not a bool:
     /// re-interpretations nest.
     suppress_intrinsics: std::cell::Cell<u32>,
-    /// The desktop numeric-JIT hook (P.1.2), or `None` (wasm, or a program with nothing compiled). Built
-    /// ONCE at setup by the caller-supplied [`NumericJitFactory`] and OWNED here — the registry CLONES the
-    /// AST it needs (P.1.6 rung B on-demand recompile), so a `Box<dyn NumericJit>` still needs no `'a`. When
-    /// present, an eligible user-function call ([`Task::Apply`] with a `jit` name — all-positional) is offered
-    /// to it before the body is interpreted; the hook scalarizes the args and declines what it can't compile.
-    /// A `Some` result is bit-identical to interpreting, so this only ever changes speed. `None` everywhere
-    /// the interpreter is the whole story (raw-AST eval, wasm, no factory).
-    jit: Option<Box<dyn NumericJit>>,
     /// WHICH LIBRARIES the compiled tier may dispatch to (AR.26.1) — the accumulated
     /// [`crate::registry::Registry`] the consumer handed in, or the one fab-lang ships if it did not
     /// say. Same family as `jit` above: an accelerator table supplied from outside, and deliberately
@@ -1063,8 +953,8 @@ pub struct FnOracle<'a> {
 }
 
 impl<'a> FnOracle<'a> {
-    /// Build the oracle from borrowed functions + top-level constants (the exact shape [`JitDef`]/[`JitConst`]
-    /// carry, so both sides of the differential see identical inputs). Publishes the constants into island 0.
+    /// Build the oracle from borrowed functions + top-level constants, so both sides of a tier
+    /// differential see identical inputs. Publishes the constants into island 0.
     ///
     /// # Errors
     /// Never returns `Err` today (a constant whose RHS errors is skipped, not fatal); `Result` so a future
@@ -1127,7 +1017,6 @@ impl<'a> FnOracle<'a> {
             eval_steps: std::cell::Cell::new(0),
             live_calls: std::cell::Cell::new(0),
             suppress_intrinsics: std::cell::Cell::new(0),
-            jit: None, // the oracle IS the interpreter baseline — never route it through the JIT
             registry: crate::registry::RegistryRef(registry),
         };
         // Publish the constants into island 0's global (whole-scope, last-wins, first-occurrence order), so a
@@ -1229,7 +1118,9 @@ impl<'a> FnOracle<'a> {
 #[must_use]
 pub fn bench_intrinsic(name: &str, params: &[Parameter], body: &Expr) -> Option<IntrinsicFn> {
     // Bench seam only — no dep/const guard here (the bench times the fn pointer, it doesn't dispatch it).
-    Registry::builtin().resolve(name, params, body).map(|e| e.func)
+    Registry::builtin()
+        .resolve(name, params, body)
+        .map(|e| e.func)
 }
 
 /// The intrinsic tier's entry shape: the [`crate::surface::FnCtx`] capability plus the call's
@@ -1351,36 +1242,6 @@ fn eval_with_global<'a>(
                 name,
             } => {
                 let vals = values.split_off(values.len().saturating_sub(names.len()));
-                // Numeric-JIT fast path (P.1.2): a compiled numeric function, offered the call BEFORE any
-                // interpretation, IFF this call is JIT-eligible (`jit` name set at dispatch — all-positional).
-                // The hook SCALARIZES the args itself (P.1.6 rung B): a `Num` is a scalar, a `NumList` a
-                // fixed-small vector; a non-scalarizable arg (nested list, string, over-long vector, …) makes
-                // it decline (`None`) and we interpret. A `Some(r)` is bit-identical to interpreting `body`,
-                // so this is pure speed. The registry decides membership + shape; no work when the hook is off.
-                // Weave the eval's live RandStream in by pointer (P.1.6 rung-D piece 1): a JIT'd seedless
-                // `rands()` advances it through `jit_rand_next`, in the same eval order the interpreter draws.
-                // `as_ptr()` hands out the cell's pointer WITHOUT a `borrow`, so no `RefMut` guard aliases the
-                // `&mut` the helper transiently makes — sound because the compiled function is the sole
-                // (single-threaded) accessor while it runs, and a non-rands body never dereferences it.
-                if let (Some(name), Some(j)) = (name, ctx.jit.as_deref())
-                    && let Some(out) = j.call_numeric(
-                        name,
-                        &vals,
-                        ctx.rand_stream.as_ptr().cast::<core::ffi::c_void>(),
-                    )
-                {
-                    // Re-tag the untyped native return into a `Value` (P.1.4e): a bool-returning function
-                    // (a predicate, a comparison body) yields `Value::Bool`, not `Value::Num` — matching the
-                    // interpreter, which the JIT crate's differential proves bit-for-bit.
-                    values.push(match out {
-                        JitOutcome::Num(n) => Value::Num(n),
-                        JitOutcome::Bool(b) => Value::Bool(b),
-                        JitOutcome::Vec(xs) => Value::num_list(xs),
-                        // Already the reconstructed nested value (2c.1) — the JIT applied `build_vector`'s rule.
-                        JitOutcome::Nested(v) => v,
-                    });
-                    continue;
-                }
                 // Dev probe (off unless FAB_REDUNDANCY=1): would an eval-memo cache pay? Key this call on
                 // (fn, captured-env, args, reaching $-context) and count repeats — the cache's hit-rate ceiling.
                 // `base` (the captured env) is load-bearing: a closure shares its body AST with siblings but
@@ -3127,7 +2988,6 @@ fn resolve_source<'a>(
     root_id: Option<&std::path::Path>,
     scad_sources: &loader::SourceMap,
     files: &'a FileTable,
-    jit_factory: Option<&dyn NumericJitFactory>,
     registry: &'a Registry,
     config: Config,
 ) -> crate::RunResult<Resolution> {
@@ -3156,30 +3016,6 @@ fn resolve_source<'a>(
     let islands = loader::islands(&loaded);
     let functions = tagged_functions(&islands);
     let intrinsics = build_intrinsics(registry, &functions, config.intrinsics);
-    // Build the numeric-JIT registry ONCE, now the graph is closed and every function is known (P.1.2b).
-    // The factory (native fab-jit) compiles the numeric-subset bodies and returns a `NumericJit`; `None`
-    // when there's no factory (wasm / raw path) or nothing compiled. Done here, borrowing `functions`
-    // before it moves into the `Ctx`.
-    let jit = jit_factory.and_then(|f| {
-        let defs: Vec<JitDef<'_>> = functions
-            .iter()
-            .map(|(name, (fndef, _home))| JitDef {
-                name,
-                params: fndef.0,
-                body: fndef.1,
-            })
-            .collect();
-        // Top-level CONSTANTS the numeric subset can inline (P.1.4 globals): the root file's flat constant
-        // view (its `use`d islands' assignments, then the root's own — root wins, mirroring
-        // `tagged_functions`). A body reading `_EPSILON`/`INF`/`PHI` compiles the constant instead of declining.
-        let consts: Vec<JitConst<'_>> = tagged_globals(&islands)
-            .into_iter()
-            .map(|(name, value)| JitConst { name, value })
-            .collect();
-        // `config.jit` is the RUN gate (was the jit crate's own `FAB_JIT` read); the factory keeps its
-        // report-only EXPLAIN probe, so it may still compile-for-coverage when this is false.
-        f.compile(&defs, &consts, config.jit)
-    });
     let n = islands.len();
     // AQ.1 — the static dup-assignment scan needs, per file, its TEXT (to turn a span into a line) and
     // the name upstream would print. Built here because `loaded` is still in scope; the ROOT scope has
@@ -3190,7 +3026,6 @@ fn resolve_source<'a>(
     let mut ctx = Ctx {
         functions,
         intrinsics,
-        jit,
         registry: crate::registry::RegistryRef(registry),
         island_globals: RefCell::new(placeholder_island_globals(&islands, config.preview)),
         islands,
@@ -3286,15 +3121,12 @@ pub(crate) fn evaluate_source(
     registry: &Registry,
     config: Config,
 ) -> crate::RunResult<(Geo, Vec<Message>)> {
-    // The no-import spine (tests + the pure-geometry `evaluate*` sugar) is interpreter-only — its callers
-    // are fab-lang-internal and can't build a JIT. The desktop JIT rides the import-capable
-    // `resolve_geometry_*` entries the native shell drives models through.
+    // The no-import spine: tests and the pure-geometry `evaluate*` sugar.
     io::drive(
         source,
         base_dir,
         root_path,
         library_paths,
-        None,
         registry,
         config,
         io::no_import_reader,
@@ -3333,54 +3165,6 @@ fn tagged_functions<'a>(
         }
         for (&name, &def) in &root.functions {
             out.insert(name, (def, 0));
-        }
-    }
-    out
-}
-
-/// The root file's flat CONSTANT view (name → value expr), the [`tagged_functions`] analogue for top-level
-/// assignments: island 0's `use`d islands' assignments FIRST (source order, later overwrites earlier), then
-/// island 0's OWN assignments overriding — the same local-over-use precedence. Handed to the JIT so a numeric
-/// function referencing a top-level constant resolves it (P.1.4 globals). Every assignment is included,
-/// numeric or not; a non-numeric one (a vector/string constant) just makes any referrer DECLINE when the JIT
-/// compiles its value-expr. `last`-wins within an island matches how [`build_island_global`] re-binds.
-///
-/// EXCEPT `$`-assignments (task #51): a `$`-variable is dynamically scoped — a top-level `$fn = 32;` is only
-/// the fallback the runtime call chain overrides — so it must never reach the JIT as an inlinable lexical
-/// constant. The compiler's `Ident` arm independently declines every `$`-read (the authoritative guard);
-/// filtering here keeps the registry from even holding one. The interpreter's own hoist reads
-/// [`loader::Island::assignments`] directly, so top-level `$`-bindings still work everywhere else.
-fn tagged_globals<'a>(islands: &loader::Islands<'a>) -> BTreeMap<&'a str, &'a Expr> {
-    // AN.5: a name assigned in MORE THAN ONE island has no single right answer here. The registry holds
-    // ONE flat constant view, but upstream gives each file's functions its OWN file's value — so the old
-    // "root wins" flattening let a root assignment silently override a `use`d library's own constant
-    // INSIDE that library's functions (`EPS = 100;` at the root changed what `lib.scad`'s `shrink()`
-    // subtracted). Ambiguous names are dropped rather than guessed: a body reading one declines and stays
-    // interpreted, which IS island-correct. A repeat WITHIN one island is not ambiguous — file scope is
-    // last-wins, so that's simply its value.
-    let mut out = BTreeMap::new();
-    let mut owner: BTreeMap<&'a str, usize> = BTreeMap::new();
-    let mut ambiguous: BTreeSet<&'a str> = BTreeSet::new();
-    if let Some(root) = islands.first() {
-        let mut sources: Vec<(usize, &[(&'a str, &'a Expr)])> = Vec::new();
-        for &u in &root.uses {
-            sources.push((u, &islands[u].assignments));
-        }
-        sources.push((0, &root.assignments)); // the root island is index 0
-        for (idx, assignments) in sources {
-            for &(name, expr) in assignments {
-                if name.starts_with('$') {
-                    continue;
-                }
-                if owner.get(name).is_some_and(|&prev| prev != idx) {
-                    ambiguous.insert(name);
-                }
-                owner.insert(name, idx);
-                out.insert(name, expr);
-            }
-        }
-        for name in &ambiguous {
-            out.remove(name);
         }
     }
     out
@@ -4237,9 +4021,7 @@ fn bind_module_scope<'a>(
                 // AR.31 — lexically the module's own `global`, dynamically the caller. Modules
                 // diverged here exactly as functions did; the finding arrived through a function
                 // and the rule is the language's, not the callable kind's.
-                Some(default) => {
-                    eval_with_ctx(default, &Scope::call_frame(global, caller), ctx)?
-                }
+                Some(default) => eval_with_ctx(default, &Scope::call_frame(global, caller), ctx)?,
                 None => Value::Undef,
             };
             if !provided_names.contains(&*param.name) && !set.contains(&&*param.name) {
@@ -4629,11 +4411,7 @@ fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
 }
 
 /// [`build_ctx`] against a caller-supplied registry.
-fn build_ctx_with<'a>(
-    program: &'a Program,
-    registry: &'a Registry,
-    config: Config,
-) -> Ctx<'a> {
+fn build_ctx_with<'a>(program: &'a Program, registry: &'a Registry, config: Config) -> Ctx<'a> {
     let mut functions = BTreeMap::new();
     let mut modules = BTreeMap::new();
     for stmt in &program.stmts {
@@ -4687,7 +4465,6 @@ fn build_ctx_with<'a>(
         eval_steps: std::cell::Cell::new(0),
         live_calls: std::cell::Cell::new(0),
         suppress_intrinsics: std::cell::Cell::new(0),
-        jit: None, // the raw-AST path (no loader) is interpreter-only; the JIT rides the loader entry
         registry: crate::registry::RegistryRef(registry),
     }
 }
@@ -5133,7 +4910,6 @@ mod tests {
             None,
             &SourceMap::new(),
             &FileTable::new(),
-            None,
             Registry::builtin(),
             crate::Config::default(),
         )
@@ -5322,7 +5098,6 @@ mod tests {
                 None,
                 &SourceMap::new(),
                 &FileTable::new(),
-                None,
                 Registry::builtin(),
                 crate::Config::default(),
             )
@@ -5360,8 +5135,13 @@ mod tests {
                 acc
             },
         );
-        let rows = super::io::drive_intrinsic_matrix(&lib, std::path::Path::new("."), &[], Registry::builtin())
-            .expect("audits");
+        let rows = super::io::drive_intrinsic_matrix(
+            &lib,
+            std::path::Path::new("."),
+            &[],
+            Registry::builtin(),
+        )
+        .expect("audits");
         assert!(!rows.is_empty(), "registry can't be empty");
         for row in &rows {
             assert_eq!(
@@ -5393,8 +5173,13 @@ mod tests {
             });
         // Same name, structurally different body, defined LAST → last-wins → Changed.
         let _ = writeln!(lib, "function {revised}() = \"sustainment-drift\";");
-        let rows = super::io::drive_intrinsic_matrix(&lib, std::path::Path::new("."), &[], Registry::builtin())
-            .expect("audits");
+        let rows = super::io::drive_intrinsic_matrix(
+            &lib,
+            std::path::Path::new("."),
+            &[],
+            Registry::builtin(),
+        )
+        .expect("audits");
         let status = |name: &str| {
             rows.iter()
                 .find(|r| r.name == name)
@@ -5463,7 +5248,6 @@ mod tests {
             None,
             &no_scad,
             &no_files,
-            None,
             Registry::builtin(),
             crate::Config::default(),
         )
@@ -5481,7 +5265,6 @@ mod tests {
             None,
             &no_scad,
             &no_files,
-            None,
             Registry::builtin(),
             crate::Config::default(),
         )
@@ -5504,7 +5287,6 @@ mod tests {
             None,
             &no_scad,
             &have,
-            None,
             Registry::builtin(),
             crate::Config::default(),
         )
@@ -5737,95 +5519,6 @@ mod tests {
             eval_last("function f(x) = x; y = f(x = 1, z = 9);"),
             Value::Num(1.0)
         ); // unknown named dropped
-    }
-
-    /// A mock [`NumericJit`] that "compiles" `sq(x) = x*x` — but returns `x*x + 1000`, a WRONG value on
-    /// purpose. A real intrinsic/JIT is bit-identical (unobservable); the marker makes the mock's firing
-    /// VISIBLE, so a `1000+`-shifted result proves the call took the JIT path, and a plain result proves
-    /// it fell back to the interpreter. Any other function/arity → `None` (defer to the interpreter).
-    struct MarkerJit;
-    impl super::NumericJit for MarkerJit {
-        fn call_numeric(
-            &self,
-            name: &str,
-            args: &[Value],
-            _rand: *mut core::ffi::c_void,
-        ) -> Option<super::JitOutcome> {
-            // Scalar `sq(x)` only — a NumList (or any non-Num) arg declines here, so the interpreter runs the
-            // real body (the rung-B mock stays scalar; the real registry handles vector shapes). The mock
-            // never draws, so it ignores the woven RandStream pointer.
-            match (name, args) {
-                ("sq", [Value::Num(x)]) => Some(super::JitOutcome::Num(x * x + 1000.0)),
-                _ => None,
-            }
-        }
-    }
-
-    /// [`eval_last`] with a numeric-JIT hook injected into the ctx.
-    fn eval_last_jit(src: &str, jit: Box<dyn super::NumericJit>) -> Value {
-        let prog = parse(src).expect("parses");
-        let mut ctx = build_ctx(&prog, crate::Config::default());
-        ctx.jit = Some(jit);
-        let mut scope = Scope::new();
-        let mut last = Value::Undef;
-        for stmt in &prog.stmts {
-            if let StmtKind::Assignment { name, value } = &stmt.kind {
-                if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(0) {
-                    *slot = scope.clone();
-                }
-                last = eval_with_ctx(value, &scope, &ctx).expect("evaluates");
-                scope.bind(name.clone(), last.clone());
-            }
-        }
-        last
-    }
-
-    #[test]
-    fn numeric_jit_dispatches_eligible_calls_and_falls_back_otherwise() {
-        // (1) all-positional + all-Num → the JIT fires: 5*5 + 1000 marker.
-        assert_eq!(
-            eval_last_jit("function sq(x) = x*x; y = sq(5);", Box::new(MarkerJit)),
-            Value::Num(1025.0),
-            "an eligible numeric call takes the JIT path"
-        );
-        // (2) a NON-number arg (a vector) → the mock declines this shape → interpreter runs x*x = dot = 5.
-        assert_eq!(
-            eval_last_jit("function sq(x) = x*x; y = sq([1,2]);", Box::new(MarkerJit)),
-            Value::Num(5.0),
-            "a vector arg the mock doesn't handle falls back to the interpreted body (no marker)"
-        );
-        // (3) a NAMED arg → JIT-eligible since the P.1.4 recut (task #66): `push_call` binds the slot by
-        // name and the hook sees the same param-order `vals` as a positional spelling — the marker fires.
-        // (BOSL2 calls named everywhere; this was the whole `offered 0` finding.)
-        assert_eq!(
-            eval_last_jit("function sq(x) = x*x; y = sq(x = 5);", Box::new(MarkerJit)),
-            Value::Num(1025.0),
-            "a named-arg call takes the JIT path (rebind at push_call, same slot values)"
-        );
-        // (3b) a `$`-ARG call stays interpreted — the one real arity hazard: dollars append to `names`
-        // past the params, so `push_call` clears the hint (the load-bearing half of the old gate).
-        assert_eq!(
-            eval_last_jit(
-                "function sq(x) = x*x; y = sq(5, $fn = 16);",
-                Box::new(MarkerJit)
-            ),
-            Value::Num(25.0),
-            "a $-arg call falls back to the interpreter (no marker)"
-        );
-        // (4) a function the registry doesn't know → call_numeric returns None → interpreter runs → 27.
-        assert_eq!(
-            eval_last_jit(
-                "function cube(x) = x*x*x; y = cube(3);",
-                Box::new(MarkerJit)
-            ),
-            Value::Num(27.0),
-            "a registry miss falls back to the interpreter"
-        );
-        // (5) no hook at all (the wasm/raw path) → everything interprets → 25.
-        assert_eq!(
-            eval_last("function sq(x) = x*x; y = sq(5);"),
-            Value::Num(25.0)
-        );
     }
 
     #[test]

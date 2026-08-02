@@ -2431,9 +2431,22 @@ struct ModuleSubject<'a> {
 /// definition, the registry row's `func`, and every sibling call site — and none of them parse.
 /// Found by compiling the whole band; no substring assertion could have.
 ///
+/// A LEADING DIGIT is the third class, and BOSL2 could never have shown it: OpenSCAD identifiers
+/// may start with a digit and Rust's may not, so `3dtri_draw` emits as `_3dtri_draw`. AR.37 found
+/// it by pointing the transpiler at MCAD — `3dtri_*`, `8bit_polyfont`, `12ptStar` — where all 20
+/// compile errors were this one class wearing two masks: `expected identifier` where the name
+/// stands alone, and `invalid suffix for number literal` where the lexer took `3` as a number and
+/// the rest as its suffix. `scad_mod_ident` already did this for FILE stems (BOSL2 ships
+/// `2d_shapes.scad`); the function path just never needed it. The prefix can in principle collide
+/// with a library that declares both `3x` and `_3x` — same latent risk the file mapping has always
+/// carried, and no library has yet done it.
+///
 /// # Errors
 /// `crate`/`self`/`super`/`Self`, which `r#` cannot escape.
 fn rust_fn_ident(name: &str) -> Result<String, String> {
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        return Ok(format!("_{name}"));
+    }
     match name {
         "crate" | "self" | "super" | "Self" => {
             Err(format!("name `{name}` cannot be a Rust identifier"))
@@ -4639,6 +4652,28 @@ mod tests {
             );
         }
         assert_eq!(super::rust_fn_ident("cuboid").as_deref(), Ok("cuboid"));
+
+        // (1b) AR.37 — a LEADING DIGIT, which BOSL2 structurally could not have shown because it
+        // declares no such name. OpenSCAD allows it and MCAD uses it, so the whole MCAD band
+        // failed to compile on this alone: 20 errors, one cause, wearing two masks — a bare
+        // `expected identifier` where the name stands alone, and `invalid suffix for number
+        // literal` where the lexer read `3` as a number and `dtri_draw` as its suffix.
+        for (scad, rust) in [
+            ("3dtri_draw", "_3dtri_draw"),
+            ("8bit_polyfont", "_8bit_polyfont"),
+            ("12ptStar", "_12ptStar"),
+            ("3dtri_sides2coord", "_3dtri_sides2coord"),
+        ] {
+            assert_eq!(
+                super::rust_fn_ident(scad).as_deref(),
+                Ok(rust),
+                "`{scad}` is a legal OpenSCAD name and an illegal Rust one"
+            );
+        }
+        // The prefix applies ONLY to the leading position — an interior digit is fine, and a name
+        // already starting with `_` must not grow a second one.
+        assert_eq!(super::rust_fn_ident("rot90").as_deref(), Ok("rot90"));
+        assert_eq!(super::rust_fn_ident("_3x").as_deref(), Ok("_3x"));
 
         // (2) A FALLIBLE parameter default cannot live in a closure returning `Value`. BOSL2's
         // `binsearch(key, list, idx, cmp=f_cmp())` defaults by CALLING a sibling.

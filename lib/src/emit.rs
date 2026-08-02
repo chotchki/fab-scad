@@ -2256,8 +2256,28 @@ pub fn generate_standalone_modules(
     // body's constant reads bake (so the registry row grows a const GUARD). A module that gains a
     // sibling-function call falls out of both rather than arming unguarded, and a band-1 module
     // that gains a constant read moves to band 2 with the guard it now needs.
+    // AR.37 — the module band's half of the ident-collision guard. Same rule and the same reason as
+    // `function_band`'s: two scad names mapping to one Rust ident is a duplicate definition rustc
+    // reports under a name neither source file contains. Skipped rather than declined-with-a-reason
+    // because this band has no decline channel to report through — a module simply is or is not in
+    // it — so the cargo warning below is where it has to be said.
+    let mod_collisions = ident_collisions(lib.modules.keys().map(String::as_str));
+    let colliding: BTreeSet<&str> = mod_collisions
+        .iter()
+        .flat_map(|(_, names)| names.iter().map(String::as_str))
+        .collect();
+    for (ident, names) in &mod_collisions {
+        println!(
+            "cargo:warning=ident collision: modules {names:?} all map to Rust `{ident}` — all \
+             withdrawn, because guessing which one the library meant is worse than interpreting both"
+        );
+    }
+
     let mut band: Vec<(&crate::library::LibMod, Vec<(&str, Baked)>)> = Vec::new();
     for m in lib.modules.values() {
+        if colliding.contains(m.name.as_str()) {
+            continue;
+        }
         if generate_module_native(&m.source, &[], &[]).is_ok() {
             band.push((m, Vec::new()));
         } else if let Ok(baked) = bake_reads(&m.source, &lib, &folded)
@@ -2437,9 +2457,13 @@ struct ModuleSubject<'a> {
 /// compile errors were this one class wearing two masks: `expected identifier` where the name
 /// stands alone, and `invalid suffix for number literal` where the lexer took `3` as a number and
 /// the rest as its suffix. `scad_mod_ident` already did this for FILE stems (BOSL2 ships
-/// `2d_shapes.scad`); the function path just never needed it. The prefix can in principle collide
-/// with a library that declares both `3x` and `_3x` — same latent risk the file mapping has always
-/// carried, and no library has yet done it.
+/// `2d_shapes.scad`); the function path just never needed it.
+///
+/// THE PREFIX IS NOT INJECTIVE, which is why this is exposed as [`rust_ident`] and why
+/// [`ident_collisions`] exists: a library declaring both `3x` and `_3x` maps them onto one Rust
+/// name. Left implicit, that surfaces as a duplicate-definition error naming the MANGLED ident,
+/// which points at neither of the scad names that caused it. The bands check it up front instead
+/// and withdraw both — the rule `Library::read` already applies to a name declared twice.
 ///
 /// # Errors
 /// `crate`/`self`/`super`/`Self`, which `r#` cannot escape.
@@ -2461,6 +2485,56 @@ fn rust_fn_ident(name: &str) -> Result<String, String> {
         | "typeof" | "unsized" | "virtual" | "yield" => Ok(format!("r#{name}")),
         _ => Ok(name.to_string()),
     }
+}
+
+/// THE MAPPER: the one place a SCAD name becomes a Rust identifier (AR.37).
+///
+/// Exposed because the mapping is not the identity and callers need to be able to ASK. A generated
+/// native is defined under the mapped name, its registry row carries the SCAD name (which is what
+/// the fingerprint gate keys on), and anything reasoning about the emitted text — a test, a build
+/// script, a debugger — needs the same answer without reimplementing the rules. Three of them, and
+/// each one exists because a real library tripped it: Rust KEYWORDS raw-escape (`move`, `typeof`),
+/// a LEADING DIGIT takes an underscore (`3dtri_draw`), and four names cannot be spelled at all.
+///
+/// NOT INJECTIVE — see [`ident_collisions`], which is the guard rather than a caveat.
+///
+/// # Errors
+/// `crate`/`self`/`super`/`Self`, which `r#` cannot escape and no mangling can rescue.
+pub fn rust_ident(scad_name: &str) -> Result<String, String> {
+    rust_fn_ident(scad_name)
+}
+
+/// Distinct SCAD names that [`rust_ident`] maps onto the SAME Rust identifier, each collision
+/// listed with every scad name feeding it (sorted, so a report is stable run to run).
+///
+/// The prefix rule is what makes this possible: `3x` and `_3x` are two different OpenSCAD functions
+/// and one Rust `_3x`. Nothing in the emitter could notice — each function emits correctly on its
+/// own — so the failure lands on rustc as a duplicate definition of a name that appears in NEITHER
+/// library source. A band calls this first and withdraws every colliding name, which is the same
+/// answer `Library::read` gives a name declared twice: refuse to guess, say which, keep going.
+///
+/// Names that cannot be mapped at all are not collisions and are skipped here; they decline on
+/// their own through [`rust_ident`]'s error.
+#[must_use]
+pub fn ident_collisions<'a>(
+    scad_names: impl IntoIterator<Item = &'a str>,
+) -> Vec<(String, Vec<String>)> {
+    let mut by_ident: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in scad_names {
+        if let Ok(ident) = rust_ident(name) {
+            by_ident.entry(ident).or_default().push(name.to_string());
+        }
+    }
+    by_ident
+        .into_iter()
+        .filter(|(_, names)| names.len() > 1)
+        .map(|(ident, mut names)| {
+            names.sort();
+            names.dedup();
+            (ident, names)
+        })
+        .filter(|(_, names)| names.len() > 1)
+        .collect()
 }
 
 /// The Rust module ident for a library SOURCE file (AR.23): the stem, non-ident chars mapped to
@@ -2911,6 +2985,30 @@ pub fn function_band<'a>(lib: &'a crate::library::Library) -> Result<FunctionBan
     let mut live: Vec<bool> = vec![true; fns.len()];
     let mut rounds = 0_usize;
     let mut reasons: Vec<Option<String>> = vec![None; fns.len()];
+
+    // AR.37 — IDENT COLLISIONS, before the fixpoint rather than at rustc. `rust_ident` is not
+    // injective (`3x` and `_3x` are one `_3x`), and a collision is invisible to everything below:
+    // each function emits correctly on its own and the duplicate definition surfaces under a name
+    // that appears in neither source file. Both sides are withdrawn — refusing to guess which one
+    // the library meant, exactly as `Library::read` does for a name declared twice — and each gets
+    // the other named in its reason so the report says what actually happened.
+    let collisions = ident_collisions(fns.iter().map(|f| f.name.as_str()));
+    for (ident, names) in &collisions {
+        for (i, f) in fns.iter().enumerate() {
+            if names.iter().any(|n| n == &f.name) {
+                live[i] = false;
+                let others: Vec<&str> = names
+                    .iter()
+                    .filter(|n| *n != &f.name)
+                    .map(String::as_str)
+                    .collect();
+                reasons[i] = Some(format!(
+                    "ident collision: `{}` and {:?} both map to Rust `{ident}`",
+                    f.name, others
+                ));
+            }
+        }
+    }
     loop {
         rounds += 1;
         // The sibling table IS the live set — a function that cannot even produce a `Sibling`
@@ -4675,6 +4773,16 @@ mod tests {
         assert_eq!(super::rust_fn_ident("rot90").as_deref(), Ok("rot90"));
         assert_eq!(super::rust_fn_ident("_3x").as_deref(), Ok("_3x"));
 
+        // (1c) THE MAPPER IS THE PUBLIC FACE of the same rules — one place to ask, so a caller
+        // reasoning about emitted text never reimplements them and drifts out of agreement.
+        assert_eq!(
+            super::rust_ident("3dtri_draw").as_deref(),
+            Ok("_3dtri_draw")
+        );
+        assert_eq!(super::rust_ident("typeof").as_deref(), Ok("r#typeof"));
+        assert_eq!(super::rust_ident("cuboid").as_deref(), Ok("cuboid"));
+        assert!(super::rust_ident("crate").is_err());
+
         // (2) A FALLIBLE parameter default cannot live in a closure returning `Value`. BOSL2's
         // `binsearch(key, list, idx, cmp=f_cmp())` defaults by CALLING a sibling.
         let sib = super::sibling_of(&super::Subject {
@@ -4879,6 +4987,76 @@ mod tests {
             have, want,
             "generated_modules.rs is stale — refresh with FAB_REGEN=1 (see the file header)"
         );
+    }
+
+    /// AR.37 — THE MAPPER IS NOT INJECTIVE, and this guard is what makes that safe.
+    ///
+    /// The leading-digit prefix maps `3x` and `_3x` onto one Rust `_3x`. Nothing downstream can
+    /// notice: each function emits correctly in isolation, and the failure arrives as a rustc
+    /// duplicate definition of `_3x` — a name in NEITHER library source, so the error points at
+    /// the mangling instead of at either function that caused it.
+    ///
+    /// `function_band` withdraws BOTH sides. Keeping one would be a guess about which the library
+    /// meant, and the wrong guess silently answers for the other function — the exact failure this
+    /// tier is built to make impossible. Withdrawing both costs two natives and no correctness.
+    #[test]
+    fn a_mangled_name_collision_withdraws_both_sides() {
+        // The finder, first: no collision in the ordinary case, INCLUDING names that get mangled.
+        assert!(super::ident_collisions(["cuboid", "3dtri_draw", "typeof"]).is_empty());
+        // `crate` cannot be mapped at all, so it declines on its own rather than colliding.
+        assert!(super::ident_collisions(["crate", "cuboid"]).is_empty());
+        assert_eq!(
+            super::ident_collisions(["3x", "_3x", "cuboid"]),
+            vec![("_3x".to_string(), vec!["3x".to_string(), "_3x".to_string()])],
+            "`3x` and `_3x` are two OpenSCAD functions and one Rust identifier"
+        );
+
+        // And the BAND acts on it. Built in memory rather than from a directory: the point is what
+        // `function_band` does with a colliding pair, and a temp dir would only add I/O to it.
+        let mut lib = crate::library::Library::default();
+        for (name, src) in [
+            ("3x", "function 3x(a) = a * 3;"),
+            ("_3x", "function _3x(a) = a * 30;"),
+            ("ok", "function ok(a) = a + 1;"),
+        ] {
+            let prog = fab_lang::parse(src).expect("the reference parses");
+            let fab_lang::StmtKind::FunctionDef { params, body, .. } = &prog.stmts[0].kind else {
+                panic!("`{name}` is a function definition");
+            };
+            lib.functions.insert(
+                name.to_string(),
+                crate::library::LibFn {
+                    name: name.to_string(),
+                    file: "collide.scad".to_string(),
+                    source: src.to_string(),
+                    params: params.clone(),
+                    body: body.clone(),
+                },
+            );
+        }
+
+        let band = super::function_band(&lib).expect("the band computes");
+        let kept: Vec<&str> = band.subjects.iter().map(|s| s.name).collect();
+        assert!(
+            kept.contains(&"ok"),
+            "a function with no collision must survive one: {kept:?}"
+        );
+        assert!(
+            !kept.contains(&"3x") && !kept.contains(&"_3x"),
+            "BOTH sides of a collision withdraw — keeping one is a guess: {kept:?}"
+        );
+        for name in ["3x", "_3x"] {
+            let why = band
+                .declined
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, why)| why.as_str())
+                .unwrap_or_else(|| panic!("`{name}` withdrew without a reason"));
+            assert!(
+                why.contains("ident collision") && why.contains("_3x"),
+                "`{name}`'s reason must name the collision and the Rust ident it landed on: {why}"
+            );
+        }
     }
 
     /// The walk's scope rules, on synthetic references where the answer is unambiguous.

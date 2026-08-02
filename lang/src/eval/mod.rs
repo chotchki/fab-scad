@@ -2434,11 +2434,20 @@ fn dispatch_call<'a>(
                         scope: scope.clone(),
                         rebind: duplicate_rebind(params, &provided),
                     });
+                    // AR.31 — same split as `push_call`: lexically `base`, dynamically the
+                    // caller. The two dispatch branches must agree about a default's scope or one
+                    // call has two answers depending on how its args were spelled.
+                    let dflt = arg_slots
+                        .iter()
+                        .zip(params)
+                        .any(|(slot, p)| slot.is_none() && p.default.is_some())
+                        .then(|| Scope::call_frame(&base, scope));
+                    let dflt = dflt.as_ref().unwrap_or(&base);
                     for (slot, param) in arg_slots.into_iter().zip(params).rev() {
                         match (slot, &param.default) {
                             (Some(expr), _) => tasks.push(Task::Eval(expr, scope.clone())),
                             (None, Some(default)) => {
-                                tasks.push(Task::Eval(default, base.clone()));
+                                tasks.push(Task::Eval(default, dflt.clone()));
                             }
                             (None, None) => tasks.push(Task::PushUndef),
                         }
@@ -2706,6 +2715,22 @@ fn push_call<'a>(
     for (_, expr) in dollars.iter().rev() {
         tasks.push(Task::Eval(expr, caller.clone()));
     }
+    // AR.31 — A DEFAULT'S SCOPE SPLITS, and evaluating it in `base` alone implements only half of
+    // it. A PLAIN name resolves LEXICALLY, in the callee's own island: a `use`d library's default
+    // must see that library's globals and not the root's, which `base` gets right. A `$`-name
+    // resolves DYNAMICALLY, on the CALLER's chain, exactly as it does anywhere else — and `base` is
+    // an island global with no dynamic parent, so every `$`-read in a default used to stop there.
+    // `call_frame` is precisely both rules: lexically a child of `base`, dynamically a child of
+    // `caller`. Measured against stock OpenSCAD, which answers with the caller's value.
+    //
+    // BUILT ONLY WHEN A DEFAULT IS ACTUALLY UNFILLED, so an ordinary all-args call allocates no
+    // extra frame. Found by AR.30's adversarial review; the matrix is `tests/default_scope.rs`.
+    let default_scope = arg_slots
+        .iter()
+        .zip(params)
+        .any(|(slot, p)| slot.is_none() && p.default.is_some())
+        .then(|| Scope::call_frame(base, caller));
+    let default_scope = default_scope.as_ref().unwrap_or(base);
     for (i, (slot, param)) in arg_slots.into_iter().zip(params).enumerate().rev() {
         if Some(i) == this_idx {
             // the receiver is already a VALUE — no expr to evaluate.
@@ -2714,7 +2739,7 @@ fn push_call<'a>(
         }
         match (slot, &param.default) {
             (Some(expr), _) => tasks.push(Task::Eval(expr, caller.clone())),
-            (None, Some(default)) => tasks.push(Task::Eval(default, base.clone())),
+            (None, Some(default)) => tasks.push(Task::Eval(default, default_scope.clone())),
             (None, None) => tasks.push(Task::PushUndef),
         }
     }
@@ -4193,7 +4218,12 @@ fn bind_module_scope<'a>(
     for (param, slot) in params.iter().zip(&arg_slots) {
         if slot.is_none() {
             let value = match &param.default {
-                Some(default) => eval_with_ctx(default, global, ctx)?,
+                // AR.31 — lexically the module's own `global`, dynamically the caller. Modules
+                // diverged here exactly as functions did; the finding arrived through a function
+                // and the rule is the language's, not the callable kind's.
+                Some(default) => {
+                    eval_with_ctx(default, &Scope::call_frame(global, caller), ctx)?
+                }
                 None => Value::Undef,
             };
             if !provided_names.contains(&*param.name) && !set.contains(&&*param.name) {

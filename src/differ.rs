@@ -266,6 +266,12 @@ pub trait Driver {
     /// [`Driver::warnings`] for a `.scad` FILE and its `use`/`include` graph (AQ.1). A diagnostic that
     /// NAMES a file can only arise from a real graph, so the string-rooted channel cannot reach it.
     fn warnings_file(&self, root: &Path, library_paths: &[PathBuf]) -> Vec<String>;
+    /// [`Driver::echo`] for a `.scad` FILE and its `use`/`include` graph (AR.31). Same argument as
+    /// `warnings_file`, one channel over: a question about which ISLAND a name resolves in cannot be
+    /// asked of a single string, because a single string is one island. `use` versus `include` is the
+    /// whole distinction — one shares the root's globals, the other does not — and every scoping rule
+    /// that separates them is unreachable from the string-rooted channel by construction.
+    fn echo_file(&self, root: &Path, library_paths: &[PathBuf]) -> Vec<String>;
 }
 
 /// Strip the `WARNING: ` prefix and the trailing ` in file …, line N` locator from an oracle warning,
@@ -316,23 +322,35 @@ impl Driver for FabLang {
             .collect()
     }
     fn warnings_file(&self, root: &Path, library_paths: &[PathBuf]) -> Vec<String> {
-        let console = match crate::import::resolve_geometry_file_full(
+        Self::file_console(root, library_paths)
+            .iter()
+            .filter_map(fab_lang::Message::warning)
+            .map(normalize_warning)
+            .collect()
+    }
+    fn echo_file(&self, root: &Path, library_paths: &[PathBuf]) -> Vec<String> {
+        Self::file_console(root, library_paths)
+            .iter()
+            .filter_map(fab_lang::Message::echo)
+            .map(|c| format!("ECHO: {c}"))
+            .collect()
+    }
+}
+
+impl FabLang {
+    /// The whole console a FILE-rooted run produces — the shared source for `echo_file` and
+    /// `warnings_file`, so the two channels can never disagree about which run they are reading.
+    fn file_console(root: &Path, library_paths: &[PathBuf]) -> Vec<fab_lang::Message> {
+        match crate::import::resolve_geometry_file_full(
             root,
             library_paths,
             fab_lang::Config::from_env(),
         ) {
             Ok((_tree, messages)) => messages,
             Err(failure) => failure.console(), // a failed run still reports what it printed (AP.5)
-        };
-        console
-            .iter()
-            .filter_map(fab_lang::Message::warning)
-            .map(normalize_warning)
-            .collect()
+        }
     }
-}
 
-impl FabLang {
     /// The console messages `scad` produces, through the geometry-TREE entry point.
     ///
     /// The tree, NOT `evaluate_full`'s mesh, and that distinction is load-bearing: `evaluate_full`
@@ -379,6 +397,30 @@ fn fab_geometry_outcome(result: fab_lang::Result<fab_lang::Geo>) -> Outcome {
 /// The real OpenSCAD binary — the oracle.
 pub struct OpenScad;
 
+impl OpenScad {
+    /// Render a FILE and hand back the run report — the shared source for `echo_file` and
+    /// `warnings_file`, so neither channel can drift from the other about which render it read.
+    /// `library_paths` become `OPENSCADPATH`, which is the only way a `use <lib.scad>` resolves
+    /// against anywhere but the root file's own directory.
+    fn file_report(
+        root: &Path,
+        library_paths: &[PathBuf],
+    ) -> Option<crate::openscad::Report> {
+        let os = if library_paths.is_empty() {
+            crate::openscad::Openscad::discover(None)
+        } else {
+            crate::openscad::Openscad::with_library_paths(library_paths)
+        }
+        .ok()?;
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let out = std::env::temp_dir().join(format!("fab-oracle-file-{seq}.stl"));
+        let report = os.render(root, &out, Duration::from_secs(30));
+        let _ = std::fs::remove_file(&out);
+        report.ok()
+    }
+}
+
 impl Driver for OpenScad {
     fn name(&self) -> &'static str {
         "openscad"
@@ -402,20 +444,14 @@ impl Driver for OpenScad {
             .map(|run| run.echo.iter().map(|l| l.trim().to_string()).collect())
             .unwrap_or_default()
     }
+    fn echo_file(&self, root: &Path, library_paths: &[PathBuf]) -> Vec<String> {
+        Self::file_report(root, library_paths).map_or_else(Vec::new, |r| {
+            r.echo.iter().map(|l| l.trim().to_string()).collect()
+        })
+    }
     fn warnings_file(&self, root: &Path, library_paths: &[PathBuf]) -> Vec<String> {
-        let os = if library_paths.is_empty() {
-            crate::openscad::Openscad::discover(None)
-        } else {
-            crate::openscad::Openscad::with_library_paths(library_paths)
-        };
-        let Ok(os) = os else { return Vec::new() };
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let out = std::env::temp_dir().join(format!("fab-oracle-warn-{seq}.stl"));
-        let report = os.render(root, &out, Duration::from_secs(30));
-        let _ = std::fs::remove_file(&out);
-        report.map_or_else(
-            |_| Vec::new(),
+        Self::file_report(root, library_paths).map_or_else(
+            Vec::new,
             |r| {
                 r.warnings
                     .iter()
@@ -559,6 +595,34 @@ pub fn diff_warnings(scad: &str) -> std::result::Result<(), String> {
 ///
 /// # Errors
 /// The first `(baseline vs driver)` disagreement, as a human-readable reason.
+/// [`diff_echo`] for a `.scad` FILE and its `use`/`include` graph (AR.31).
+///
+/// The channel a SCOPING question needs. A single string is one island, so `use` versus `include` —
+/// and every rule that separates them — is unreachable from the string-rooted differ by
+/// construction. Same argument AQ.1 made one channel over for warnings.
+///
+/// # Errors
+/// The first `(baseline vs driver)` disagreement, as a human-readable reason.
+pub fn diff_echo_file(
+    root: &Path,
+    library_paths: &[PathBuf],
+) -> std::result::Result<(), String> {
+    let drivers = drivers();
+    let base = drivers[0].echo_file(root, library_paths);
+    for d in &drivers[1..] {
+        let other = d.echo_file(root, library_paths);
+        if base != other {
+            return Err(format!(
+                "{}: {} echo {base:?} vs {} echo {other:?}",
+                root.display(),
+                drivers[0].name(),
+                d.name()
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn diff_warnings_file(
     root: &Path,
     library_paths: &[PathBuf],

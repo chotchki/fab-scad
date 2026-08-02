@@ -100,7 +100,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] AR.28 - Fuzz the LOADED library: point the generator at a LibrarySurface handed in, and gate the transpiled band
 - [x] AR.29 - Two-phase binding for duplicate parameters: resolve it in the runtime, before the native
 - [x] AR.30 - $-variable reads compile in a function body: FnCtx gains the dollar capability the module side has
-- [ ] AR.31 - CONFORMANCE: a parameter default is severed from the caller's $-chain, where OpenSCAD is not
+- [x] AR.31 - CONFORMANCE: a parameter default is severed from the caller's $-chain, where OpenSCAD is not
 ## Phase K - scad-rs: differential harness + semantics corpus
 - [ ] K.1 - Harness v1: both engines, metric gate per model class, corpus tiers 1-3 wired in CI (OpenSCAD suite, BOSL2 tests, models/)
   - [x] K.1.1 - K.1.1 - BOSL2 test corpus tier: sweep the .scadtest suite through scad-rs

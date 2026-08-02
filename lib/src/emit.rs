@@ -527,37 +527,15 @@ pub fn generate_native(
         // declines LOUDLY as a free read.
         let default = match &p.default {
             None => "rt::Value::Undef".to_string(),
-            // A `$`-READ IN A DEFAULT IS SEVERED FROM THE CALLER, so it must not compile — the same
-            // decline the function-LITERAL path already makes, for the same reason and now on the
-            // top-level def too. AR.30 opened this by widening the `$` arm to every `em.expr` in
-            // the function emitter, and defaults go through that arm: `function f(n=$fn) = n;`
-            // emitted `unwrap_or_else(|| fx.dollar("$fn"))`, reading the CALL SITE's chain, while
-            // `push_call` evaluates an unfilled slot's default in `base` — an island global with no
-            // dynamic parent, so the interpreted read stops at that island's own `$fn`. Measured
-            // 24 versus 0 on `module m() { echo(f()); } m($fn=24);`.
-            //
-            // It also split the compiled tier against ITSELF: the all-positional branch leaves the
-            // slot absent so this default fires, while the named-arg branch evaluates the real
-            // default in `base` and passes it — one call, two spellings, two answers. And the
-            // emitted string is inlined into SIBLING call sites to fill holes, which would have
-            // falsified the premise stated above `Sibling` (that an emitted default references only
-            // literals and baked constants).
-            //
-            // ZERO COST TODAY: a depth-aware scan of all 2072 `function`/`module` headers under
-            // libs/ finds no `$` in any parameter default. This arms on a pin bump or a third-party
-            // library, which is exactly when nobody would be looking.
-            //
-            // WHICH TIER IS RIGHT IS A SEPARATE QUESTION, and the answer is uncomfortable: stock
-            // OpenSCAD answers 24, so the NATIVE was oracle-correct and the INTERPRETER carries a
-            // conformance bug (see AR.31). Declining here is still right — the tiers must agree
-            // before either is fixed — but it is a deferral, not an acquittal.
-            Some(d) if subtree_reads_dollar(d) => {
-                return Err(format!(
-                    "{name}: a `$`-read in the default of `{}` — an unfilled slot's default \
-                     evaluates in the island global, not the caller's chain",
-                    p.name
-                ));
-            }
+            // A `$`-READ IN A DEFAULT IS FINE AGAIN (AR.31), and the round trip is worth recording
+            // because it inverted twice. AR.30 widened the `$` arm to the function emitter, which
+            // caught defaults too, and the compiled tier began reading the CALLER's chain where the
+            // interpreter read the callee's island global — 24 versus 0. The reflex was to decline,
+            // and that is what shipped for a commit. But the oracle says 24: the NATIVE was right
+            // and the INTERPRETER was the one that disagreed with OpenSCAD, so declining was
+            // suppressing the correct tier to match the incorrect one. AR.31 fixed the interpreter
+            // (`Scope::call_frame`: lexically the island, dynamically the caller) and the decline
+            // came back out. `tests/default_scope.rs` is the matrix, against the real binary.
             Some(d) => em
                 .expr(d)
                 .map_err(|e| format!("{name}: default of `{}`: {e}", p.name))?,
@@ -5126,28 +5104,30 @@ mod tests {
         assert!(err.contains("free read `a`"), "{err}");
     }
 
-    /// A `$`-READ IN A PARAMETER DEFAULT DECLINES, and it is the one shape AR.30 had to take back.
+    /// A `$`-READ IN A PARAMETER DEFAULT COMPILES, and the story is worth the test.
     ///
-    /// Widening the `$` arm to the function emitter caught parameter defaults too, which go through
-    /// the same `em.expr`. That emitted `unwrap_or_else(|| fx.dollar("$fn"))` — the CALL SITE's
-    /// chain — where `push_call` evaluates an unfilled slot's default in the callee's island global,
-    /// which has no dynamic parent. Measured 24 versus 0. The BODY read is fine and is the whole
-    /// win; only the default is severed.
+    /// AR.30 widened the `$` arm to the function emitter, which caught defaults as well as bodies,
+    /// and the compiled tier began reading the CALLER's chain where the interpreter read the
+    /// callee's island global — 24 versus 0, found by adversarial review with a working
+    /// differential. The reflex was to decline the shape, and that shipped for one commit.
     ///
-    /// Found by adversarial review, latent in both vendored libraries (no `$` appears in any of
-    /// 2072 parameter defaults), and therefore exactly the kind of thing that arms on a pin bump
-    /// with nobody watching.
+    /// Then the oracle settled it the other way: stock OpenSCAD answers 24, so the NATIVE had been
+    /// right and the INTERPRETER was what disagreed with upstream. Declining had been suppressing
+    /// the correct tier to match the incorrect one. AR.31 fixed the interpreter and this came back.
+    ///
+    /// The conformance matrix lives in `tests/default_scope.rs`, against the real binary; this is
+    /// only the emitter's half — that the shape is compiled at all.
     #[test]
-    fn a_dollar_read_in_a_parameter_default_declines() {
-        let err = super::generate_native("function f(n=$fn) = n;", &[], &[])
-            .expect_err("a `$`-read in a default is severed from the caller — decline");
-        assert!(err.contains("default of `n`"), "{err}");
-        assert!(err.contains("island global"), "{err}");
-
-        // The BODY read still compiles — the decline is about defaults, not about `$` at all.
+    fn a_dollar_read_in_a_parameter_default_compiles() {
+        let out = super::generate_native("function f(n=$fn) = n;", &[], &[])
+            .expect("a `$`-read in a default reads the caller, on both tiers, since AR.31");
+        assert!(
+            out.contains("fx.dollar(\"$fn\")"),
+            "the default must go through the ctx, not a bake:\n{out}"
+        );
         assert!(
             super::generate_native("function f(n) = n * $fn;", &[], &[]).is_ok(),
-            "a `$`-read in the BODY is AR.30's whole point"
+            "and the BODY read, which was AR.30's whole point"
         );
     }
 

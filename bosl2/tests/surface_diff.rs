@@ -354,6 +354,106 @@ fn the_dollar_reading_functions_are_compiled() {
     );
 }
 
+/// AR.32 — THE C-STYLE COMPREHENSION, on the shapes that discriminate.
+///
+/// `[for(c=1, i=0; i<=n; c=c*(n-i)/(i+1), i=i+1) c]` is a three-clause loop with mutable state, and
+/// the two clauses BIND SEQUENTIALLY — an init's later binding sees the earlier ones, an update's
+/// later binding sees the NEW earlier value. Get the second wrong and BOSL2's DP row builders return
+/// plausible garbage rather than failing.
+///
+/// PINNED VALUES, not just tier agreement, wherever upstream documents one: `binomial(6)` is
+/// `[1,6,15,20,15,6,1]` in its own docstring, and two tiers both answering `undef` agree with each
+/// other while both being wrong.
+#[test]
+fn c_style_comprehensions_agree_across_tiers() {
+    if !have_bosl2() {
+        return;
+    }
+    let (registry, _surface) = harness();
+    let cases: &[(&str, &str)] = &[
+        // The library's own, with the value its docstring promises.
+        ("binomial(6)", "[1, 6, 15, 20, 15, 6, 1]"),
+        ("binomial_coefficient(6, 2)", "15"),
+        ("cumsum([1, 2, 3, 4])", "[1, 3, 6, 10]"),
+        ("cumprod([1, 2, 3, 4])", "[1, 2, 6, 24]"),
+        ("product([[1, 2], [3, 4]])", "[3, 8]"),
+        // SEQUENTIAL INIT: a later binding sees the earlier one, so `b` is 2 and not undef.
+        ("[for(a = 1, b = a + 1; a < 2; a = a + 1) b]", "[2]"),
+        // SEQUENTIAL UPDATE: `y` sees the NEW `x`. Last-wins or parallel binding gives [11, 21].
+        (
+            "[for(i = 0, x = 0, y = 0; i < 2; i = i + 1, x = i * 10, y = x + 1) y]",
+            "[0, 11]",
+        ),
+        // A CLAUSE-LOCAL temporary the update introduces and a later update binding consumes —
+        // BOSL2's DP idiom, minimised. It must not leak into the next iteration's condition.
+        //
+        // `[0, 0, 2]` and not `[0, 2, 6]`: the body contributes BEFORE the update runs, so each
+        // element is the accumulator as of the previous pass. Getting that ordering wrong is the
+        // one thing this case exists to catch, and it caught the author first.
+        (
+            "[for(i = 0, acc = 0; i < 3; t = i * 2, acc = acc + t, i = i + 1) acc]",
+            "[0, 0, 2]",
+        ),
+        // The body is an ELEMENT here and a SPLICE below — `each` goes through a different seam.
+        ("[for(i = 0; i < 3; i = i + 1) each [i, -i]]", "[0, 0, 1, -1, 2, -2]"),
+        // A guarded body contributes conditionally, and an empty condition yields an empty list.
+        ("[for(i = 0; i < 4; i = i + 1) if (i % 2 == 0) i]", "[0, 2]"),
+        ("[for(i = 0; i < 0; i = i + 1) i]", "[]"),
+    ];
+    let mut failures = Vec::new();
+    for (call, want) in cases {
+        let src = format!("include <BOSL2/std.scad>\necho({call});\n");
+        match (run(&src, &registry, false), run(&src, &registry, true)) {
+            (Leg::Ok(a), Leg::Ok(b)) if a == b => {
+                // AND the value, so a shared wrong answer cannot pass as agreement.
+                if !a.iter().any(|m| m.contains(want)) {
+                    failures.push(format!("{call}: expected {want}, got {a:?}"));
+                }
+            }
+            (a, b) => {
+                let show = |l: &Leg| match l {
+                    Leg::Ok(m) => format!("ok {m:?}"),
+                    Leg::Err(e) => format!("err {e}"),
+                };
+                failures.push(format!("{call}\n  interp: {}\n  native: {}", show(&a), show(&b)));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} C-style case(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// NON-VACUITY for the C-style band: the functions must actually be COMPILED, or the comparison
+/// above is the interpreter against itself. All eleven declined before AR.32.
+#[test]
+fn the_c_style_functions_are_compiled() {
+    if !have_bosl2() {
+        return;
+    }
+    let rows = fab_bosl2::Bosl2.rows();
+    for n in [
+        "binomial",
+        "binomial_coefficient",
+        "cumsum",
+        "cumprod",
+        "product",
+        "_dp_distance_row",
+        "_dp_distance_array",
+        "_dp_extract_map",
+        "hull2d_path",
+        "path_sweep",
+    ] {
+        assert!(
+            rows.functions.iter().any(|e| e.name == n),
+            "`{n}` uses a C-style comprehension and should now compile"
+        );
+    }
+}
+
 /// NON-VACUITY, and this file is worthless without it. Two interpreted runs agree perfectly, so a
 /// tier differential that armed nothing — or generated programs that call nothing — passes while
 /// testing nothing. Three separate ways it could be hollow, each checked.

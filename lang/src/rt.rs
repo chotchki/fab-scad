@@ -36,7 +36,7 @@ pub use crate::eval::ops::{apply_binary, apply_unary, index, member};
 /// dropped. The pure pair stays for callers that genuinely have nowhere to put a diagnostic.
 pub use crate::eval::ops::{binary, unary};
 pub use crate::eval::value::Value;
-pub use crate::eval::{build_range, build_vector, iter_values_native};
+pub use crate::eval::{build_range, build_vector, cfor_tick, iter_values_native};
 /// AR.27 — the for/each expansion WITH its diagnostic. What generated code emits; the silent
 /// `iter_values_native` stays for the builtin seams that genuinely have no "for statement" to warn
 /// about.

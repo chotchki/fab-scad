@@ -742,7 +742,25 @@ const MAX_CALL_DEPTH: u32 = 1_000_000;
 /// break, which returned a 10M-element PARTIAL result for an infinite `for(b=0; b!=1; b=0)` — slow AND
 /// wrong twice over (upstream errors, and a silent truncation is the never-silently-wrong doctrine's
 /// exact villain).
-const MAX_CFOR_ITERATIONS: u64 = 1_000_000;
+pub(crate) const MAX_CFOR_ITERATIONS: u64 = 1_000_000;
+
+/// One iteration of a C-style comprehension, counted — the check BOTH tiers make.
+///
+/// AR.32. The compiled tier runs this loop as a Rust `loop`, and a limit it re-declared would be a
+/// second copy of an oracle-probed constant AND of upstream's verbatim message. The interpreter's
+/// `LcForCUpdate` arm and the emitted `rt::cfor_tick` call are the same function, so the two cannot
+/// drift the way the guard lists did before AR.5a.
+///
+/// # Errors
+/// Past [`MAX_CFOR_ITERATIONS`], upstream's exact verdict.
+pub fn cfor_tick(iterations: u64) -> crate::Result<()> {
+    if iterations > MAX_CFOR_ITERATIONS {
+        return Err(crate::Error::Eval(
+            "For loop counter exceeded limit".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 /// One step on the evaluator's explicit work-stack. Each `Eval` carries the [`Scope`] it evaluates
 /// in (an `Rc<Frame>` clone — cheap), so a call's body can evaluate in the callee's scope while the
@@ -1938,12 +1956,10 @@ fn eval_with_global<'a>(
                     }
                 }
                 let iterations = iterations + 1;
-                if iterations > MAX_CFOR_ITERATIONS {
-                    // AD.4: upstream's hard limit, verbatim verdict (boundary probed: 1e6 ok, 1e6+1 errors).
-                    return Err(crate::Error::Eval(
-                        "For loop counter exceeded limit".to_string(),
-                    ));
-                }
+                // AD.4: upstream's hard limit, verbatim verdict (boundary probed: 1e6 ok, 1e6+1
+                // errors). Through `cfor_tick` since AR.32, which is also what the compiled tier
+                // calls — one constant, one message, no second copy to drift.
+                cfor_tick(iterations)?;
                 tasks.push(Task::LcForCStep {
                     cond,
                     update,

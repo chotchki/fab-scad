@@ -1843,6 +1843,128 @@ impl Emitter<'_, '_> {
                 out.push_str(&"} ".repeat(depth));
                 Ok(out)
             }
+            // AR.32 — the C-STYLE comprehension: `[for(c=1, i=0; i<=n; c=c*(n-i)/(i+1), i=i+1) c]`.
+            // A genuine three-clause loop with mutable state, which is why it fell outside a subset
+            // built around `for(i = range)`.
+            //
+            // IT LOWERS TO A RUST `loop` and the ORDER is the interpreter's, arm for arm: test the
+            // condition against the current bindings, contribute the body, run the update, count.
+            // `LcForCStep` evaluates `cond` in a fresh child scope holding the loop vars and
+            // `LcForCUpdate` rebinds them afterwards; emitted `let mut` plus assignment is the same
+            // value flow with the same sequencing.
+            //
+            // BOTH CLAUSES BIND SEQUENTIALLY, and that is not a detail: an init's later binding sees
+            // the earlier ones (`for(a=1, b=a+1; …)` gives `b == 2`), and an update's later binding
+            // sees the NEW earlier value — BOSL2's `_dp_distance_row` DP relies on exactly that.
+            // Emitting them as ordered Rust statements reproduces it for free.
+            //
+            // THREE SHAPES DECLINE, all of them console or scope problems rather than loop ones.
+            // An UNNAMED binding warns "Assignment without variable name" and binds nothing; a
+            // DUPLICATE within a clause is first-wins and warns — every iteration, for an update.
+            // Reproducing warnings that repeat per iteration is possible but it is a second console
+            // implementation, and neither shape occurs in BOSL2. A NEW name introduced by the update
+            // clause (one the init never bound) would need a pre-declaration whose initial value the
+            // interpreter never has; it declines rather than guess `undef`.
+            ExprKind::LcForC {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                fn named<'n>(args: &'n [Arg], which: &str) -> Result<Vec<&'n str>, String> {
+                    let mut names: Vec<&str> = Vec::new();
+                    for a in args {
+                        let Some(n) = a.name.as_deref() else {
+                            return Err(format!(
+                                "an unnamed binding in a C-style `for`'s {which} clause (it warns \
+                                 and binds nothing)"
+                            ));
+                        };
+                        if names.contains(&n) {
+                            return Err(format!(
+                                "a duplicate `{n}` in a C-style `for`'s {which} clause (first-wins, \
+                                 and it warns every iteration)"
+                            ));
+                        }
+                        names.push(n);
+                    }
+                    Ok(names)
+                }
+                let init_names = named(init, "init")?;
+                let update_names = named(update, "update")?;
+                // A NAME THE UPDATE INTRODUCES is a clause-local temporary — BOSL2's DP row builders
+                // do this constantly (`costs = …, newrow = concat(newrow, [min(costs)…])`). The
+                // interpreter pushes it onto `vars`, so it would also be visible to the NEXT
+                // iteration's condition and body; a Rust `let` inside the loop is not. That
+                // difference is unobservable exactly when neither reads it, which is checkable here
+                // rather than assumed — and when one does, decline, because carrying it across
+                // iterations means seeding it from whatever the enclosing scope had on the first
+                // pass, which is a second scoping rule for a shape nothing in the library uses.
+                let introduced: Vec<&str> = update_names
+                    .iter()
+                    .copied()
+                    .filter(|n| !init_names.contains(n))
+                    .collect();
+                if !introduced.is_empty() {
+                    let mut free = std::collections::BTreeSet::new();
+                    free_reads(cond, &mut Vec::new(), &mut free);
+                    free_reads(body, &mut Vec::new(), &mut free);
+                    if let Some(n) = introduced.iter().find(|n| free.contains(**n)) {
+                        return Err(format!(
+                            "a C-style `for` update binds `{n}`, which the condition or body also \
+                             reads — it would have to survive into the next iteration"
+                        ));
+                    }
+                }
+
+                let mark = self.locals.len();
+                let mut out = String::new();
+                // INIT, in order, each seeing the ones before it. `mut` only where the update
+                // actually rebinds — an unconditional `mut` would warn `unused_mut`, which the
+                // generated file does not allow.
+                let mut idents: Vec<String> = Vec::with_capacity(init.len());
+                for (b, n) in init.iter().zip(&init_names) {
+                    let v = self.expr(&b.value)?;
+                    let ident = self.fresh_ident(n)?;
+                    let m = if update_names.contains(n) { "mut " } else { "" };
+                    let _ = write!(out, "let {m}{ident} = {v}; ");
+                    self.locals.push(((*n).to_string(), ident.clone()));
+                    idents.push(ident);
+                }
+                let iters = self.fresh_ident("iters")?;
+                let _ = write!(out, "let mut {iters}: u64 = 0; loop {{ ");
+                let c = self.expr(cond)?;
+                let _ = write!(out, "if !({c}).is_truthy() {{ break; }} ");
+                let inner = self.element(body, acc)?;
+                let _ = write!(out, "{inner}");
+                // UPDATE, in order, assigning into the SAME bindings — a fresh `let` would shadow
+                // and the next iteration's condition would read the stale one.
+                // Emitted in order, and an introduced name is pushed as it goes so a LATER binding
+                // in the same clause resolves it — which is the whole point of the shape.
+                let umark = self.locals.len();
+                for (b, n) in update.iter().zip(&update_names) {
+                    let v = self.expr(&b.value)?;
+                    match init_names.iter().position(|i| i == n) {
+                        // Assign into the SAME binding: a fresh `let` would shadow, and the next
+                        // iteration's condition would read the stale one.
+                        Some(slot) => {
+                            let _ = write!(out, "{} = {v}; ", idents[slot]);
+                        }
+                        // Clause-local, scoped to this iteration by the surrounding `loop` block.
+                        None => {
+                            let ident = self.fresh_ident(n)?;
+                            let _ = write!(out, "let {ident} = {v}; ");
+                            self.locals.push(((*n).to_string(), ident));
+                        }
+                    }
+                }
+                self.locals.truncate(umark);
+                // The cap and its verdict come from `rt`, which is the interpreter's own function —
+                // a re-declared limit would be a second copy of an oracle-probed constant.
+                let _ = write!(out, "{iters} += 1; rt::cfor_tick({iters})?; }} ");
+                self.locals.truncate(mark);
+                Ok(format!("{{ {out} }} "))
+            }
             ExprKind::LcIf { cond, then, els } => {
                 let c = self.expr(cond)?;
                 let t = self.element(then, acc)?;
@@ -1898,7 +2020,6 @@ impl Emitter<'_, '_> {
                 // Scope the binders to this element: a sibling element must not see them.
                 Ok(format!("{{ {out} }} "))
             }
-            ExprKind::LcForC { .. } => Err("C-style comprehension outside the subset".into()),
             _ => Ok(format!("{acc}.push({});\n        ", self.expr(e)?)),
         }
     }
@@ -4253,9 +4374,20 @@ mod tests {
         /// comment saying it had no ctx to ask stopped being true at AR.17. 29 of the 33 landed
         /// outright; the other four moved on to their next construct.
         ///
-        /// The tail is 11 C-style comprehensions, 8 `rands`, 5 range forms, 3 nested comprehension
-        /// forms, 2 `$`-BINDINGS (a dynamic SET, which is not the same problem as a read), and 4
-        /// GENUINE FREE VARIABLES that are upstream bugs rather than gaps:
+        /// 1304 (98.1%) at AR.32, which took the C-STYLE comprehension — 10 of the 11. It lowers to
+        /// a Rust `loop` whose ORDER is the interpreter's arm for arm (test, contribute, update,
+        /// count), and both clauses bind SEQUENTIALLY, which ordered Rust statements reproduce for
+        /// free — the property BOSL2's DP row builders depend on. A name the UPDATE introduces is a
+        /// clause-local temporary (`costs = …, newrow = concat(newrow, [min(costs)…])`), emitted as
+        /// a `let` inside the loop, which is sound exactly when neither the condition nor the body
+        /// reads it — checked with `free_reads` rather than assumed. The eleventh needs its
+        /// temporary to survive into the next iteration and declines honestly. The iteration cap
+        /// comes from `rt::cfor_tick`, the interpreter's OWN function, so an oracle-probed constant
+        /// and upstream's verbatim message have one declaration between the tiers.
+        ///
+        /// The tail is 8 `rands`, 5 range forms, 3 nested comprehension forms, 2 `$`-BINDINGS (a
+        /// dynamic SET, which is not the same problem as a read), and 4 GENUINE FREE VARIABLES that
+        /// are upstream bugs rather than gaps:
         /// `gear_shorten_skew` reads `helical` where its parameters are `helical1`/`helical2`,
         /// `mb_torus` reads `maj_rad` for `r_maj`, `path_to_bezcornerpath` passes a `tangents` it does
         /// not declare, and `_turtle3d_list_command` uses `v` ten lines before binding it. Compiling
@@ -4268,7 +4400,7 @@ mod tests {
         /// `cargo check --workspace` builds all 1260 of these natives. THE TWO GATES ARE A PAIR —
         /// if fab-bosl2 ever leaves the workspace, this number silently goes back to being a
         /// measure of the emitter's optimism.
-        const FLOOR: usize = 1294;
+        const FLOOR: usize = 1304;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

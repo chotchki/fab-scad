@@ -198,7 +198,7 @@ mechanism as the Tailwind CLI fetch, one tar.gz because the bundle is many files
 | `geom/fab_geom.js` | the kernel worker's wasm-bindgen glue |
 | `geom/fab_geom_bg.wasm` (`.br`/`.gz`) | the Manifold kernel wasm (~1.7 MB), run in the worker |
 | `geom/geom-worker.js` | the worker entry (GPL, ours) — bincode byte envelope over the seam |
-| `libs.json` | BOSL2 + scad-lib + the demo, packed once; the app computes each model's include closure from it |
+| `libs.json` (`.br`/`.gz`) | BOSL2 + scad-lib + the demo, packed once; the app computes each model's include closure from it. The bundle's LARGEST member — 4.29 MB raw, 0.72 MB brotli — so it is precompressed like the wasm: serve one variant, never recompress |
 | `manifest.json` | `{version, entry, wasm, sha256:{path→hash}}` — the build asserts this contract |
 | `index.reference.html` | a WORKING loader to crib from — the site owns the real document |
 

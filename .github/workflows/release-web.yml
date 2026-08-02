@@ -127,7 +127,15 @@ jobs:
 
           # The scad LIB PACK: BOSL2 + scad-lib + the web demo, one JSON the app fetches once and
           # computes each model's include closure from (served at the bundle root).
+          #
+          # PRECOMPRESSED like the two wasm files, and it had been shipping RAW: 4.29 MB of .scad text
+          # sitting beside carefully brotli-11'd wasm, which is 0.72 MB compressed — the single largest
+          # thing in the bundle and the only one paying full freight. Same contract as the wasm
+          # (docs/web-embed.md): the host serves the precompressed variant with `Content-Encoding`, never
+          # recompressing at the edge, so the app's plain `fetch("libs.json")` needs no change at all.
           python3 packaging/web/pack_scad_libs.py "$STAGE/libs.json"
+          brotli -q 11 -kf "$STAGE/libs.json"
+          gzip -9 -kf "$STAGE/libs.json"
 
           # The reference loader (a crib for the host — the site owns the real document).
           cp gui/web/index.html "$STAGE/index.reference.html"
@@ -148,7 +156,9 @@ jobs:
           mkdir -p target/fab-gui/out
           tar -czf "target/fab-gui/out/fab-gui-${VERSION}.tar.gz" -C "$STAGE" .
           ls -la "$STAGE" "target/fab-gui/out/"
-          echo "app wasm (brotli): $(du -h "$STAGE/fab_gui_bg.wasm.br" | cut -f1)"
+          echo "app wasm (brotli):  $(du -h "$STAGE/fab_gui_bg.wasm.br" | cut -f1)"
+          echo "geom wasm (brotli): $(du -h "$STAGE/geom/fab_geom_bg.wasm.br" | cut -f1)"
+          echo "libs.json (brotli): $(du -h "$STAGE/libs.json.br" | cut -f1) (raw $(du -h "$STAGE/libs.json" | cut -f1))"
       # BOOT GATE (the web-v0.1.0 lesson: never release an artifact nobody executed). Serve the exact
       # staged bundle, boot fab-gui in headless Chrome, fail on any panic/RuntimeError, and require the
       # sourceless-boot DEMO to render end-to-end THROUGH the geom worker (the whole point of the bundle).

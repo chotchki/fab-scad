@@ -2721,6 +2721,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fab-machineblocks"
+version = "0.1.0"
+dependencies = [
+ "fab-gen",
+ "fab-lang",
+ "fab-lib",
+]
+
+[[package]]
 name = "fab-manifold"
 version = "0.1.0"
 dependencies = [
@@ -2738,6 +2747,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fab-mcad"
+version = "0.1.0"
+dependencies = [
+ "fab-gen",
+ "fab-lang",
+ "fab-lib",
+]
+
+[[package]]
 name = "fab-scad"
 version = "1.2.0"
 dependencies = [
@@ -2747,7 +2765,9 @@ dependencies = [
  "fab-bosl2",
  "fab-gen",
  "fab-lang",
+ "fab-machineblocks",
  "fab-manifold",
+ "fab-mcad",
  "quick-xml",
  "rayon",
  "reqwest",

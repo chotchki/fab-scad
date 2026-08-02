@@ -22,5 +22,9 @@
 //! checked-in generated crate are the same transpiler with a different consumer, so switching
 //! between them is a decision rather than a rewrite.
 
+/// AR.37 — the build-script side: transpile a pinned library into `OUT_DIR`. Extracted from
+/// fab-bosl2's build.rs when MCAD became the second library and the only library-specific things
+/// in those 228 lines turned out to be a path and a sentinel filename.
+pub mod build;
 pub mod emit;
 pub mod library;

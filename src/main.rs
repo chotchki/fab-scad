@@ -26,6 +26,30 @@ struct Cli {
     command: Commands,
 }
 
+/// The CLI face of [`fab_scad::gendiff::Surface`]. Separate so the library type carries no clap
+/// derive — a lib that needs an arg parser to name its own inputs is a lib that cannot be called
+/// from anything but this binary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, ValueEnum)]
+enum GenSurface {
+    /// OpenSCAD's builtins — reaches the dispatch machinery, never a transpiled native.
+    #[default]
+    Builtins,
+    /// BOSL2's 1329 declared callables. Needs `libs/BOSL2`.
+    Bosl2,
+    /// MCAD's 39 — a library the emitter was never built against (AR.37). Needs `libs/MCAD`.
+    Mcad,
+}
+
+impl From<GenSurface> for fab_scad::gendiff::Surface {
+    fn from(g: GenSurface) -> Self {
+        match g {
+            GenSurface::Builtins => Self::Builtins,
+            GenSurface::Bosl2 => Self::Bosl2,
+            GenSurface::Mcad => Self::Mcad,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Environment preflight: OpenSCAD, Manifold, submodules, NAS, OPENSCADPATH.
@@ -86,11 +110,11 @@ enum Commands {
         /// Emit GitHub-flavored markdown.
         #[arg(long)]
         md: bool,
-        /// Generate against BOSL2's 1329 declared callables instead of the builtins (AR.36) — the
-        /// only lane that checks the TRANSPILER against OpenSCAD rather than against our own
-        /// interpreter. Needs `libs/BOSL2` checked out.
-        #[arg(long)]
-        bosl2: bool,
+        /// Generate against a transpiled LIBRARY's declared callables instead of the builtins
+        /// (AR.36) — the only lane that checks the TRANSPILER against OpenSCAD rather than against
+        /// our own interpreter. Needs the matching submodule checked out.
+        #[arg(long, value_enum, default_value_t = GenSurface::Builtins)]
+        surface: GenSurface,
     },
     /// AO.4: the HEAVY perf lane — fab vs the OpenSCAD binary on programs big enough to time.
     /// `gen-diff`'s programs are deliberately cheap, so its oracle number is mostly process fork;
@@ -299,8 +323,8 @@ fn main() -> Result<()> {
             seeds,
             timeout,
             md,
-            bosl2,
-        } => fab_scad::gendiff::run_surface(seeds, timeout, md, bosl2),
+            surface,
+        } => fab_scad::gendiff::run_surface(seeds, timeout, md, surface.into()),
         Commands::GenPerf {
             dials,
             budget,

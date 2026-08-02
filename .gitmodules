@@ -7,3 +7,6 @@
 [submodule "models"]
 	path = models
 	url = git@github.com:chotchki/scad-models.git
+[submodule "libs/MCAD"]
+	path = libs/MCAD
+	url = https://github.com/openscad/MCAD.git

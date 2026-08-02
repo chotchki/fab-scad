@@ -86,12 +86,36 @@ pub(crate) fn negotiate_flags(timeout: Duration) -> &'static [&'static str] {
 /// # Errors
 /// Only on harness-level failures (no OpenSCAD binary at all); per-seed failures are outcomes.
 pub fn run(seeds: u32, timeout_secs: u64, md: bool) -> Result<()> {
-    run_surface(seeds, timeout_secs, md, false)
+    run_surface(seeds, timeout_secs, md, Surface::Builtins)
+}
+
+/// Which SURFACE the generator draws its calls from (AR.36, generalized at AR.37).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Surface {
+    /// OpenSCAD's own builtins — `sin`, `len`, `concat`. Reaches the dispatch machinery and never
+    /// a single transpiled native.
+    #[default]
+    Builtins,
+    /// BOSL2's 1329 declared callables.
+    Bosl2,
+    /// MCAD's 39. A different SHAPE of library (AR.37) and one the emitter was never built against.
+    Mcad,
+}
+
+impl Surface {
+    /// The submodule this surface needs, relative to the repo root, and the library's own name.
+    fn asset(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Builtins => None,
+            Self::Bosl2 => Some(("libs/BOSL2/std.scad", "BOSL2")),
+            Self::Mcad => Some(("libs/MCAD/constants.scad", "MCAD")),
+        }
+    }
 }
 
 /// [`run`] over a chosen SURFACE (AR.36).
 ///
-/// `bosl2 = true` generates against `fab-bosl2`'s 1329 declared callables instead of the builtins,
+/// A LIBRARY surface generates against that library's declared callables instead of the builtins,
 /// which is the only lane that checks the TRANSPILER against ground truth. Every other differential
 /// in the tree compares our compiled tier against our own interpreter — so if both are wrong the
 /// same way, they agree. This one asks OpenSCAD.
@@ -100,22 +124,28 @@ pub fn run(seeds: u32, timeout_secs: u64, md: bool) -> Result<()> {
 /// every builtin, so the whole named-argument family is unreachable from the builtin lane.
 ///
 /// # Errors
-/// As [`run`], plus a missing `libs/BOSL2` when the BOSL2 surface is asked for.
-pub fn run_surface(seeds: u32, timeout_secs: u64, md: bool, bosl2: bool) -> Result<()> {
+/// As [`run`], plus a missing submodule when a library surface is asked for.
+pub fn run_surface(seeds: u32, timeout_secs: u64, md: bool, surface: Surface) -> Result<()> {
     let timeout = Duration::from_secs(timeout_secs);
     // The fab-scad root: the oracle needs it for `OPENSCADPATH`, we need it for `library_paths`.
-    let root = bosl2.then(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    if let Some(r) = &root {
+    let root = surface
+        .asset()
+        .map(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    if let (Some(r), Some((asset, name))) = (&root, surface.asset()) {
         anyhow::ensure!(
-            r.join("libs/BOSL2/std.scad").exists(),
-            "the BOSL2 surface needs libs/BOSL2 checked out"
+            r.join(asset).exists(),
+            "the {name} surface needs {asset} checked out"
         );
     }
     let libs: Vec<std::path::PathBuf> = root
         .as_ref()
         .map(|r| vec![r.join("libs"), r.join("scad-lib")])
         .unwrap_or_default();
-    let surface = bosl2.then(|| fab_gen::NativeSurface::from_library(&fab_bosl2::Bosl2));
+    let surface = match surface {
+        Surface::Builtins => None,
+        Surface::Bosl2 => Some(fab_gen::NativeSurface::from_library(&fab_bosl2::Bosl2)),
+        Surface::Mcad => Some(fab_gen::NativeSurface::from_library(&fab_mcad::Mcad)),
+    };
 
     let flags = negotiate_flags(timeout);
 

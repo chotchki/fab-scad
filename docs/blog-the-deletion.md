@@ -76,6 +76,32 @@ its own preconditions and a generator feeding it arbitrary values trips them con
 harness was returning on our failure WITHOUT asking OpenSCAD, so those four were never compared at
 all. Four unclassified seeds that could have been hiding real divergences. It asks anyway now.
 
+## Then I pointed it at a library it had never seen
+
+Everything above is a claim about BOSL2, and the transpiler was built against BOSL2 for months.
+"99.5% of BOSL2" could just mean I'd implemented exactly the subset BOSL2 happens to use. So I
+aimed it at MCAD — the library that ships WITH OpenSCAD, which I'd never once tested against, and
+which is shaped the other way round: 167 modules to 39 functions, where BOSL2 is 414 to 1329.
+
+It emitted 39 of 39 functions and 167 of 167 modules. Then it failed to compile, with 20 errors.
+
+Every one of them was the same thing, and it's the kind of bug you only get from a second data
+point: **OpenSCAD identifiers are allowed to start with a digit and Rust identifiers are not.** MCAD
+has `3dtri_draw`, `8bit_polyfont` and `12ptStar`. Rust sees `3dtri_draw` and lexes `3` as a number
+with `dtri_draw` as its suffix. BOSL2 doesn't declare a single name like that, so no amount of work
+on BOSL2 could ever have found it. The fix was six lines in the same function that already handled
+the other two illegal-name cases.
+
+After that MCAD transpiles whole, and it's a real crate now, with the same acceptance gate BOSL2
+gets: 500 generated programs run through both tiers, zero divergence, then 200 more run against the
+actual OpenSCAD binary — 200/200, zero diverged. I added machineblocks as a third for the same
+reason, and it came out 57 of 57 functions. Adding a library is now about 25 lines that say which
+directory to read.
+
+That's the result I actually wanted from all this. Not the speed. The transpiler isn't a BOSL2
+tool that happens to work, it's an OpenSCAD tool — and I only know that because the second library
+broke it.
+
 ## What it doesn't do
 
 Seven functions still don't compile. I looked at all seven: four of them are upstream BOSL2 bugs

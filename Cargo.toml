@@ -56,7 +56,7 @@ path = "src/bin/echo_repro.rs"
 required-features = ["native"]
 
 [workspace]
-members = ["bosl2", "gen", "geom", "gui", "lang", "lib", "manifold", "types"]
+members = ["bosl2", "gen", "geom", "gui", "lang", "lib", "machineblocks", "manifold", "mcad", "types"]
 # The fuzz crate is nightly-only (cargo-fuzz) — kept out of the workspace so stable builds never see it.
 exclude = ["manifold/fuzz"]
 
@@ -70,6 +70,7 @@ kernel = [
     "geometry",
     "mesh-io",
     "bosl2",
+    "mcad",
     "dep:fab-manifold",
     "dep:threemf",
     "dep:quick-xml",
@@ -86,6 +87,13 @@ kernel = [
 # `--no-default-features --features geometry` build has no business paying for that. Without it every
 # BOSL2 call INTERPRETS — slower, never a different answer.
 bosl2 = ["geometry", "dep:fab-bosl2"]
+# AR.37 — the SECOND and THIRD transpiled libraries, each its own crate on the fab-bosl2 pattern.
+# `mcad` rides `kernel` because MCAD ships WITH OpenSCAD, so a user's `include <MCAD/...>` is a
+# thing that actually happens and 39 functions is a cheap thing to cover. `machineblocks` does NOT:
+# it is a third-party brick library, carried for the generality evidence rather than for users, and
+# a build has no business transpiling it unless somebody asked.
+mcad = ["geometry", "dep:fab-mcad"]
+machineblocks = ["geometry", "dep:fab-machineblocks"]
 # Threaded kernel on BROWSER wasm (W.6): turn on fab-manifold's rayon-over-wasm-bindgen-rayon pool. The
 # geom worker's wasm build opts in (fab-geom `par`); native already gets `par` unconditionally (the
 # target-scoped dep below). Carries manifold's `initThreadPool` JS export into the final cdylib.
@@ -109,6 +117,9 @@ fab-lang = { path = "lang", optional = true }
 # BOSL2 as a generated library crate (AR.26.3): nothing checked in, transpiled by its build.rs from
 # the pinned submodule into OUT_DIR. Handed to the evaluator as registry rows, never called directly.
 fab-bosl2 = { path = "bosl2", optional = true }
+# AR.37: MCAD and machineblocks, same build-time transpile, same registry hand-off.
+fab-mcad = { path = "mcad", optional = true }
+fab-machineblocks = { path = "machineblocks", optional = true }
 # AJ.8 gen-diff: the grammar generator feeding the oracle differential (native harness only).
 fab-gen = { path = "gen", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }

@@ -1,0 +1,21 @@
+[package]
+name = "fab-mcad"
+version = "0.1.0"
+edition = "2024"
+description = "MCAD, transpiled to Rust at build time — the SECOND generated library crate, and the generality proof"
+license = "GPL-2.0-or-later"
+publish = false
+
+[dependencies]
+# The RUNTIME the generated code is emitted against (`fab_lang::rt`), and the registry row types it
+# declares itself with. Same one direction fab-bosl2 runs in, for the same reason.
+fab-lang = { path = "../lang" }
+
+[build-dependencies]
+# The TRANSPILER, host-side — a build dependency so a consumer never links a code generator.
+fab-lib = { path = "../lib" }
+
+[dev-dependencies]
+# The GRAMMAR GENERATOR: the surface differential generates programs against THIS crate's declared
+# callables, so the acceptance suite is pointed at MCAD rather than at BOSL2.
+fab-gen = { path = "../gen" }

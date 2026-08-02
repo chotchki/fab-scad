@@ -183,9 +183,18 @@ pub fn registry() -> &'static fab_lang::registry::Registry {
         use fab_lang::surface::LibrarySurface;
         static REG: std::sync::LazyLock<fab_lang::registry::Registry> =
             std::sync::LazyLock::new(|| {
-                fab_lang::registry::Registry::new()
+                // ACCUMULATED, in a fixed order. Every library this build carries adds its rows;
+                // AR.26.1 made the index keep CANDIDATES per name, so two libraries declaring the
+                // same name is not a collision to resolve here — the fingerprint gate picks the
+                // one whose reference matches what actually loaded, or neither wires.
+                let reg = fab_lang::registry::Registry::new()
                     .with(fab_lang::surface::Natives.rows())
-                    .with(fab_bosl2::Bosl2.rows())
+                    .with(fab_bosl2::Bosl2.rows());
+                #[cfg(feature = "mcad")]
+                let reg = reg.with(fab_mcad::Mcad.rows());
+                #[cfg(feature = "machineblocks")]
+                let reg = reg.with(fab_machineblocks::MachineBlocks.rows());
+                reg
             });
         &REG
     }

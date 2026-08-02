@@ -108,9 +108,9 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] AR.34 - Comprehension dispatch: constructs that were always in the subset, never routed to
 - [x] AR.35 - Tier performance: transpiler vs intrinsics/JIT vs OpenSCAD, on real models
 - [x] AR.36 - Fuzz the transpiled band against OpenSCAD, not against ourselves
-- [ ] AR.37 - Generality: point the transpiler at a library it was NOT built against
+- [x] AR.37 - Generality: point the transpiler at a library it was NOT built against
   - [x] AR.37.1 - Coverage probe: MCAD and machineblocks through Library::read + function_band
-  - [ ] AR.37.2 - Wire the second library as a crate and fuzz it against OpenSCAD
+  - [x] AR.37.2 - Wire the second library as a crate and fuzz it against OpenSCAD
 ## Phase K - scad-rs: differential harness + semantics corpus
 - [ ] K.1 - Harness v1: both engines, metric gate per model class, corpus tiers 1-3 wired in CI (OpenSCAD suite, BOSL2 tests, models/)
   - [x] K.1.1 - K.1.1 - BOSL2 test corpus tier: sweep the .scadtest suite through scad-rs

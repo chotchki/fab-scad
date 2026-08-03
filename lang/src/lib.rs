@@ -172,7 +172,7 @@ pub fn evaluate_file(path: &Path, library_paths: &[PathBuf]) -> Result<Mesh> {
 ///
 /// # Errors
 /// As [`evaluate_file`].
-pub fn evaluate_file_full(path: &Path, library_paths: &[PathBuf]) -> RunResult<Evaluation> {
+fn evaluate_file_full(path: &Path, library_paths: &[PathBuf]) -> RunResult<Evaluation> {
     let source = eval::io::read_source(path)?;
     // The including-file dir. An empty parent (a bare `foo.scad`) resolves relative to CWD via the
     // loader's canonicalize, so no special-casing is needed beyond the parent-less root (`.`).
@@ -271,7 +271,7 @@ pub fn evaluate_geometry_file(path: &Path, library_paths: &[PathBuf]) -> Result<
 ///
 /// # Errors
 /// As [`evaluate_with_base`], minus the single-primitive restriction.
-pub fn evaluate_geometry_with_base(
+fn evaluate_geometry_with_base(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
@@ -485,33 +485,6 @@ pub fn decode_scad_source(bytes: Vec<u8>) -> String {
     eval::io::decode_source(bytes)
 }
 
-/// Like [`resolve_geometry_with_base`], but resolves `use`/`include` from an IN-MEMORY source MAP
-/// instead of the filesystem — the wasm/browser entry (W.3.6 Stage 2). `sources` is a virtual lib tree
-/// keyed by NORMALIZED relative path ("BOSL2/std.scad", …); there is no disk and no `library_paths`.
-/// `import`/`surface` meshes still flow through `mesh_reader`. Missing libraries are tolerated (warn +
-/// render on), exactly as the fs loader.
-///
-/// # Errors
-/// As [`resolve_geometry_with_base`], minus the fs-specific ones (no disk is touched).
-pub fn resolve_geometry_from_sources<R>(
-    source: &str,
-    sources: &std::collections::BTreeMap<PathBuf, String>,
-    config: Config,
-    mesh_reader: R,
-) -> Result<Geo>
-where
-    R: FnMut(&str) -> Result<Imported>,
-{
-    Ok(eval::io::drive_from_map(
-        source,
-        sources,
-        registry::Registry::builtin(),
-        config,
-        mesh_reader,
-    )?
-    .0)
-}
-
 /// Like [`resolve_geometry_with_base`], but ALSO returns the ordered `echo`/warning [`Message`]s — the
 /// render path drops them via the plain fn, and the GUI console (W.3.16) wants them back.
 ///
@@ -569,27 +542,37 @@ where
     )
 }
 
-/// Like [`resolve_geometry_from_sources`], but ALSO returns the ordered `echo`/warning [`Message`]s —
-/// the GUI console on WEB (W.3.16), where the worker evals from the in-memory source map.
+/// Evaluate a program whose `use`/`include` refs resolve against an IN-MEMORY map, returning the
+/// ordered `echo`/warning [`Message`]s with the geometry — the GUI console on WEB (W.3.16), where
+/// the worker has no filesystem and evals from the pack the app fetched.
+///
+/// THE REGISTRY IS POSITIONAL, and deliberately has no `_with_registry` sibling. Every other entry
+/// here comes in a pair — `X` hardcoding [`registry::Registry::builtin`] and `X_with_registry`
+/// taking one — and that pairing is a NAMING CONVENTION nothing enforces. This door was added
+/// without its half, and since it is the only door the wasm worker uses (`geomsvc`'s
+/// `Source::Bytes` arm), the browser silently evaluated every BOSL2 call through the interpreter
+/// while native took the compiled tier: 58 natives armed against native's 929 on the same program.
+/// AR.35 had already fixed three string-rooted doors for the same reason and missed this one.
+///
+/// So the convention dies here rather than growing a matching half. A caller that wants fab-lang's
+/// own rows passes [`registry::Registry::builtin`] and says so at the call site, where a reviewer
+/// can see it.
 ///
 /// # Errors
-/// As [`resolve_geometry_from_sources`].
+/// [`Error::Parse`](crate::Error::Parse) for a malformed root, a `mesh_reader` failure, or any
+/// evaluation error. A missing/broken library ref is tolerated — warn + empty — as in the sibling
+/// drivers.
 pub fn resolve_geometry_from_sources_full<R>(
     source: &str,
     sources: &std::collections::BTreeMap<PathBuf, String>,
+    registry: &registry::Registry,
     config: Config,
     mesh_reader: R,
 ) -> RunResult<(Geo, Vec<Message>)>
 where
     R: FnMut(&str) -> Result<Imported>,
 {
-    eval::io::drive_from_map(
-        source,
-        sources,
-        registry::Registry::builtin(),
-        config,
-        mesh_reader,
-    )
+    eval::io::drive_from_map(source, sources, registry, config, mesh_reader)
 }
 
 /// Like [`resolve_geometry_with_base_full`], but `use`/`include` consult an in-memory OVERLAY

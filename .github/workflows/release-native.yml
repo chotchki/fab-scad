@@ -65,7 +65,14 @@ jobs:
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
     steps:
+      # SUBMODULES, and this is not boilerplate: without them `libs/BOSL2` is EMPTY, fab-bosl2's
+      # build script takes its not-checked-out path, and the signed app ships a library crate that
+      # declares NOTHING — every BOSL2 call in the released desktop build interprets. It does not
+      # fail the build, by design ("a missing asset costs a PART, not an error"), so it shipped
+      # silently. The `transpiled()` gate below is the part that stops it coming back.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # A `vX.Y.Z` tag must BE Packager.toml's version — a mismatched tag would publish artifacts

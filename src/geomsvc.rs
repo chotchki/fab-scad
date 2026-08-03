@@ -372,6 +372,10 @@ fn eval_source(
             let (tree, messages) = fab_lang::resolve_geometry_from_sources_full(
                 &wrap,
                 &sources,
+                // THE PRODUCT registry, not fab-lang's own rows. This is the whole of SZ.1: the
+                // browser reaches the evaluator through here and nowhere else, so a default here is
+                // a default for every web render.
+                crate::import::registry(),
                 fab_lang::Config::from_env(),
                 |raw| {
                     // import()/surface() asset (W.3.24): the app packs referenced assets into the closure

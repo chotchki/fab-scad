@@ -105,7 +105,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: git submodule update --init libs/BOSL2
+      # ALL the library submodules, not just BOSL2: `kernel` carries fab-mcad too, and a missing
+      # checkout makes that crate declare nothing rather than fail — so a partial init compiles an
+      # EMPTY library and the boot gate below still passes.
+      - run: git submodule update --init libs/BOSL2 libs/MCAD libs/machineblocks
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown

@@ -33,6 +33,13 @@ name = "corpus_repro"
 path = "src/bin/corpus_repro.rs"
 required-features = ["native"]
 
+# SZ.2: pack libs.json from the SAME library list `import::registry()` is built from, replacing the
+# python glob whose hand-written directory list drifted from the cargo features. A build-time tool.
+[[bin]]
+name = "pack_libs"
+path = "src/bin/pack_libs.rs"
+required-features = ["native"]
+
 # The models-harness isolation worker (L.3): evaluates ONE model file (include graph + `import()` meshes) and
 # prints its outcome, so the harness can KILL a runaway — the interpreter is slow enough on heavy BOSL2
 # geometry that ~half the real models blow a 10 s budget — instead of leaking a host thread per timeout.

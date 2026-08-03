@@ -35,7 +35,7 @@ fi
 #      exports are what wasm-bindgen's thread transform needs (it errors "failed to find __heap_base" else).
 #  (2) The workerHelpers.js `import('../../..')` PATCH below.
 echo "building fab-geom worker (fab-manifold, threaded: nightly build-std + shared memory)…"
-RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__heap_end' \
+RUSTFLAGS='-C link-arg=-zstack-size=16777216 -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__heap_end' \
   cargo +nightly build -p fab-geom --release --target wasm32-unknown-unknown \
   --features par -Z build-std=panic_abort,std
 mkdir -p gui/web/geom
@@ -50,7 +50,7 @@ for wh in gui/web/geom/snippets/wasm-bindgen-rayon-*/src/workerHelpers.js; do
 done
 if [[ "$profile" == "release" ]] && command -v wasm-opt >/dev/null; then
   # --enable-threads preserves the atomics/shared-memory ops through the opt pass.
-  wasm-opt -Oz --enable-threads --enable-reference-types --enable-bulk-memory \
+  wasm-opt -O1 --enable-threads --enable-reference-types --enable-bulk-memory \
     -o gui/web/geom/fab_geom_bg.wasm gui/web/geom/fab_geom_bg.wasm
 fi
 cp packaging/web/geom-worker.js gui/web/geom/

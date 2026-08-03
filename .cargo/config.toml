@@ -3,3 +3,22 @@
 # Target-scoped: native builds are unaffected.
 [target.wasm32-wasip1]
 runner = "wasmtime"
+
+# SZ.8 — BAKE A BIGGER STACK into the browser wasm. Native raises the evaluator's stack to 64 MB by
+# spawning a thread (`fab_scad::EVAL_STACK`); wasm CANNOT — there is no thread to configure, so it
+# gets whatever the linker baked in, and wasm-ld's default is 1 MB. That gap is already a shipped
+# symptom: docs/web-bundle.md records deeply-recursive models (heavy attachable/tag_diff nesting)
+# throwing `RangeError: Maximum call stack size exceeded` in Safari, and names a larger baked stack
+# as the open lead. AR.26.4.4 made it matter more, not less — the compiled tier makes plain Rust
+# calls along the DAG, so the host stack is where library recursion now lives.
+#
+# 16 MB: generous against a 1 GB max-memory, and it comes out of linear memory ONCE at module
+# instantiation rather than per render.
+#
+# CAVEAT, and it is why this is duplicated rather than centralised: an explicit `RUSTFLAGS=` in the
+# environment REPLACES these flags wholesale — cargo does not merge them. The geom worker's build
+# sets RUSTFLAGS for its shared-memory link args, so it carries its own copy of this flag; if you
+# add a RUSTFLAGS to any wasm build, carry the stack size with it or that build silently reverts to
+# 1 MB.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=16777216"]

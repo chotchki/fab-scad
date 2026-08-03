@@ -164,6 +164,64 @@ pub fn resolve_geometry_hybrid_full(
     )
 }
 
+/// One library this product carries: its transpiled ROWS and the directory its SOURCE lives in,
+/// bound together (SZ.2).
+///
+/// They were two independent lists and they disagreed. The rows came from cargo features; the
+/// source came from a python glob in `packaging/web/pack_scad_libs.py` that named BOSL2 and
+/// scad-lib by hand. Adding MCAD to the `kernel` feature therefore compiled its natives into the
+/// browser bundle while its `.scad` stayed out of `libs.json` — so `include <MCAD/units.scad>`
+/// resolved natively and silently rendered NOTHING on the web, because a missing import costs a
+/// PART rather than an error.
+///
+/// One struct, one list. A library that cannot say where its source lives cannot be declared, and
+/// the packer reads the same list the registry does — so the two halves cannot drift apart again.
+pub struct Library {
+    /// The library's own name, as its `LibrarySurface` reports it.
+    pub name: &'static str,
+    /// Where its `.scad` files live, relative to the repo root.
+    pub source_dir: &'static str,
+    /// The prefix an `include <...>` uses — `BOSL2/std.scad` is `BOSL2/`, and scad-lib's own
+    /// modules are referenced bare, so its prefix is empty.
+    pub prefix: &'static str,
+}
+
+/// THE LIBRARIES THIS PRODUCT CARRIES, source side — the list `libs.json` is packed from and the
+/// list the parity gate compares the registry against.
+///
+/// `Natives` is absent on purpose: fab-lang's own rows are compiled-in with no `.scad` behind them,
+/// so there is nothing to pack. scad-lib IS here — it ships as source on both platforms and has no
+/// transpiled crate, which is the mirror case and exactly why the two lists must be one.
+#[must_use]
+pub fn libraries() -> &'static [Library] {
+    &[
+        #[cfg(feature = "bosl2")]
+        Library {
+            name: "BOSL2",
+            source_dir: "libs/BOSL2",
+            prefix: "BOSL2/",
+        },
+        #[cfg(feature = "mcad")]
+        Library {
+            name: "MCAD",
+            source_dir: "libs/MCAD",
+            prefix: "MCAD/",
+        },
+        #[cfg(feature = "machineblocks")]
+        Library {
+            name: "machineblocks",
+            source_dir: "libs/machineblocks/lib",
+            prefix: "machineblocks/",
+        },
+        // fab-scad's OWN library: source-only, no transpiled crate, referenced bare.
+        Library {
+            name: "scad-lib",
+            source_dir: "scad-lib",
+            prefix: "",
+        },
+    ]
+}
+
 /// THE LIBRARIES THIS PRODUCT LOADS (AR.26.4.3) — one definition, so there is one answer to "what
 /// can a `.scad` here call and get compiled".
 ///

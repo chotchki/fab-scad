@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release --target wasm32-unknown-unknown -p fab-gui --lib
-          RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__heap_end' \
+          RUSTFLAGS='-C link-arg=-zstack-size=16777216 -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__heap_end' \
             cargo build -p fab-geom --release --target wasm32-unknown-unknown \
             --features par -Z build-std=panic_abort,std
       - name: Stage the bundle (docs/web-embed.md contract)
@@ -101,6 +101,7 @@ jobs:
           # Explicit feature flags defend against any binaryen too old to read the feature section.
           wasm-opt -Oz --enable-reference-types --enable-bulk-memory \
             -o "$STAGE/fab_gui_bg.wasm.opt" "$STAGE/fab_gui_bg.wasm"
+          [ -s "$STAGE/fab_gui_bg.wasm.opt" ] || { echo "::error::wasm-opt produced an EMPTY app wasm"; exit 1; }
           mv "$STAGE/fab_gui_bg.wasm.opt" "$STAGE/fab_gui_bg.wasm"
           brotli -q 11 -kf "$STAGE/fab_gui_bg.wasm"
           gzip -9 -kf "$STAGE/fab_gui_bg.wasm"
@@ -118,8 +119,20 @@ jobs:
           done
           # --enable-threads preserves the atomics/shared-memory ops through the -Oz pass (else wasm-opt
           # would strip them and the shared memory would be invalid).
-          wasm-opt -Oz --enable-threads --enable-reference-types --enable-bulk-memory \
+          # -O1, NOT -Oz, and this is a workaround with a real expiry. Since SZ.1 made the
+          # transpiled band REACHABLE (before that it was dead-stripped and this wasm was 5 MB),
+          # binaryen v130 SIGBUSes on -O2/-Os/-Oz over this module — silently, leaving a ZERO-BYTE
+          # output that the `mv` below would happily install as the shipped kernel. -O1 completes.
+          # Not memory (reproduced on a 64 GB machine); a binaryen bug the larger module trips.
+          # The pin is deliberate (older builds corrupt wasm-bindgen's externref table), so the fix
+          # is a binaryen BUMP once one is verified, not un-pinning. Sizes for the record:
+          # 30.29 MB raw -> 26.54 MB (-O1) -> 3.85 MB brotli.
+          wasm-opt -O1 --enable-threads --enable-reference-types --enable-bulk-memory \
             -o "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
+          # A CRASHED optimiser leaves a 0-byte file, and `mv` would install it as the kernel. The
+          # step's `set -e` catches a non-zero exit, but not a tool that exits 0 having written
+          # nothing — so the size is checked rather than assumed.
+          [ -s "$STAGE/geom/fab_geom_bg.wasm.opt" ] || { echo "::error::wasm-opt produced an EMPTY geom wasm"; exit 1; }
           mv "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
           brotli -q 11 -kf "$STAGE/geom/fab_geom_bg.wasm"
           gzip -9 -kf "$STAGE/geom/fab_geom_bg.wasm"

@@ -187,7 +187,7 @@ added 2026-07-07.
 - [ ] SZ.4 - Dynamic library loading so nobody pays for a library they don't use
 - [ ] SZ.5 - A gate that fails when native and web disagree about which libraries exist
 - [x] SZ.6 - Precompress libs.json in the release — 4.29 MB shipped raw beside brotli'd wasm
-- [ ] SZ.7 - The corpus and repro harnesses measure the tier the product actually runs
+- [x] SZ.7 - The corpus and repro harnesses measure the tier the product actually runs
 - [ ] SZ.8 - The web render carries an eval budget — from_env can never supply one on wasm
 - [ ] SZ.9 - CI tests what it ships: serial-vs-threaded worker, and no native-vs-web geometry comparison
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)

@@ -1,4 +1,4 @@
-<!-- plan-bridge:phase-high-water=SY -->
+<!-- plan-bridge:phase-high-water=SZ -->
 # PLAN
 
 PIVOTED 2026-07-04: scad-rs — a GPL Rust implementation of the OpenSCAD language over the
@@ -180,25 +180,6 @@ added 2026-07-07.
 - [x] S.2 - S.2 - test B: native MANIFOLD_PAR=ON vs a PAR=OFF rebuild — confirm parallel ≡ serial output bit-for-bit
 - [ ] S.3 - S.3 - test C: native (arm64) vs wasm cross-platform check — DEFERRED (needs a headless wasm mesh harness that doesn't exist yet; wasm is browser-only wasm32-uu). Predicted outcome: polyhedra match, curved primitives diverge on libm → collapses into libm-transcendental-divergence (fix = libm crate), NOT a Manifold issue
 - [x] S.4 - S.4 - RESOLVED by the pure-Rust kernel (2026-07-19) — the C++ S.4 died at M.7.4. The reopened non-determinism was a C++-Manifold-CORE defect (atomic-slot races in disjoint-write assembly + a non-total-order `EdgePos` comparator, `boolean_result.cpp:197`), UNREACHABLE from outside the kernel — owning it in Rust is exactly what let us design the class out (the payoff W.3.9 predicted). `fab_manifold::par` is determinism-BY-CONSTRUCTION: rayon is clippy-banned outside par.rs (one door), a `CommutativeAssociative` compile-gate (non-associative float reduce WON'T COMPILE → `reduce_serial` Kahan), index-order `map_collect` (the serial/par crossover moves, never a byte), total-order sorts (`morton.then(idx)` — the M.4 tiebreak flag, landed), `SortGeometry` canonicalizes on POSITION before output so `mesh_id`/`tri_ref` are never emitted (the global `MESH_ID_COUNTER` atomic can't reach bytes; `build_geo_parts` is sequential regardless). VERIFIED two ways: (a) EMPIRICAL — garage_door + window_light_blocker + pill_holder + ashtray all bit-identical run-to-run, par on 16 cores (`tests/determinism_render.rs`, kept as the standing regression guard — determinism-by-construction is only as good as the proof no future edit opens a SECOND parallelism door); (b) AUDIT — a 5-lens adversarial Workflow (unordered-iteration / parallel-reduce / sort-tiebreak / global-atomic / float) × per-finding skeptical verify found 0 surviving over 6 candidates. Hardened the ONE non-total-order comparator the audit surfaced — `Solid::components()` (`bbox-min.then(num_tri)` → self-contained: both bbox corners + num_tri + num_vert + volume, all `total_cmp`) so a future PARALLEL `decompose()` can't reintroduce it; output-neutral on real models (no ties). Doctrine #36 holds same-platform run-to-run; cross-platform (native vs wasm libm) is S.3, a separate axis.
-## Phase SZ - Web/GUI to a release: the consumer owns its libraries
-- [x] SZ.1 - The browser gets the transpiled tier: the from-sources door is on fab-lang's rows
-- [x] SZ.2 - One declared library set drives BOTH the natives and the source pack
-- [x] SZ.3 - Measure the real load tax now that the browser actually receives the band
-- [x] SZ.4 - Dynamic library loading so nobody pays for a library they don't use
-  - [x] SZ.4.1 - Build a LEAN geom worker with no transpiled band (1.10 MB vs 3.85 MB)
-  - [x] SZ.4.2 - Route worker creation on the model's library refs, before the worker exists
-  - [x] SZ.4.3 - Gate: the lean worker really lacks the band and the full one really has it
-  - [>] SZ.4.4 - Split PER SOURCE FILE, not per library — a BOSL2 user saves nothing from per-library
-  - [>] SZ.4.5 - The desktop half: cdylib + libloading on the SAME boundary, not a second mechanism
-  - [>] SZ.4.6 - Load a library only when a model first references it — the actual 2.75 MB win
-- [x] SZ.5 - A gate that fails when native and web disagree about which libraries exist
-- [x] SZ.6 - Precompress libs.json in the release — 4.29 MB shipped raw beside brotli'd wasm
-- [x] SZ.7 - The corpus and repro harnesses measure the tier the product actually runs
-- [x] SZ.8 - The web render carries an eval budget — from_env can never supply one on wasm
-- [x] SZ.9 - CI tests what it ships: serial-vs-threaded worker, and no native-vs-web geometry comparison
-  - [x] SZ.9.1 - CI builds the artifact the release ships — one build script, not three copies
-  - [x] SZ.9.2 - Boot the FULL worker in a browser — no gate has ever executed it
-  - [x] SZ.9.3 - Compare the geometry the browser produces against the desktop's
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)
 - [ ] V.1 - V.1 - per-part parallelism: render/slice/print-layout each part on its own worker thread
 ## Phase Y - Y - Verification hardening: 100%-Rust re-derivation — shrink the unsafe surface, aim each tier where it uniquely covers

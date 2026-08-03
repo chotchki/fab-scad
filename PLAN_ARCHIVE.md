@@ -1196,3 +1196,27 @@ added 2026-07-27.
 - [x] AS.6 - The per-builtin CONFORMANCE differential — generated from the declaration's own domains The per-builtin CONFORMANCE differential, and this is what makes the phase worth more than deduplication. Today there is NO per-builtin check that our implementation matches upstream — the AH goldens cover builtins only incidentally, through whatever the recorded programs happen to call, which is precisely why "eval-clean masks missing builtins" is a recorded failure mode rather than a caught bug. The declaration already carries per-parameter DOMAINS (AR.3.3 derived them for the fuzzer), so it can generate the probe programs itself: per builtin, a handful of in-domain arguments plus the edge cases the domain names — a negative under `sqrt`, a non-list under `len`, NaN, an empty vector — echoed and diffed against the OpenSCAD oracle. A conformance suite nobody writes by hand and nobody can forget to extend. It lands BEFORE AR.21 on purpose: once the JIT and the intrinsics are deleted there is no second implementation left to disagree with, so the differentials are the only thing between the transpiler and a silent wrong answer — and the builtins are the one layer beneath them with no differential of its own
 - [x] AS.7 - SUSTAINMENT — upstream adding or changing a builtin becomes visible instead of silent SUSTAINMENT. `sustain.yml` already watches upstream BOSL2 and OpenSCAD nightly and reports (issue #1's body is the watermark), but it has nothing to say about BUILTINS, because no artifact describes which ones we implement. With one declaration there is one: upstream ADDING a builtin becomes a diff against a list rather than a silent gap that surfaces years later as an `undef` in somebody's model, and upstream CHANGING one's behaviour becomes an AS.6 conformance failure rather than a mystery. Report-only, matching the existing sustainment posture — pins bump by hand — but the report finally covers the layer everything else is built on
 
+---
+
+## 2026-08-03
+
+## Phase SZ - Web/GUI to a release: the consumer owns its libraries
+- [x] SZ.1 - The browser gets the transpiled tier: the from-sources door is on fab-lang's rows
+- [x] SZ.2 - One declared library set drives BOTH the natives and the source pack
+- [x] SZ.3 - Measure the real load tax now that the browser actually receives the band
+- [x] SZ.4 - Dynamic library loading so nobody pays for a library they don't use
+  - [x] SZ.4.1 - Build a LEAN geom worker with no transpiled band (1.10 MB vs 3.85 MB)
+  - [x] SZ.4.2 - Route worker creation on the model's library refs, before the worker exists
+  - [x] SZ.4.3 - Gate: the lean worker really lacks the band and the full one really has it
+  - [>] SZ.4.4 - Split PER SOURCE FILE, not per library — a BOSL2 user saves nothing from per-library
+  - [>] SZ.4.5 - The desktop half: cdylib + libloading on the SAME boundary, not a second mechanism
+  - [>] SZ.4.6 - Load a library only when a model first references it — the actual 2.75 MB win
+- [x] SZ.5 - A gate that fails when native and web disagree about which libraries exist
+- [x] SZ.6 - Precompress libs.json in the release — 4.29 MB shipped raw beside brotli'd wasm
+- [x] SZ.7 - The corpus and repro harnesses measure the tier the product actually runs
+- [x] SZ.8 - The web render carries an eval budget — from_env can never supply one on wasm
+- [x] SZ.9 - CI tests what it ships: serial-vs-threaded worker, and no native-vs-web geometry comparison
+  - [x] SZ.9.1 - CI builds the artifact the release ships — one build script, not three copies
+  - [x] SZ.9.2 - Boot the FULL worker in a browser — no gate has ever executed it
+  - [x] SZ.9.3 - Compare the geometry the browser produces against the desktop's
+

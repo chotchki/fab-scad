@@ -98,46 +98,48 @@ jobs:
   # The wasm BOOT GATE on every push — the W.3.10 lesson, learned twice in one day: the geom
   # worker's panic surface is invisible to every native gate above (web-v0.13.0's std::time panic
   # sat green through the whole matrix and died in a real browser; the P.2 probe repeated the
-  # trick). Build the bundle LEAN (no wasm-opt/brotli — size gates the release, not boot) and
-  # require the sourceless demo to render end-to-end THROUGH the geom worker in headless Chrome.
-  # Mirrors release-web.yml's gate; a failure here means the release gate would fail too.
+  # trick).
+  #
+  # It builds through `gui/web/build-wasm.sh`, the SAME script the release calls, because it used to
+  # carry its own copy of those build steps and the copy drifted twice over (SZ.9.1): it called a
+  # lib-packer that had been deleted, and it had never gained the threading flags — so this gate
+  # proved a SERIAL, non-shared-memory worker boots while the release shipped a THREADED one. Every
+  # threading failure mode (DataCloneError on the shared Memory, a rayon pool that never reports
+  # ready) was structurally invisible here and could only surface on a tag.
+  #
+  # `--no-opt` is the one REAL difference from the release and it is a deliberate one: wasm-opt is a
+  # size pass, size gates the release, and skipping it cannot change whether the bundle runs.
   boot-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # ALL the library submodules, not just BOSL2: `kernel` carries fab-mcad too, and a missing
+      # ALL the library submodules, not just BOSL2: `libraries` carries fab-mcad too, and a missing
       # checkout makes that crate declare nothing rather than fail — so a partial init compiles an
       # EMPTY library and the boot gate below still passes.
       - run: git submodule update --init libs/BOSL2 libs/MCAD libs/machineblocks
-      - uses: dtolnay/rust-toolchain@stable
+      # NIGHTLY + rust-src, matching release-web.yml: the geom worker is THREADED (W.6.2), which
+      # needs -Zbuild-std to rebuild std with atomics/shared-memory. The app is stable-clean and
+      # nightly builds it fine. The LLVM 21 + lld + libc++ install that used to sit here is GONE —
+      # it was for the C++ Manifold kernel, cut at M.7.4, and had been pure apt latency since.
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: wasm32-unknown-unknown
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
-      - name: Install LLVM 21 + lld + libc++ (the worker's C++ kernel)
-        run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
-          sudo apt-get install -y lld-21 libc++-21-dev libc++abi-21-dev
       - name: Install wasm-bindgen (lockfile-pinned)
         run: |
           V=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
           cargo install wasm-bindgen-cli --version "$V" --locked
-      - name: Build the wasm app + geom worker
-        run: cargo build --release --target wasm32-unknown-unknown -p fab-gui --lib -p fab-geom
-      - name: Stage lean (unoptimized wasm boots fine; only the gate runs against it)
-        run: |
-          set -euo pipefail
-          STAGE=target/fab-gui/stage && mkdir -p "$STAGE/geom"
-          wasm-bindgen --target web --no-typescript --out-name fab_gui --out-dir "$STAGE" \
-            target/wasm32-unknown-unknown/release/fab_gui.wasm
-          wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir "$STAGE/geom" \
-            target/wasm32-unknown-unknown/release/fab_geom.wasm
-          cp packaging/web/geom-worker.js "$STAGE/geom/"
-          python3 packaging/web/pack_scad_libs.py "$STAGE/libs.json"
-          cp gui/web/index.html "$STAGE/index.html"
+      - name: Build the bundle (the release's own script)
+        run: bash gui/web/build-wasm.sh --stage target/fab-gui/stage --no-opt
       - name: Boot the bundle in Chrome
         run: |
+          set -euo pipefail
           STAGE=target/fab-gui/stage
-          (cd "$STAGE" && python3 -m http.server 8899 &>/dev/null &)
+          cp gui/web/index.html "$STAGE/index.html"
+          # dev-server.py, NOT http.server: the threaded worker cannot instantiate without
+          # SharedArrayBuffer, which needs COOP/COEP. The same headers the site serves in prod.
+          python3 packaging/web/dev-server.py "$STAGE" 8899 &>/dev/null &
           sleep 1
           # SwiftShader software WebGL2 (no GPU on the runner); REAL wall-clock poll — virtual time
           # races the geom worker's threads (the fab-web A-phase lesson).
@@ -158,3 +160,10 @@ jobs:
           grep -qE "fab-gui render complete: [1-9]" /tmp/console.log \
             || { echo "::error::demo never rendered through the geom worker"; tail -30 /tmp/console.log; exit 1; }
           echo "boot gate: OK (bundle boots + kernel renders the demo)"
+      # SZ.9.2 + SZ.9.3 — the FULL worker, and whether its geometry matches the desktop's. The demo
+      # above is `include <fabdemo.scad>`, a bare-prefix file, so `wanted_variant` routes it LEAN:
+      # every browser gate in this repo was exercising the 1.10 MB worker and NOTHING had ever booted
+      # the 3.85 MB one carrying the transpiled band, let alone compared what it computed against
+      # what the desktop computes for the same model.
+      - name: Web/native geometry parity through the FULL worker (SZ.9.2/9.3)
+        run: bash packaging/web/e2e-web-native-parity.sh target/fab-gui/stage 8897 240

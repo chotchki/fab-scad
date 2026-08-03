@@ -108,13 +108,18 @@ The full app — Model / Parts / Orientation / Export tabs + the 3D viewport —
 above). Query params (`?demo`, `?model=`) and `localStorage` (last file, camera) are the natural next
 knobs but are OUT of scope until the site asks for them; the contract stays small on purpose.
 
-### 3. Emits three signals
+### 3. Emits four signals
 
 | signal | channel | when | for |
 | --- | --- | --- | --- |
 | **`fab-gui:ready`** | `document` `CustomEvent` | the FIRST egui frame paints | the host removes its boot splash |
 | **`fab-gui render complete: N part(s)`** | `console.info` | every whole-render finishes (N ≥ 1) | the release boot gate + a health heartbeat |
+| **`fab-gui geom worker: lean\|full`** | `console.info` | a geom worker is created (at most twice per page) | which variant the model routed to — the SZ.9.2 gate asserts on it |
 | Rust panic | `console.error` | on any panic | `console_error_panic_hook` — a bare wasm trap is otherwise opaque |
+
+The worker-variant line exists because the routing decision is otherwise INVISIBLE: both variants
+render the same geometry, so a router stuck on one of them looks exactly like a working one from
+outside. It is also how you tell, from a user's console, whether they paid for the 2.75 MB band.
 
 `fab-gui:ready` fires at "the app is VISIBLE" (first frame), NOT "geometry is done" — the worker
 round-trip takes a second or two after, and the app shows its OWN loading pulse for that (the reactive
@@ -217,6 +222,24 @@ staged bundle, loads `index.reference.html?demo` in headless Chrome, and require
 
 Real wall-clock poll, not `--virtual-time-budget`: the demo plans through the geom worker, and virtual
 time races real worker threads (relearned the hard way on fab-web 0.11.0).
+
+The demo is `include <fabdemo.scad>`, a bare-prefix file, so it routes to the LEAN worker. That is
+worth knowing: for a long time it was the ONLY browser gate, and it meant the full worker — the
+3.85 MB one carrying the whole transpiled band — shipped without ever being executed. Two more gates
+close that, and both run in CI as well as at release:
+
+- **`e2e-web-native-parity.sh`** (SZ.9.2/9.3) renders a real BOSL2 model, asserts the router picked
+  `full`, and diffs the mesh the browser uploaded against a desktop render of the SAME request
+  (`RenderWhole`/Final → `SaveMeshes`). The only place the two platforms' geometry is compared rather
+  than assumed identical — they share `handle_with_store`, but not libm, not the rayon backend, and
+  not wasm-opt.
+- **`e2e-save.sh`** (W.5.9) drives the save round-trip against a stub site, covering the colored-3MF
+  arm the parity fixture deliberately leaves out.
+
+CI builds through `gui/web/build-wasm.sh` — the same script the release calls (SZ.9.1). It used to
+carry its own copy of the build steps, which drifted into calling a deleted lib-packer and, worse,
+into building a SERIAL non-shared-memory worker while the release shipped a threaded one: every
+threading failure mode was structurally invisible until a tag was cut.
 
 ## Decisions (settled)
 

@@ -62,7 +62,7 @@ fn builtin_rows() -> usize {
 }
 
 /// The pack the WEB app hands the worker: every BOSL2 file keyed `BOSL2/<name>`, exactly as
-/// `packaging/web/pack_scad_libs.py` writes it and `lib_fetch.rs` closes over it.
+/// `src/bin/pack_libs.rs` writes it and `lib_fetch.rs` closes over it.
 fn web_pack() -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(libs_dir().join("BOSL2")).expect("libs/BOSL2 is readable") {

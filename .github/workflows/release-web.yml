@@ -48,10 +48,8 @@ jobs:
     needs: gate
     runs-on: ubuntu-latest
     env:
-      # ONE definition of the geom worker's link flags, at JOB level because the build and stage
-      # steps are separate shells. Both worker variants build from it, so the lean one cannot
-      # silently lose the shared memory or the baked stack that the full one has.
-      GEOM_RUSTFLAGS: '-C link-arg=-zstack-size=16777216 -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__heap_end'
+      # The staged bundle, at JOB level because the build, stage and gate steps are separate shells.
+      STAGE: target/fab-gui/stage
     steps:
       - uses: actions/checkout@v4
       # EVERY library submodule, not just BOSL2: `libraries` carries MCAD too, and a missing
@@ -77,21 +75,27 @@ jobs:
           curl -sL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz | tar xz
           echo "$PWD/binaryen-version_130/bin" >> "$GITHUB_PATH"
           sudo apt-get update && sudo apt-get install -y brotli
-      # Both crates are pure-Rust wasm now (the C++ Manifold kernel was cut at M.7.4 — no LLVM). Two
-      # SEPARATE builds because the geom worker needs different RUSTFLAGS + build-std than the app:
-      #  - fab-gui --lib: the cdylib app, main-thread bevy_egui, NO threading → plain wasm.
-      #  - fab-geom: the THREADED geom worker (W.6.2). fab-manifold `par` over wasm-bindgen-rayon needs
+      # ONE builder, shared with the CI boot gate and local dev: gui/web/build-wasm.sh. It emits the
+      # app cdylib, BOTH geom worker variants (threaded, shared-memory, band and no-band) and the
+      # scad lib pack. This step used to carry its own copy of all of that, as did ci.yml, and three
+      # copies of a 60-line build drifted exactly the way three copies do (SZ.9.1).
+      #
+      # What the script encodes, so it is not lost with the copy:
+      #  - fab-gui --lib is the cdylib app, main-thread bevy_egui, NO threading → plain wasm.
+      #  - fab-geom is the THREADED worker (W.6.2). fab-manifold `par` over wasm-bindgen-rayon needs
       #    build-std + shared-memory link-args so wasm-ld emits an IMPORTED SHARED memory — else
-      #    initThreadPool's postMessage of the Memory to the rayon sub-workers throws DataCloneError and
-      #    no geometry renders. The __tls_*/__heap_* exports are what wasm-bindgen's thread transform needs
-      #    ("failed to find __heap_base" otherwise). Mirrors gui/web/build-wasm.sh exactly.
-      - name: Build the wasm app (serial) + geom worker (threaded)
-        run: |
-          set -euo pipefail
-          cargo build --release --target wasm32-unknown-unknown -p fab-gui --lib
-          RUSTFLAGS="$GEOM_RUSTFLAGS" \
-            cargo build -p fab-geom --release --target wasm32-unknown-unknown \
-            --features par -Z build-std=panic_abort,std
+      #    initThreadPool's postMessage of the Memory to the rayon sub-workers throws DataCloneError
+      #    and no geometry renders. The __tls_*/__heap_* exports are what wasm-bindgen's thread
+      #    transform needs ("failed to find __heap_base" otherwise).
+      #  - the geom wasm-opt is -O1, NOT -Oz, and that is a workaround with a real expiry. Since SZ.1
+      #    made the transpiled band REACHABLE (before that it was dead-stripped and this wasm was
+      #    5 MB), binaryen v130 SIGBUSes on -O2/-Os/-Oz over this module — silently, leaving a
+      #    ZERO-BYTE output that would install as the shipped kernel. -O1 completes. Not memory
+      #    (reproduced on a 64 GB machine); a binaryen bug the larger module trips. The pin is
+      #    deliberate (older builds corrupt wasm-bindgen's externref table), so the fix is a binaryen
+      #    BUMP once one is verified, not un-pinning. Sizes: 30.29 MB raw -> 26.54 (-O1) -> 3.85 br.
+      - name: Build the bundle (app + both geom workers + lib pack)
+        run: bash gui/web/build-wasm.sh --stage "$STAGE"
       - name: Stage the bundle (docs/web-embed.md contract)
         run: |
           set -euo pipefail
@@ -101,84 +105,18 @@ jobs:
             *) VERSION="dev-${GITHUB_SHA::7}" ;;
           esac
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          STAGE=target/fab-gui/stage && mkdir -p "$STAGE"
 
-          # The app: cdylib → wasm-bindgen (ES module) → wasm-opt -Oz → brotli/gzip.
-          wasm-bindgen --target web --no-typescript --out-name fab_gui --out-dir "$STAGE" \
-            target/wasm32-unknown-unknown/release/fab_gui.wasm
-          # Explicit feature flags defend against any binaryen too old to read the feature section.
-          wasm-opt -Oz --enable-reference-types --enable-bulk-memory \
-            -o "$STAGE/fab_gui_bg.wasm.opt" "$STAGE/fab_gui_bg.wasm"
-          [ -s "$STAGE/fab_gui_bg.wasm.opt" ] || { echo "::error::wasm-opt produced an EMPTY app wasm"; exit 1; }
-          mv "$STAGE/fab_gui_bg.wasm.opt" "$STAGE/fab_gui_bg.wasm"
-          brotli -q 11 -kf "$STAGE/fab_gui_bg.wasm"
-          gzip -9 -kf "$STAGE/fab_gui_bg.wasm"
-
-          # The geometry worker (W.3.6): the kernel-only fab-geom wasm in its own Web Worker (THREADED).
-          mkdir -p "$STAGE/geom"
-          wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir "$STAGE/geom" \
-            target/wasm32-unknown-unknown/release/fab_geom.wasm
-          # wasm-bindgen-rayon's workerHelpers.js does import('../../..') — a bundler/package.json assumption
-          # that resolves to the out-DIR, not a module. Raw --target web has no bundler, so point the
-          # sub-worker's dynamic import at the real entry; else every rayon sub-worker fails to load and
-          # initThreadPool HANGS (no error — the pool just never reports ready). Mirrors build-wasm.sh.
-          for wh in "$STAGE"/geom/snippets/wasm-bindgen-rayon-*/src/workerHelpers.js; do
-            [[ -f "$wh" ]] && sed -i "s#import('\.\./\.\./\.\.')#import('../../../fab_geom.js')#" "$wh"
+          # PRECOMPRESSION is the release's own job — the build script emits raw artifacts and every
+          # consumer of them differs on this. libs.json had been shipping RAW: 4.29 MB of .scad text
+          # sitting beside carefully brotli-11'd wasm, which is 0.72 MB compressed — the single
+          # largest thing in the bundle and the only one paying full freight. Same contract as the
+          # wasm (docs/web-embed.md): the host serves the precompressed variant with
+          # `Content-Encoding`, never recompressing at the edge, so the app's plain
+          # `fetch("libs.json")` needs no change at all.
+          for f in fab_gui_bg.wasm geom/fab_geom_bg.wasm geom-lean/fab_geom_bg.wasm libs.json; do
+            brotli -q 11 -kf "$STAGE/$f"
+            gzip -9 -kf "$STAGE/$f"
           done
-          # --enable-threads preserves the atomics/shared-memory ops through the -Oz pass (else wasm-opt
-          # would strip them and the shared memory would be invalid).
-          # -O1, NOT -Oz, and this is a workaround with a real expiry. Since SZ.1 made the
-          # transpiled band REACHABLE (before that it was dead-stripped and this wasm was 5 MB),
-          # binaryen v130 SIGBUSes on -O2/-Os/-Oz over this module — silently, leaving a ZERO-BYTE
-          # output that the `mv` below would happily install as the shipped kernel. -O1 completes.
-          # Not memory (reproduced on a 64 GB machine); a binaryen bug the larger module trips.
-          # The pin is deliberate (older builds corrupt wasm-bindgen's externref table), so the fix
-          # is a binaryen BUMP once one is verified, not un-pinning. Sizes for the record:
-          # 30.29 MB raw -> 26.54 MB (-O1) -> 3.85 MB brotli.
-          wasm-opt -O1 --enable-threads --enable-reference-types --enable-bulk-memory \
-            -o "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
-          # A CRASHED optimiser leaves a 0-byte file, and `mv` would install it as the kernel. The
-          # step's `set -e` catches a non-zero exit, but not a tool that exits 0 having written
-          # nothing — so the size is checked rather than assumed.
-          [ -s "$STAGE/geom/fab_geom_bg.wasm.opt" ] || { echo "::error::wasm-opt produced an EMPTY geom wasm"; exit 1; }
-          mv "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
-          brotli -q 11 -kf "$STAGE/geom/fab_geom_bg.wasm"
-          gzip -9 -kf "$STAGE/geom/fab_geom_bg.wasm"
-          cp packaging/web/geom-worker.js "$STAGE/geom/"
-
-          # SZ.4 — THE LEAN WORKER. Same kernel, same evaluator, no transpiled band: 1.10 MB brotli
-          # against the full worker's 3.85, because the band is 71% of that download. The app routes
-          # to it when a model's include closure names no banded library, so a `cube(10);` visitor
-          # never fetches 2.75 MB of BOSL2 natives they cannot call into. Same answers either way —
-          # a native is bit-identical to interpreting its reference — so this is download size only.
-          mkdir -p "$STAGE/geom-lean"
-          RUSTFLAGS="$GEOM_RUSTFLAGS" cargo +nightly build -p fab-geom --release \
-            --target wasm32-unknown-unknown --no-default-features --features par \
-            -Z build-std=panic_abort,std
-          wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir "$STAGE/geom-lean" \
-            target/wasm32-unknown-unknown/release/fab_geom.wasm
-          for wh in "$STAGE"/geom-lean/snippets/wasm-bindgen-rayon-*/src/workerHelpers.js; do
-            [[ -f "$wh" ]] && sed -i "s#import('\.\./\.\./\.\.')#import('../../../fab_geom.js')#" "$wh"
-          done
-          wasm-opt -O1 --enable-threads --enable-reference-types --enable-bulk-memory \
-            -o "$STAGE/geom-lean/fab_geom_bg.wasm.opt" "$STAGE/geom-lean/fab_geom_bg.wasm"
-          [ -s "$STAGE/geom-lean/fab_geom_bg.wasm.opt" ] || { echo "::error::wasm-opt produced an EMPTY lean geom wasm"; exit 1; }
-          mv "$STAGE/geom-lean/fab_geom_bg.wasm.opt" "$STAGE/geom-lean/fab_geom_bg.wasm"
-          brotli -q 11 -kf "$STAGE/geom-lean/fab_geom_bg.wasm"
-          gzip -9 -kf "$STAGE/geom-lean/fab_geom_bg.wasm"
-          cp packaging/web/geom-worker.js "$STAGE/geom-lean/"
-
-          # The scad LIB PACK: BOSL2 + scad-lib + the web demo, one JSON the app fetches once and
-          # computes each model's include closure from (served at the bundle root).
-          #
-          # PRECOMPRESSED like the two wasm files, and it had been shipping RAW: 4.29 MB of .scad text
-          # sitting beside carefully brotli-11'd wasm, which is 0.72 MB compressed — the single largest
-          # thing in the bundle and the only one paying full freight. Same contract as the wasm
-          # (docs/web-embed.md): the host serves the precompressed variant with `Content-Encoding`, never
-          # recompressing at the edge, so the app's plain `fetch("libs.json")` needs no change at all.
-          cargo run --quiet --bin pack_libs -- "$STAGE/libs.json"
-          brotli -q 11 -kf "$STAGE/libs.json"
-          gzip -9 -kf "$STAGE/libs.json"
 
           # The reference loader (a crib for the host — the site owns the real document).
           cp gui/web/index.html "$STAGE/index.reference.html"
@@ -204,9 +142,10 @@ jobs:
           echo "libs.json (brotli): $(du -h "$STAGE/libs.json.br" | cut -f1) (raw $(du -h "$STAGE/libs.json" | cut -f1))"
           echo "geom LEAN (brotli): $(du -h "$STAGE/geom-lean/fab_geom_bg.wasm.br" | cut -f1)"
           # BOTH variants must be in the bundle: the app routes to geom-lean for any model that names
-          # no banded library, so a bundle missing it breaks every such render with a worker that
-          # never loads. Checked here rather than trusted, because the boot gate below renders the
-          # DEMO — which uses a library, so it exercises the full worker and would not notice.
+          # no banded library, so a bundle missing one breaks every render that routes to it, and
+          # breaks it by loading a worker that never comes up rather than by erroring. Re-checked
+          # here on the STAGED tree (build-wasm.sh checks its own output) because compression and
+          # the manifest walk run between, and the tarball is what ships.
           for v in geom geom-lean; do
             [ -s "$STAGE/$v/fab_geom_bg.wasm" ] || { echo "::error::$v/fab_geom_bg.wasm missing or empty"; exit 1; }
             [ -s "$STAGE/$v/geom-worker.js" ]   || { echo "::error::$v/geom-worker.js missing"; exit 1; }
@@ -214,9 +153,10 @@ jobs:
       # BOOT GATE (the web-v0.1.0 lesson: never release an artifact nobody executed). Serve the exact
       # staged bundle, boot fab-gui in headless Chrome, fail on any panic/RuntimeError, and require the
       # sourceless-boot DEMO to render end-to-end THROUGH the geom worker (the whole point of the bundle).
+      # The demo is `include <fabdemo.scad>`, a bare-prefix file, so this routes to the LEAN worker —
+      # the FULL one is gated separately below (SZ.9.2), which is where the band actually executes.
       - name: Boot the bundle in Chrome
         run: |
-          STAGE=target/fab-gui/stage
           cp "$STAGE/index.reference.html" "$STAGE/index.html"
           # COOP/COEP is now REQUIRED, not just nice-to-have: the THREADED geom worker can't even
           # instantiate without SharedArrayBuffer (cross-origin isolation), so plain `http.server` would
@@ -243,6 +183,14 @@ jobs:
           grep -qE "fab-gui render complete: [1-9]" /tmp/console.log \
             || { echo "::error::demo never rendered through the geom worker"; tail -30 /tmp/console.log; exit 1; }
           echo "boot gate: OK (bundle boots + kernel renders the demo)"
+      # FULL-WORKER + PARITY GATE (SZ.9.2/9.3). The boot gate above and the save gate below both render
+      # models that name no banded library, so both route LEAN — the 3.85 MB worker carrying the
+      # transpiled band had never been executed in a browser by anything. This renders a real BOSL2
+      # model through it, asserts the router actually picked it, and diffs the mesh the browser
+      # uploaded against a desktop render of the same request. The one place the two platforms'
+      # geometry is compared rather than assumed identical.
+      - name: Web/native geometry parity through the FULL worker (SZ.9.2/9.3)
+        run: bash packaging/web/e2e-web-native-parity.sh "$STAGE" 8897 240
       # SAVE-BACK ROUND-TRIP GATE (W.5.9): the staged bundle already carries index.html (copied above).
       # e2e-save.sh serves it behind the stub hotchkiss.io (COOP/COEP + a PUT recorder), boots headless
       # Chrome at ?model=…&e2e=save, and asserts the 3-variant PUT /media/<ref>/variants landed with the

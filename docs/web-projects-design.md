@@ -36,8 +36,8 @@ So the eval layer is READY. The two walls are both upstream of it, in delivery:
    (`gui/src/lib_fetch.rs:159`) GETs `libs.json` (a `HashMap<String,String>`, `:155`), caches it globally
    (`:133`), and BFS-scans `main`'s references against it. The user's OWN files have no way in.
 2. **Text-only pack.** The pack is `{path: text}` and the closure emits `text.into_bytes()`
-   (`lib_fetch.rs:116`) — binary can't survive JSON string encoding. `packaging/web/pack_scad_libs.py`
-   says so outright ("binary meshes would need a byte channel a text pack lacks (deferred)"). So SVG (text)
+   (`lib_fetch.rs:116`) — binary can't survive JSON string encoding. `src/bin/pack_libs.rs`
+   says so outright ("binary meshes would need a byte channel a text pack lacks"). So SVG (text)
    imports work on the web today; a binary STL, a 3MF, a PNG heightmap can't reach the byte-ready reader.
 
 ## The container: `.scadproj`

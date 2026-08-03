@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow};
-use bevy::prelude::Resource;
+use bevy::prelude::{Resource, info};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -45,6 +45,18 @@ impl Variant {
         match self {
             Self::Lean => "geom-lean",
             Self::Full => "geom",
+        }
+    }
+
+    /// The name this variant announces itself by. Logged at every worker creation, because the
+    /// routing decision is otherwise INVISIBLE: both variants render the same geometry, so a router
+    /// stuck on one of them looks exactly like a working one from the outside. This string is what
+    /// `packaging/web/e2e-full-worker.sh` asserts on, and what tells you from a user's console
+    /// whether they paid for the band.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Lean => "lean",
+            Self::Full => "full",
         }
     }
 }
@@ -121,6 +133,7 @@ fn get_worker(want: Option<Variant>) -> Result<(web_sys::Worker, Rc<Rpc>)> {
         &worker,
         "geometry worker failed to load — is the worker directory deployed and data-base right?",
     );
+    info!("fab-gui geom worker: {}", variant.label());
     WORKER.with(|w| *w.borrow_mut() = Some((worker.clone(), rpc.clone(), variant)));
     Ok((worker, rpc))
 }

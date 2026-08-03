@@ -196,6 +196,9 @@ added 2026-07-07.
 - [x] SZ.7 - The corpus and repro harnesses measure the tier the product actually runs
 - [x] SZ.8 - The web render carries an eval budget — from_env can never supply one on wasm
 - [ ] SZ.9 - CI tests what it ships: serial-vs-threaded worker, and no native-vs-web geometry comparison
+  - [x] SZ.9.1 - CI builds the artifact the release ships — one build script, not three copies
+  - [x] SZ.9.2 - Boot the FULL worker in a browser — no gate has ever executed it
+  - [x] SZ.9.3 - Compare the geometry the browser produces against the desktop's
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)
 - [ ] V.1 - V.1 - per-part parallelism: render/slice/print-layout each part on its own worker thread
 ## Phase Y - Y - Verification hardening: 100%-Rust re-derivation — shrink the unsafe surface, aim each tier where it uniquely covers

@@ -40,6 +40,14 @@ name = "pack_libs"
 path = "src/bin/pack_libs.rs"
 required-features = ["native"]
 
+# SZ.9.3: does the geometry the BROWSER produced match the geometry the DESKTOP produced? Compares two
+# meshes (.stl or .3mf, mixed) on triangle count, vertex multiset, bbox and volume. `kernel` for the 3MF
+# reader; the web save path emits 3MF unconditionally, so a comparator without it would be STL-only.
+[[bin]]
+name = "mesh_diff"
+path = "src/bin/mesh_diff.rs"
+required-features = ["native", "kernel"]
+
 # The models-harness isolation worker (L.3): evaluates ONE model file (include graph + `import()` meshes) and
 # prints its outcome, so the harness can KILL a runaway — the interpreter is slow enough on heavy BOSL2
 # geometry that ~half the real models blow a 10 s budget — instead of leaking a host thread per timeout.

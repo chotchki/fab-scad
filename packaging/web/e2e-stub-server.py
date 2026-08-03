@@ -5,16 +5,23 @@ Serves the fab-gui bundle with PROD-shaped headers (COOP/COEP so the threaded ge
 SharedArrayBuffer instantiates; application/wasm for the streaming path) AND stands in for the
 site's media resource so the round-trip closes WITHOUT the real server:
 
-  GET  /media/<ref>[?format=scad]   -> the demo .scad (application/x-openscad). The load half — the
-                                       app fetch_text's the ?model= URL. Set-Cookie plants a session
-                                       cookie so the same-origin PUT carries it (auth wiring proof).
+  GET  /media/<ref>[?format=scad]   -> the demo .scad (application/x-openscad), or --model's file.
+                                       The load half — the app fetch_text's the ?model= URL.
+                                       Set-Cookie plants a session cookie so the same-origin PUT
+                                       carries it (auth wiring proof).
   PUT  /media/<ref>/variants        -> the SAVE half. Parses the multipart, records each file part
                                        (name/filename/ext/bytes) + whether the session cookie rode,
                                        writes a JSON summary to --record, and 200s a manifest.
+                                       With --dump, ALSO writes each part's BYTES to <dir>/<name>.<ext>.
   GET  /__e2e/state                 -> that recorded summary (or {}), for the runner to assert on.
 
 Everything else falls through to static file serving out of <dir>. stdlib only.
-Usage: e2e-stub-server.py <dir> [port=8788] [--record PATH]
+Usage: e2e-stub-server.py <dir> [port=8788] [--record PATH] [--model FILE] [--dump DIR]
+
+--model and --dump exist for the SZ.9.3 parity gate: serve a chosen model, then keep the mesh the
+browser produced so it can be diffed against the desktop's for the same source. Without --dump the
+stub records only byte COUNTS, which is enough to prove a save round-tripped and nothing at all
+about whether the geometry was right.
 """
 
 import http.server
@@ -58,8 +65,9 @@ def _parse_multipart(body: bytes, content_type: str):
         ctype = next((h.split(":", 1)[1].strip() for h in headers.splitlines()
                       if h.lower().startswith("content-type")), "")
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        # `_data` is stripped before the summary is serialized — it exists only for --dump.
         parts.append({"name": name, "filename": filename, "ext": ext,
-                      "bytes": len(data), "content_type": ctype})
+                      "bytes": len(data), "content_type": ctype, "_data": data})
     return parts
 
 
@@ -74,6 +82,8 @@ def _kv(disp: str, key: str) -> str:
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     record_path = "/tmp/fab-e2e-put.json"
+    model_bytes = DEMO_SCAD   # --model overrides
+    dump_dir = None           # --dump: where to write the received part bytes
 
     extensions_map = {
         **http.server.SimpleHTTPRequestHandler.extensions_map,
@@ -112,9 +122,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path.startswith("/media/") and not path.startswith("/media/file/"):
             self.send_response(200)
             self.send_header("Content-Type", "application/x-openscad")
-            self.send_header("Content-Length", str(len(DEMO_SCAD)))
+            self.send_header("Content-Length", str(len(self.model_bytes)))
             self.end_headers()
-            self.wfile.write(DEMO_SCAD)
+            self.wfile.write(self.model_bytes)
             return
         return super().do_GET()
 
@@ -128,6 +138,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         cookie = self.headers.get("Cookie", "")
         exts = [p["ext"] for p in parts]
         mesh_exts = [e for e in exts if e in ("stl", "3mf")]
+
+        # --dump: keep the BYTES, keyed by the part's form-field name (`source`/`low`/`high`/`plate`),
+        # so `high.3mf` is the full-res mesh the browser actually produced. The SZ.9.3 gate then diffs
+        # it against a desktop render of the same source — the only place in the tree where the two
+        # platforms' geometry is ever compared rather than assumed identical.
+        if self.dump_dir:
+            try:
+                os.makedirs(self.dump_dir, exist_ok=True)
+                for p in parts:
+                    name = p["name"] or "part"
+                    out = os.path.join(self.dump_dir, f"{name}.{p['ext']}" if p["ext"] else name)
+                    with open(out, "wb") as f:
+                        f.write(p["_data"])
+            except OSError as e:
+                sys.stderr.write(f"e2e-stub: could not dump parts: {e}\n")
+
+        # Strip the bytes — they are not JSON-serializable and the record is a summary.
+        parts = [{k: v for k, v in p.items() if k != "_data"} for p in parts]
         summary = {
             "method": "PUT",
             "ref": path[len("/media/"):-len("/variants")],
@@ -159,16 +187,32 @@ def main():
     directory = sys.argv[1] if len(sys.argv) > 1 else "."
     port = 8788
     record = Handler.record_path
+    model = None
+    dump = None
     rest = sys.argv[2:]
     i = 0
     while i < len(rest):
         if rest[i] == "--record" and i + 1 < len(rest):
             record = rest[i + 1]
             i += 2
+        elif rest[i] == "--model" and i + 1 < len(rest):
+            model = rest[i + 1]
+            i += 2
+        elif rest[i] == "--dump" and i + 1 < len(rest):
+            dump = rest[i + 1]
+            i += 2
         else:
             port = int(rest[i])
             i += 1
     Handler.record_path = record
+    Handler.dump_dir = dump
+    if model:
+        # Read eagerly and FAIL here if it is unreadable. A stub that silently fell back to the demo
+        # cube would let the parity gate compare a cube against a BOSL2 render and report a mismatch
+        # that has nothing to do with the platforms.
+        with open(model, "rb") as f:
+            Handler.model_bytes = f.read()
+        print(f"fab-gui e2e stub: serving {model} ({len(Handler.model_bytes)} bytes) as the model")
     # A fresh run must not see a stale PUT record.
     try:
         os.remove(record)

@@ -27,6 +27,7 @@ if command -v wasm-opt >/dev/null; then
     -o "$out/fab_geom_bg.wasm" "$out/fab_geom_bg.wasm"
 fi
 
-# fab's include pack (BOSL2 + scad-lib), keys like BOSL2/std.scad — reuse the shipped one.
-python3 packaging/web/pack_scad_libs.py perf/browser/vendor/fab-libs.json
+# fab's include pack (BOSL2 + MCAD + machineblocks + scad-lib), keys like BOSL2/std.scad — the same
+# packer the bundle uses, reading the same `import::libraries()` declaration the band registers from.
+cargo run --quiet --bin pack_libs -- perf/browser/vendor/fab-libs.json
 echo "built -> $out/fab_geom_bg.wasm ($(du -h "$out/fab_geom_bg.wasm" | cut -f1)) + vendor/fab-libs.json"

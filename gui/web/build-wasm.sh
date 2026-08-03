@@ -55,6 +55,26 @@ if [[ "$profile" == "release" ]] && command -v wasm-opt >/dev/null; then
 fi
 cp packaging/web/geom-worker.js gui/web/geom/
 
+# SZ.4 — the LEAN worker beside it: same kernel, same evaluator, no transpiled band (1.10 MB brotli
+# against the full 3.85). The app routes to it when a model's include closure names no banded
+# library. Built with the SAME link flags — a lean worker that quietly lost the shared memory would
+# fail only at runtime, in a thread pool that never reports ready.
+echo "building fab-geom LEAN (no transpiled band)…"
+mkdir -p gui/web/geom-lean
+RUSTFLAGS='-C link-arg=-zstack-size=16777216 -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__heap_end' \
+  cargo +nightly build -p fab-geom --release --target wasm32-unknown-unknown \
+  --no-default-features --features par -Z build-std=panic_abort,std
+wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir gui/web/geom-lean \
+  "target/wasm32-unknown-unknown/release/fab_geom.wasm"
+for wh in gui/web/geom-lean/snippets/wasm-bindgen-rayon-*/src/workerHelpers.js; do
+  [[ -f "$wh" ]] && sed -i.bak "s#import('\.\./\.\./\.\.')#import('../../../fab_geom.js')#" "$wh" && rm -f "$wh.bak"
+done
+if [[ "$profile" == "release" ]] && command -v wasm-opt >/dev/null; then
+  wasm-opt -O1 --enable-threads --enable-reference-types --enable-bulk-memory \
+    -o gui/web/geom-lean/fab_geom_bg.wasm gui/web/geom-lean/fab_geom_bg.wasm
+fi
+cp packaging/web/geom-worker.js gui/web/geom-lean/
+
 # The scad LIB PACK (W.3.6 Stage 2): BOSL2 + scad-lib + the web demo, one JSON the app fetches once
 # and computes each model's include closure from. Served at the bundle root.
 cargo run --quiet --bin pack_libs -- gui/web/libs.json

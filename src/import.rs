@@ -164,69 +164,10 @@ pub fn resolve_geometry_hybrid_full(
     )
 }
 
-/// One library this product carries: its transpiled ROWS and the directory its SOURCE lives in,
-/// bound together (SZ.2).
-///
-/// They were two independent lists and they disagreed. The rows came from cargo features; the
-/// source came from a python glob in `packaging/web/pack_scad_libs.py` that named BOSL2 and
-/// scad-lib by hand. Adding MCAD to the `kernel` feature therefore compiled its natives into the
-/// browser bundle while its `.scad` stayed out of `libs.json` — so `include <MCAD/units.scad>`
-/// resolved natively and silently rendered NOTHING on the web, because a missing import costs a
-/// PART rather than an error.
-///
-/// One struct, one list. A library that cannot say where its source lives cannot be declared, and
-/// the packer reads the same list the registry does — so the two halves cannot drift apart again.
-pub struct Library {
-    /// The library's own name, as its `LibrarySurface` reports it.
-    pub name: &'static str,
-    /// Where its `.scad` files live, relative to the repo root.
-    pub source_dir: &'static str,
-    /// The prefix an `include <...>` uses — `BOSL2/std.scad` is `BOSL2/`, and scad-lib's own
-    /// modules are referenced bare, so its prefix is empty.
-    pub prefix: &'static str,
-}
-
-/// THE LIBRARIES THIS PRODUCT CARRIES, source side — the list `libs.json` is packed from and the
-/// list the parity gate compares the registry against.
-///
-/// `Natives` is absent on purpose: fab-lang's own rows are compiled-in with no `.scad` behind them,
-/// so there is nothing to pack. scad-lib IS here — it ships as source on both platforms and has no
-/// transpiled crate, which is the mirror case.
-///
-/// UNCONDITIONAL, and SZ.4 is why. The first cut cfg-gated each entry on its transpiled crate, which
-/// read as "one declaration" but quietly answered the wrong question: a LEAN build (kernel without
-/// the `libraries` feature) has no BOSL2 rows and still has to RENDER BOSL2 — interpreted — so it
-/// needs the source just as much. Gating the source on the rows would have shipped a lean worker
-/// that cannot resolve `include <BOSL2/std.scad>` at all, turning a speed difference into a missing
-/// part. Source and rows are genuinely different questions; the invariant that matters runs ONE way
-/// (anything with rows must have source), and `library_declaration_is_one_list.rs` asserts exactly
-/// that direction and no more.
-#[must_use]
-pub fn libraries() -> &'static [Library] {
-    &[
-        Library {
-            name: "BOSL2",
-            source_dir: "libs/BOSL2",
-            prefix: "BOSL2/",
-        },
-        Library {
-            name: "MCAD",
-            source_dir: "libs/MCAD",
-            prefix: "MCAD/",
-        },
-        Library {
-            name: "machineblocks",
-            source_dir: "libs/machineblocks/lib",
-            prefix: "machineblocks/",
-        },
-        // fab-scad's OWN library: source-only, no transpiled crate, referenced bare.
-        Library {
-            name: "scad-lib",
-            source_dir: "scad-lib",
-            prefix: "",
-        },
-    ]
-}
+/// The library DECLARATION lives in [`crate::libraries`] — it is a product fact, not a kernel one,
+/// and the wasm GUI needs it without pulling the kernel in (SZ.4's worker routing reads it to decide
+/// which variant to load). Re-exported here because this is where callers have always looked.
+pub use crate::libraries::{Library, libraries};
 
 /// THE LIBRARIES THIS PRODUCT LOADS (AR.26.4.3) — one definition, so there is one answer to "what
 /// can a `.scad` here call and get compiled".

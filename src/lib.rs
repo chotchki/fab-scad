@@ -74,6 +74,9 @@ pub mod geomsvc;
 pub mod import;
 #[cfg(feature = "kernel")]
 pub mod kernel;
+/// SZ.4 — the library DECLARATION, ungated: the wasm GUI reads it to route worker variants and has
+/// no kernel, while `import` (which builds the registry from it) does.
+pub mod libraries;
 // Browser-wasm thread-pool initializer (W.6): re-exported up the crate chain so the geom worker's final
 // cdylib (fab-geom) carries wasm-bindgen-rayon's `initThreadPool` JS export. The worker MUST
 // `await initThreadPool(navigator.hardwareConcurrency)` before the first kernel call, on a

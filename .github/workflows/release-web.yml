@@ -47,11 +47,19 @@ jobs:
   bundle:
     needs: gate
     runs-on: ubuntu-latest
+    env:
+      # ONE definition of the geom worker's link flags, at JOB level because the build and stage
+      # steps are separate shells. Both worker variants build from it, so the lean one cannot
+      # silently lose the shared memory or the baked stack that the full one has.
+      GEOM_RUSTFLAGS: '-C link-arg=-zstack-size=16777216 -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__heap_end'
     steps:
       - uses: actions/checkout@v4
-      # libs/ only (BOSL2 pin for the lib pack) — models/ is a separate private-ish submodule
-      # and the wasm build needs neither it nor scad-lib beyond the working tree.
-      - run: git submodule update --init libs/BOSL2
+      # EVERY library submodule, not just BOSL2: `libraries` carries MCAD too, and a missing
+      # checkout makes that crate declare nothing rather than fail — so a partial init would build a
+      # full worker with an empty MCAD in it. `pack_libs` now refuses outright when a declared
+      # library has no source on disk, which turns that into a loud failure here rather than a
+      # silently short bundle. models/ stays out: the wasm build needs none of it.
+      - run: git submodule update --init libs/BOSL2 libs/MCAD libs/machineblocks
       # NIGHTLY + rust-src: the geom worker is THREADED (W.6.2), which needs -Zbuild-std to rebuild std
       # with atomics/shared-memory. The app itself is stable-clean; nightly builds it fine (superset).
       # Pin a date here if a nightly regression ever bites — the boot + save e2e gates below would catch it.
@@ -81,7 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release --target wasm32-unknown-unknown -p fab-gui --lib
-          RUSTFLAGS='-C link-arg=-zstack-size=16777216 -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__heap_end' \
+          RUSTFLAGS="$GEOM_RUSTFLAGS" \
             cargo build -p fab-geom --release --target wasm32-unknown-unknown \
             --features par -Z build-std=panic_abort,std
       - name: Stage the bundle (docs/web-embed.md contract)
@@ -138,6 +146,28 @@ jobs:
           gzip -9 -kf "$STAGE/geom/fab_geom_bg.wasm"
           cp packaging/web/geom-worker.js "$STAGE/geom/"
 
+          # SZ.4 — THE LEAN WORKER. Same kernel, same evaluator, no transpiled band: 1.10 MB brotli
+          # against the full worker's 3.85, because the band is 71% of that download. The app routes
+          # to it when a model's include closure names no banded library, so a `cube(10);` visitor
+          # never fetches 2.75 MB of BOSL2 natives they cannot call into. Same answers either way —
+          # a native is bit-identical to interpreting its reference — so this is download size only.
+          mkdir -p "$STAGE/geom-lean"
+          RUSTFLAGS="$GEOM_RUSTFLAGS" cargo +nightly build -p fab-geom --release \
+            --target wasm32-unknown-unknown --no-default-features --features par \
+            -Z build-std=panic_abort,std
+          wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir "$STAGE/geom-lean" \
+            target/wasm32-unknown-unknown/release/fab_geom.wasm
+          for wh in "$STAGE"/geom-lean/snippets/wasm-bindgen-rayon-*/src/workerHelpers.js; do
+            [[ -f "$wh" ]] && sed -i "s#import('\.\./\.\./\.\.')#import('../../../fab_geom.js')#" "$wh"
+          done
+          wasm-opt -O1 --enable-threads --enable-reference-types --enable-bulk-memory \
+            -o "$STAGE/geom-lean/fab_geom_bg.wasm.opt" "$STAGE/geom-lean/fab_geom_bg.wasm"
+          [ -s "$STAGE/geom-lean/fab_geom_bg.wasm.opt" ] || { echo "::error::wasm-opt produced an EMPTY lean geom wasm"; exit 1; }
+          mv "$STAGE/geom-lean/fab_geom_bg.wasm.opt" "$STAGE/geom-lean/fab_geom_bg.wasm"
+          brotli -q 11 -kf "$STAGE/geom-lean/fab_geom_bg.wasm"
+          gzip -9 -kf "$STAGE/geom-lean/fab_geom_bg.wasm"
+          cp packaging/web/geom-worker.js "$STAGE/geom-lean/"
+
           # The scad LIB PACK: BOSL2 + scad-lib + the web demo, one JSON the app fetches once and
           # computes each model's include closure from (served at the bundle root).
           #
@@ -172,6 +202,15 @@ jobs:
           echo "app wasm (brotli):  $(du -h "$STAGE/fab_gui_bg.wasm.br" | cut -f1)"
           echo "geom wasm (brotli): $(du -h "$STAGE/geom/fab_geom_bg.wasm.br" | cut -f1)"
           echo "libs.json (brotli): $(du -h "$STAGE/libs.json.br" | cut -f1) (raw $(du -h "$STAGE/libs.json" | cut -f1))"
+          echo "geom LEAN (brotli): $(du -h "$STAGE/geom-lean/fab_geom_bg.wasm.br" | cut -f1)"
+          # BOTH variants must be in the bundle: the app routes to geom-lean for any model that names
+          # no banded library, so a bundle missing it breaks every such render with a worker that
+          # never loads. Checked here rather than trusted, because the boot gate below renders the
+          # DEMO — which uses a library, so it exercises the full worker and would not notice.
+          for v in geom geom-lean; do
+            [ -s "$STAGE/$v/fab_geom_bg.wasm" ] || { echo "::error::$v/fab_geom_bg.wasm missing or empty"; exit 1; }
+            [ -s "$STAGE/$v/geom-worker.js" ]   || { echo "::error::$v/geom-worker.js missing"; exit 1; }
+          done
       # BOOT GATE (the web-v0.1.0 lesson: never release an artifact nobody executed). Serve the exact
       # staged bundle, boot fab-gui in headless Chrome, fail on any panic/RuntimeError, and require the
       # sourceless-boot DEMO to render end-to-end THROUGH the geom worker (the whole point of the bundle).

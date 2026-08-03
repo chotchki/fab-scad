@@ -19,7 +19,62 @@ use fab_scad::geomsg::{self, Request, Response};
 use crate::worker_rpc::Rpc;
 
 thread_local! {
-    static WORKER: RefCell<Option<(web_sys::Worker, Rc<Rpc>)>> = const { RefCell::new(None) };
+    static WORKER: RefCell<Option<(web_sys::Worker, Rc<Rpc>, Variant)>> = const { RefCell::new(None) };
+}
+
+/// WHICH WORKER WASM to run (SZ.4). Two builds of fab-geom: the same kernel and the same evaluator,
+/// differing only in whether the transpiled band is linked in. Same answers either way — a native is
+/// bit-identical to interpreting its reference by construction — so this is purely how much wasm the
+/// browser downloads.
+///
+///     lean  1.10 MB brotli   BOSL2/MCAD calls INTERPRET
+///     full  3.85 MB brotli   they dispatch to compiled natives
+///
+/// Worth 2.75 MB to a `cube(10);` user, and worth nothing to a BOSL2 user — of 122 real models there
+/// are nine distinct include-closures and every one pulls 67-76% of BOSL2, so there is no middle
+/// case to split more finely for. That measurement is why this is a variant rather than a loader.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Variant {
+    Lean,
+    Full,
+}
+
+impl Variant {
+    /// The bundle subdirectory this variant's worker lives in.
+    fn dir(self) -> &'static str {
+        match self {
+            Self::Lean => "geom-lean",
+            Self::Full => "geom",
+        }
+    }
+}
+
+/// Does this request name a library that has a transpiled band?
+///
+/// Read off the REQUEST rather than plumbed down from the app: a web render carries its whole
+/// include closure as `Source::Bytes.libs`, so the request already knows. The prefixes come from
+/// `fab_scad::libraries::libraries()` — the same declaration the source pack is built from — so a new
+/// library cannot be added to one and forgotten in the other.
+///
+/// Only a RENDER can answer. Analyze/slice/export operate on handles a previous render minted, so
+/// they must never trigger a switch: that would drop the store those handles live in.
+fn wanted_variant(req: &Request) -> Option<Variant> {
+    let libs = match req {
+        Request::RenderWhole { source, .. } | Request::RenderParts { source, .. } => match source {
+            geomsg::Source::Bytes { libs, .. } => libs,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let banded: Vec<&str> = fab_scad::libraries::libraries()
+        .iter()
+        .filter(|l| !l.prefix.is_empty())
+        .map(|l| l.prefix)
+        .collect();
+    let needs = libs
+        .iter()
+        .any(|(path, _)| banded.iter().any(|p| path.starts_with(p)));
+    Some(if needs { Variant::Full } else { Variant::Lean })
 }
 
 /// Where the bundle's members live — the page declares it via `<canvas id="fab-gui" data-base=…>`;
@@ -38,22 +93,35 @@ pub(crate) fn bundle_base() -> String {
         .unwrap_or_default()
 }
 
-/// The one worker, lazily created (its ~1.7 MB wasm fetches on first use). Cached in the thread_local;
+/// The one worker, lazily created (its wasm fetches on first use). Cached in the thread_local;
 /// nulled on a crash so this re-creates it.
-fn get_worker() -> Result<(web_sys::Worker, Rc<Rpc>)> {
-    if let Some(w) = WORKER.with(|w| w.borrow().clone()) {
-        return Ok(w);
+///
+/// UPGRADE-ONLY (SZ.4). A live LEAN worker is torn down and replaced when a render first needs the
+/// band, because the alternative is silently interpreting a model the user could have had compiled.
+/// The reverse never happens: downgrading a full worker would save no download (it is already
+/// fetched and cached) and would throw away the `SolidStore` every held handle lives in. So the
+/// variant only ever ratchets up, at most once per page.
+fn get_worker(want: Option<Variant>) -> Result<(web_sys::Worker, Rc<Rpc>)> {
+    if let Some((worker, rpc, live)) = WORKER.with(|w| w.borrow().clone()) {
+        let upgrade = want == Some(Variant::Full) && live == Variant::Lean;
+        if !upgrade {
+            return Ok((worker, rpc));
+        }
+        // Same teardown the crash path uses — the app re-renders and the store rebuilds.
+        worker.terminate();
+        WORKER.with(|w| *w.borrow_mut() = None);
     }
+    let variant = want.unwrap_or(Variant::Full);
     let opts = web_sys::WorkerOptions::new();
     opts.set_type(web_sys::WorkerType::Module);
-    let url = format!("{}geom/geom-worker.js", bundle_base());
+    let url = format!("{}{}/geom-worker.js", bundle_base(), variant.dir());
     let worker = web_sys::Worker::new_with_options(&url, &opts)
         .map_err(|_| anyhow!("geometry worker failed to start ({url})"))?;
     let rpc = Rpc::attach(
         &worker,
-        "geometry worker failed to load — is geom/ deployed and data-base right?",
+        "geometry worker failed to load — is the worker directory deployed and data-base right?",
     );
-    WORKER.with(|w| *w.borrow_mut() = Some((worker.clone(), rpc.clone())));
+    WORKER.with(|w| *w.borrow_mut() = Some((worker.clone(), rpc.clone(), variant)));
     Ok((worker, rpc))
 }
 
@@ -71,7 +139,7 @@ impl GeomPool {
     /// Encode → postMessage (transfer the buffer) → await the id-matched reply → decode. `Err` =
     /// TRANSPORT failure (worker gone/crashed); domain failures arrive as `Ok(Response::Failed)`.
     pub async fn call(&self, req: Request) -> Result<Response> {
-        let (worker, rpc) = get_worker()?;
+        let (worker, rpc) = get_worker(wanted_variant(&req))?;
         let (id, promise) = rpc.register();
 
         let bytes = geomsg::encode_request(&req);

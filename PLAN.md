@@ -185,9 +185,9 @@ added 2026-07-07.
 - [x] SZ.2 - One declared library set drives BOTH the natives and the source pack
 - [x] SZ.3 - Measure the real load tax now that the browser actually receives the band
 - [ ] SZ.4 - Dynamic library loading so nobody pays for a library they don't use
-  - [ ] SZ.4.1 - Build a LEAN geom worker with no transpiled band (1.10 MB vs 3.85 MB)
+  - [x] SZ.4.1 - Build a LEAN geom worker with no transpiled band (1.10 MB vs 3.85 MB)
   - [ ] SZ.4.2 - Route worker creation on the model's library refs, before the worker exists
-  - [ ] SZ.4.3 - Gate: the lean worker really lacks the band and the full one really has it
+  - [x] SZ.4.3 - Gate: the lean worker really lacks the band and the full one really has it
   - [>] SZ.4.4 - Split PER SOURCE FILE, not per library — a BOSL2 user saves nothing from per-library
   - [>] SZ.4.5 - The desktop half: cdylib + libloading on the SAME boundary, not a second mechanism
   - [>] SZ.4.6 - Load a library only when a model first references it — the actual 2.75 MB win

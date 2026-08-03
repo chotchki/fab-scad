@@ -195,7 +195,7 @@ added 2026-07-07.
 - [x] SZ.6 - Precompress libs.json in the release — 4.29 MB shipped raw beside brotli'd wasm
 - [x] SZ.7 - The corpus and repro harnesses measure the tier the product actually runs
 - [x] SZ.8 - The web render carries an eval budget — from_env can never supply one on wasm
-- [ ] SZ.9 - CI tests what it ships: serial-vs-threaded worker, and no native-vs-web geometry comparison
+- [x] SZ.9 - CI tests what it ships: serial-vs-threaded worker, and no native-vs-web geometry comparison
   - [x] SZ.9.1 - CI builds the artifact the release ships — one build script, not three copies
   - [x] SZ.9.2 - Boot the FULL worker in a browser — no gate has ever executed it
   - [x] SZ.9.3 - Compare the geometry the browser produces against the desktop's

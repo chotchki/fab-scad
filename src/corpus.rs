@@ -333,7 +333,16 @@ pub fn run_file(script: &str, path: &Path) -> (Bucket, u128, String) {
         ..fab_lang::Config::from_env()
     };
     let start = Instant::now();
-    let result = fab_lang::evaluate_geometry_with_base_config(script, base, &libs, config);
+    // SZ.7 — the PRODUCT registry. This sweep is what gates a BOSL2 pin bump, and on
+    // `Registry::builtin()` it was gating the INTERPRETER: a transpiled row that diverged from its
+    // own reference was invisible to the one harness whose job is to see it.
+    let result = fab_lang::evaluate_geometry_with_registry(
+        script,
+        base,
+        &libs,
+        crate::import::registry(),
+        config,
+    );
     let ms = start.elapsed().as_millis();
     match result {
         Ok((_, messages)) => {
@@ -413,7 +422,14 @@ pub fn run_example(script: &str, bosl2_dir: &Path) -> (Bucket, u128, String) {
     let start = Instant::now();
     let examples_dir = bosl2_dir.join("examples");
     let lib_root = bosl2_dir.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let result = fab_lang::evaluate_geometry_with_base_full(script, &examples_dir, &[lib_root]);
+    // SZ.7 — the product registry, as in `run_file`.
+    let result = fab_lang::evaluate_geometry_with_registry(
+        script,
+        &examples_dir,
+        &[lib_root],
+        crate::import::registry(),
+        fab_lang::Config::from_env(),
+    );
     let ms = start.elapsed().as_millis();
     match result {
         Ok((geo, messages)) => {
@@ -464,7 +480,14 @@ pub fn run_script(script: &str, tests_dir: &Path) -> (Bucket, u128, String) {
     // not a hard error) to match OpenSCAD's STL export — but BOSL2's scadtest suite treats a fired assert as a
     // FAILURE (its `expect_success=false` negatives PROVE validation rejects bad input). So an assert warning
     // still buckets as `Assertion` here, the verdict the corpus ran on before the driver's export change.
-    let result = fab_lang::evaluate_geometry_with_base_full(script, tests_dir, &[]);
+    // SZ.7 — the product registry, as in `run_file`.
+    let result = fab_lang::evaluate_geometry_with_registry(
+        script,
+        tests_dir,
+        &[],
+        crate::import::registry(),
+        fab_lang::Config::from_env(),
+    );
     let ms = start.elapsed().as_millis();
     match result {
         Ok((_, messages)) => {

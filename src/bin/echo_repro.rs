@@ -24,7 +24,16 @@ fn main() {
     let out = std::thread::Builder::new()
         .stack_size(fab_scad::EVAL_STACK)
         .spawn(
-            move || match fab_lang::evaluate_geometry_with_base_full(&source, &base, &libs) {
+            // SZ.7 — the product registry. The echo trail this tool prints is the one a
+            // divergence hunt reads, and on fab-lang's own rows it was the INTERPRETED trail: it
+            // would print correct values for a render the compiled tier got wrong.
+            move || match fab_lang::evaluate_geometry_with_registry(
+                &source,
+                &base,
+                &libs,
+                fab_scad::import::registry(),
+                fab_lang::Config::from_env(),
+            ) {
                 Ok((_, messages)) => messages
                     .iter()
                     .map(fab_lang::Message::render)

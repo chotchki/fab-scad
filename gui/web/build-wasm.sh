@@ -57,7 +57,7 @@ cp packaging/web/geom-worker.js gui/web/geom/
 
 # The scad LIB PACK (W.3.6 Stage 2): BOSL2 + scad-lib + the web demo, one JSON the app fetches once
 # and computes each model's include closure from. Served at the bundle root.
-python3 packaging/web/pack_scad_libs.py gui/web/libs.json
+cargo run --quiet --bin pack_libs -- gui/web/libs.json
 
 sz=$(du -h gui/web/fab_gui_bg.wasm | cut -f1)
 gsz=$(du -h gui/web/geom/fab_geom_bg.wasm | cut -f1)

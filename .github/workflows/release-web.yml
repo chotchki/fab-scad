@@ -146,7 +146,7 @@ jobs:
           # thing in the bundle and the only one paying full freight. Same contract as the wasm
           # (docs/web-embed.md): the host serves the precompressed variant with `Content-Encoding`, never
           # recompressing at the edge, so the app's plain `fetch("libs.json")` needs no change at all.
-          python3 packaging/web/pack_scad_libs.py "$STAGE/libs.json"
+          cargo run --quiet --bin pack_libs -- "$STAGE/libs.json"
           brotli -q 11 -kf "$STAGE/libs.json"
           gzip -9 -kf "$STAGE/libs.json"
 

@@ -70,19 +70,25 @@ exclude = ["manifold/fuzz"]
 [features]
 # The in-process Manifold geometry kernel (Track C). Default-on so the normal build + tests
 # exercise it, but gated so a kernel-less build doesn't need a C++ toolchain (cmake/clang).
-default = ["kernel", "native"]
+default = ["kernel", "libraries", "native"]
 # `geometry` (fab-lang) too: the kernel now speaks the shared geom vocabulary (Vec3/Tri/Affine), so
 # Solid's mesh + transform APIs are typed. fab-lang is pure Rust — cheap to pull in alongside Manifold.
 kernel = [
     "geometry",
     "mesh-io",
-    "bosl2",
-    "mcad",
     "dep:fab-manifold",
     "dep:threemf",
     "dep:quick-xml",
     "dep:usvg",
 ]
+# SZ.4 — THE TRANSPILED BAND, as its own axis so a build can have the kernel WITHOUT it. Measured:
+# the band is 2.75 MB of the browser worker's 3.85 MB brotli, and a model either uses BOSL2 (and
+# then pulls ~70% of it — 122 real models span just 9 include-closures, all 67-76%) or uses none at
+# all. There is no middle population, so the win is "don't ship it to someone who isn't using a
+# library", which needs the band to be separable from the kernel. Split out of `kernel` rather than
+# made default-off: every shipped desktop build and the full web worker still carry it.
+libraries = ["bosl2", "mcad"]
+
 # BOSL2, transpiled to Rust at build time (AR.26.4.3) — `import::registry()` accumulates it beside
 # fab-lang's own rows, so the compiled tier covers 1260 BOSL2 functions and 402 modules instead of
 # the 66 fab-lang hand-wrote. Rides `kernel`, which is what both the CLI and the wasm app turn on, so

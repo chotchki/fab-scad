@@ -30,6 +30,12 @@
 
 use std::path::{Path, PathBuf};
 
+// Unused in a LEAN build, where no library is carried and `carried()` returns empty — the cfg
+// arms below are the only callers.
+#[allow(
+    dead_code,
+    reason = "a lean build carries no library, so nothing calls this"
+)]
 fn repo() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
@@ -50,6 +56,10 @@ struct Carried {
     reason = "each entry is cfg-gated; a vec! literal cannot express that"
 )]
 fn carried() -> Vec<Carried> {
+    #[allow(
+        unused_mut,
+        reason = "a lean build enables none of the cfg arms below, so nothing pushes"
+    )]
     let mut out = Vec::new();
     #[cfg(feature = "bosl2")]
     out.push(Carried {
@@ -97,10 +107,22 @@ fn every_carried_library_actually_transpiled() {
 /// carries no library at all, every assertion above passes over an empty list.
 #[test]
 fn this_build_carries_at_least_one_library() {
+    // The set must MATCH the build, in both directions. Asserting non-empty unconditionally was
+    // wrong once SZ.4 made a lean build legitimate — and the two-sided form is stronger anyway: it
+    // now also catches a lean worker that secretly kept the band it exists to drop.
     let libs = carried();
-    assert!(
-        !libs.is_empty(),
-        "this build carries NO transpiled library, so the check above asserts nothing — either a \
-         feature was dropped or the test needs teaching about a renamed one"
-    );
+    if cfg!(feature = "libraries") {
+        assert!(
+            !libs.is_empty(),
+            "the `libraries` feature is ON and this build carries NO transpiled library, so the \
+             check above asserts nothing — a feature was dropped, or a crate was renamed"
+        );
+    } else {
+        assert!(
+            libs.is_empty(),
+            "the `libraries` feature is OFF but this build carries {} — the lean variant is not \
+             lean, and the 2.75 MB it exists to save is still in the binary",
+            libs.len()
+        );
+    }
 }

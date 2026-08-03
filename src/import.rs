@@ -191,23 +191,29 @@ pub struct Library {
 ///
 /// `Natives` is absent on purpose: fab-lang's own rows are compiled-in with no `.scad` behind them,
 /// so there is nothing to pack. scad-lib IS here — it ships as source on both platforms and has no
-/// transpiled crate, which is the mirror case and exactly why the two lists must be one.
+/// transpiled crate, which is the mirror case.
+///
+/// UNCONDITIONAL, and SZ.4 is why. The first cut cfg-gated each entry on its transpiled crate, which
+/// read as "one declaration" but quietly answered the wrong question: a LEAN build (kernel without
+/// the `libraries` feature) has no BOSL2 rows and still has to RENDER BOSL2 — interpreted — so it
+/// needs the source just as much. Gating the source on the rows would have shipped a lean worker
+/// that cannot resolve `include <BOSL2/std.scad>` at all, turning a speed difference into a missing
+/// part. Source and rows are genuinely different questions; the invariant that matters runs ONE way
+/// (anything with rows must have source), and `library_declaration_is_one_list.rs` asserts exactly
+/// that direction and no more.
 #[must_use]
 pub fn libraries() -> &'static [Library] {
     &[
-        #[cfg(feature = "bosl2")]
         Library {
             name: "BOSL2",
             source_dir: "libs/BOSL2",
             prefix: "BOSL2/",
         },
-        #[cfg(feature = "mcad")]
         Library {
             name: "MCAD",
             source_dir: "libs/MCAD",
             prefix: "MCAD/",
         },
-        #[cfg(feature = "machineblocks")]
         Library {
             name: "machineblocks",
             source_dir: "libs/machineblocks/lib",

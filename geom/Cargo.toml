@@ -13,6 +13,12 @@ crate-type = ["cdylib", "rlib"]
 # boolean kernel). build-wasm.sh passes it with nightly `-Z build-std` + atomics; native
 # `cargo test -p fab-geom` never needs it (native fab-manifold is `par` unconditionally).
 [features]
+# SZ.4 — the TRANSPILED BAND, default-on. Off gives the LEAN worker: same kernel, same evaluator,
+# same answers, but every BOSL2/MCAD call interprets instead of dispatching to a compiled native.
+# 1.10 MB brotli against the full worker's 3.85. The app picks which to load from the model's own
+# library refs, so a `cube(10);` user never downloads a band they cannot call into.
+default = ["libraries"]
+libraries = ["fab-scad/libraries"]
 par = ["fab-scad/kernel-par"]
 # W.3.17: the browser perf head-to-head's fab leg. Adds a JS-callable `render_scad_stl(main, libs_json)`
 # export (a bench harness can drive one whole render without hand-rolling the bincode envelope). OFF in

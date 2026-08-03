@@ -185,12 +185,12 @@ added 2026-07-07.
 - [x] SZ.2 - One declared library set drives BOTH the natives and the source pack
 - [x] SZ.3 - Measure the real load tax now that the browser actually receives the band
 - [ ] SZ.4 - Dynamic library loading so nobody pays for a library they don't use
-  - [ ] SZ.4.1 - Prove a main+side wasm pair actually instantiates and runs (linked one, never ran one)
-  - [ ] SZ.4.2 - Allocator shim: the side module allocates from the HOST heap, not its own
-  - [ ] SZ.4.3 - Build-fingerprint tripwire: a stale side module refuses to load rather than corrupting
-  - [ ] SZ.4.4 - Split PER SOURCE FILE, not per library — a BOSL2 user saves nothing from per-library
-  - [ ] SZ.4.5 - The desktop half: cdylib + libloading on the SAME boundary, not a second mechanism
-  - [ ] SZ.4.6 - Load a library only when a model first references it — the actual 2.75 MB win
+  - [ ] SZ.4.1 - Build a LEAN geom worker with no transpiled band (1.10 MB vs 3.85 MB)
+  - [ ] SZ.4.2 - Route worker creation on the model's library refs, before the worker exists
+  - [ ] SZ.4.3 - Gate: the lean worker really lacks the band and the full one really has it
+  - [>] SZ.4.4 - Split PER SOURCE FILE, not per library — a BOSL2 user saves nothing from per-library
+  - [>] SZ.4.5 - The desktop half: cdylib + libloading on the SAME boundary, not a second mechanism
+  - [>] SZ.4.6 - Load a library only when a model first references it — the actual 2.75 MB win
 - [x] SZ.5 - A gate that fails when native and web disagree about which libraries exist
 - [x] SZ.6 - Precompress libs.json in the release — 4.29 MB shipped raw beside brotli'd wasm
 - [x] SZ.7 - The corpus and repro harnesses measure the tier the product actually runs
@@ -292,3 +292,6 @@ W.3.29.3 (cover on wasm): DEFERRED. save_to_disk is native-only; needs a render-
 - **Live oracle echo capture truncates multi-line echo values at the newline** — added 2026-07-29.
 - **predicate_domain mixes real builtins with BOSL2 user fns — align with BUILTIN_SURFACE** — added 2026-07-29.
 - **Compiled call-site console-order seam: fill_slots diagnostics vs arg side effects** — added 2026-07-30.
+- **Split PER SOURCE FILE, not per library — a BOSL2 user saves nothing from per-library** — deferred from SZ.4.4 on 2026-08-03.
+- **The desktop half: cdylib + libloading on the SAME boundary, not a second mechanism** — deferred from SZ.4.5 on 2026-08-03.
+- **Load a library only when a model first references it — the actual 2.75 MB win** — deferred from SZ.4.6 on 2026-08-03.

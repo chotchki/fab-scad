@@ -35,6 +35,9 @@
 //!
 //! `--ignored`: it renders the whole models corpus five ways and takes minutes.
 
+// SZ.4 split the transpiled band out of `kernel`, so a lean build has no fab-bosl2 to compare
+// against. Comparing tiers is this file's entire job, so it compiles only where the band exists.
+#![cfg(feature = "bosl2")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

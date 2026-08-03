@@ -31,6 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "libraries")]
 use fab_lang::surface::LibrarySurface;
 use fab_scad::geomsg::{Quality, Request, Response, Source};
 use fab_scad::geomsvc::{SolidStore, handle_with_store};
@@ -55,6 +56,7 @@ fn have_bosl2() -> bool {
 /// fab-lang's OWN function-row count — the floor a path must CLEAR to prove it received more than
 /// the built-in registry. Read from the surface rather than hardcoded, so deleting a hand row
 /// (AR.21.2 deleted three) cannot silently weaken the assertion into a tautology.
+#[cfg(feature = "libraries")]
 fn builtin_rows() -> usize {
     fab_lang::surface::Natives.rows().functions.len()
 }
@@ -109,7 +111,12 @@ fn render_native() {
 
 /// THE CONTROL. If the native path ever stops arming the band, the web assertion below is measuring
 /// nothing and would pass for the wrong reason.
+///
+/// Band-only: SZ.4 made a LEAN build (no `libraries` feature) a shipping configuration, and there
+/// the correct answer is that nothing arms. The parity claim that survives both builds is
+/// `both_paths_arm_the_same_number_of_natives`, which is the one that actually caught the bug.
 #[test]
+#[cfg(feature = "libraries")]
 fn the_native_path_arms_the_transpiled_band() {
     if !have_bosl2() {
         return;
@@ -125,8 +132,9 @@ fn the_native_path_arms_the_transpiled_band() {
 }
 
 /// THE BUG. `resolve_geometry_from_sources_full` hardcodes `Registry::builtin()`, so the browser
-/// gets fab-lang's rows and none of BOSL2's 1322.
+/// gets fab-lang's rows and none of BOSL2's 1322. Band-only, as above.
 #[test]
+#[cfg(feature = "libraries")]
 fn the_web_path_arms_the_transpiled_band() {
     if !have_bosl2() {
         return;

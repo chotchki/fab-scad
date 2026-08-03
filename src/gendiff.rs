@@ -141,10 +141,22 @@ pub fn run_surface(seeds: u32, timeout_secs: u64, md: bool, surface: Surface) ->
         .as_ref()
         .map(|r| vec![r.join("libs"), r.join("scad-lib")])
         .unwrap_or_default();
-    let surface = match surface {
+    // SZ.4 split the transpiled band out of `kernel`, so a LEAN build has no library crates to
+    // generate against. That is a REFUSAL, not a compile error: the lane is meaningful only against
+    // a band, and silently falling back to the builtin surface would report a green 200/200 for a
+    // run that never called a library function — the exact shape of vacuous pass this phase keeps
+    // finding.
+    let surface: Option<fab_gen::NativeSurface> = match surface {
         Surface::Builtins => None,
+        #[cfg(feature = "bosl2")]
         Surface::Bosl2 => Some(fab_gen::NativeSurface::from_library(&fab_bosl2::Bosl2)),
+        #[cfg(feature = "mcad")]
         Surface::Mcad => Some(fab_gen::NativeSurface::from_library(&fab_mcad::Mcad)),
+        #[cfg(not(all(feature = "bosl2", feature = "mcad")))]
+        other => anyhow::bail!(
+            "this build carries no transpiled band, so the {other:?} surface has nothing to \
+             generate against — rebuild with the `libraries` feature"
+        ),
     };
 
     let flags = negotiate_flags(timeout);

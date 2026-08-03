@@ -188,7 +188,7 @@ added 2026-07-07.
   - [ ] SZ.4.1 - Prove a main+side wasm pair actually instantiates and runs (linked one, never ran one)
   - [ ] SZ.4.2 - Allocator shim: the side module allocates from the HOST heap, not its own
   - [ ] SZ.4.3 - Build-fingerprint tripwire: a stale side module refuses to load rather than corrupting
-  - [ ] SZ.4.4 - fab-bosl2 as a side module; the registry takes its rows at load rather than link time
+  - [ ] SZ.4.4 - Split PER SOURCE FILE, not per library — a BOSL2 user saves nothing from per-library
   - [ ] SZ.4.5 - The desktop half: cdylib + libloading on the SAME boundary, not a second mechanism
   - [ ] SZ.4.6 - Load a library only when a model first references it — the actual 2.75 MB win
 - [x] SZ.5 - A gate that fails when native and web disagree about which libraries exist

@@ -22,8 +22,13 @@
 #                  is fast there and slow here isolates the platform, not the code.
 name: win-probe
 
+# PUSH-triggered on its own path, not just workflow_dispatch: `gh workflow run` resolves the
+# workflow on the DEFAULT branch, and this one lives only on manifold-rs. Scoped to this file so it
+# fires when the probe changes and never on ordinary work.
 on:
   workflow_dispatch:
+  push:
+    paths: ['.github/workflows/win-probe.yml']
 
 jobs:
   probe:

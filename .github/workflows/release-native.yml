@@ -94,7 +94,7 @@ jobs:
       #     rust-lld: error: could not open 'link': no such file or directory
       #
       # `rust-lld.exe` is the driver that WANTS `-flavor`, so it is the one to name. The explicit
-      # `-Clinker-flavor=msvc-lld` is what guarantees rustc emits that flag: flavor is otherwise
+      # `-Clinker-flavor=lld-link` is what guarantees rustc emits that flag: flavor is otherwise
       # inferred from the linker's NAME, and "rust-lld" is not "lld-link", so inference would fall
       # back to plain msvc and invoke the generic driver with no flavor at all — which fails with
       # "lld is a generic driver".
@@ -114,8 +114,8 @@ jobs:
             exit 1
           fi
           echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$LLD" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-Clinker-flavor=msvc-lld" >> "$GITHUB_ENV"
-          echo "linking with $LLD (-Clinker-flavor=msvc-lld)"
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-Clinker-flavor=lld-link" >> "$GITHUB_ENV"
+          echo "linking with $LLD (-Clinker-flavor=lld-link)"
       # A `vX.Y.Z` tag must BE Packager.toml's version — a mismatched tag would publish artifacts
       # whose embedded version contradicts the release they hang off.
       - name: Tag matches Packager.toml version

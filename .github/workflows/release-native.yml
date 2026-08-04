@@ -102,8 +102,19 @@ jobs:
           printf '\nsigning-identity = "%s"\n' "$APPLE_SIGNING_IDENTITY" >> Packager.toml
           printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
-      # cargo-packager does NOT build — binaries must exist first.
-      - run: cargo build --release --workspace --bins
+      # cargo-packager does NOT build — binaries must exist first. Build EXACTLY the two it packages
+      # (`Packager.toml` [[binaries]]: fab-gui, fab), not `--workspace --bins`.
+      #
+      # That used to say `--workspace --bins`, which builds NINE: the two shipped plus seven dev-only
+      # tools (corpus_worker, corpus_repro, pack_libs, mesh_diff, models_worker, diff_repro,
+      # echo_repro). Harmless while it lasted, because SZ.1 found this workflow had no `submodules:`
+      # key at all — BOSL2 checked out EMPTY, the transpiled band declared nothing, and all nine
+      # binaries were small. Fixing that made the band real, and nine large static links is a very
+      # different job: macOS absorbed it (25 min) and Windows did not finish inside the 6-hour
+      # ceiling, so v1.3.0 shipped without the .exe every release before it had.
+      #
+      # Seven of those links were for binaries nobody downloads. This builds the two that ship.
+      - run: cargo build --release -p fab-gui --bin fab-gui -p fab-scad --bin fab
       - run: cargo install cargo-packager --locked
       - run: cargo packager --release --formats ${{ matrix.formats }}
       # cargo-packager staples the .app but only SIGNS the dmg — notarize+staple the dmg too, so

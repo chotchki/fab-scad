@@ -81,28 +81,41 @@ jobs:
       # 1m18s, a normal 2x. With the transpiled band real it went to >12x, and superlinear-in-input
       # is a linker scaling problem, not "there is more code now".
       #
-      # NO INSTALL NEEDED: `rust-lld` ships in the toolchain sysroot, and beside it sits a correctly
-      # NAMED `gcc-ld/lld-link` — rust-lld is a multicall driver that refuses to run directly and
-      # picks its flavor from argv[0], so the `lld-link` name IS the COFF opt-in. Version-matched to
-      # rustc for free, where an LLVM install would be a second thing to pin.
+      # NO INSTALL NEEDED: `rust-lld` ships in the toolchain sysroot, version-matched to rustc where
+      # an LLVM install would be a second thing to pin and a second thing to drift.
       #
-      # CI-ONLY, via env rather than a committed `.cargo/config.toml`: a `linker = "lld-link.exe"`
-      # in the repo config would break every Windows contributor who does not have it on PATH, to
-      # solve a problem that only exists inside a 6-hour job ceiling.
+      # POINT AT `rust-lld.exe` ITSELF, not the `gcc-ld/lld-link` shim beside it. The shim looks like
+      # the obvious choice — rust-lld is a multicall driver that picks its flavor from argv[0], so a
+      # binary NAMED lld-link is pre-flavored — but that is for `-fuse-ld=lld` through a GCC driver,
+      # not for `-Clinker`. rustc drives lld by passing `-flavor link` explicitly, and the pre-flavored
+      # shim rejects it:
+      #
+      #     rust-lld: warning: ignoring unknown argument '-flavor'
+      #     rust-lld: error: could not open 'link': no such file or directory
+      #
+      # `rust-lld.exe` is the driver that WANTS `-flavor`, so it is the one to name. The explicit
+      # `-Clinker-flavor=msvc-lld` is what guarantees rustc emits that flag: flavor is otherwise
+      # inferred from the linker's NAME, and "rust-lld" is not "lld-link", so inference would fall
+      # back to plain msvc and invoke the generic driver with no flavor at all — which fails with
+      # "lld is a generic driver".
+      #
+      # CI-ONLY, via env rather than a committed `.cargo/config.toml`: pinning a linker in the repo
+      # config would break every Windows contributor whose sysroot path differs, to solve a problem
+      # that only exists inside a 6-hour job ceiling.
       - name: Link with lld on Windows (MSVC link.exe does not finish)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          LLD_DIR="$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/gcc-ld"
-          if [ ! -x "$LLD_DIR/lld-link.exe" ] && [ ! -x "$LLD_DIR/lld-link" ]; then
-            echo "::error::no lld-link in $LLD_DIR — the toolchain layout moved, do not silently fall back to link.exe"
-            ls -la "$LLD_DIR" 2>/dev/null || ls -la "$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin" || true
+          LLD="$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
+          if [ ! -x "$LLD" ]; then
+            echo "::error::no rust-lld at $LLD — the toolchain layout moved. NOT falling back to link.exe: a silent fallback reads as 'lld did not help'."
+            ls -la "$(dirname "$LLD")" || true
             exit 1
           fi
-          echo "$LLD_DIR" >> "$GITHUB_PATH"
-          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link.exe" >> "$GITHUB_ENV"
-          echo "linking with $LLD_DIR/lld-link.exe"
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$LLD" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-Clinker-flavor=msvc-lld" >> "$GITHUB_ENV"
+          echo "linking with $LLD (-Clinker-flavor=msvc-lld)"
       # A `vX.Y.Z` tag must BE Packager.toml's version — a mismatched tag would publish artifacts
       # whose embedded version contradicts the release they hang off.
       - name: Tag matches Packager.toml version

@@ -119,7 +119,7 @@ knobs but are OUT of scope until the site asks for them; the contract stays smal
 
 The worker-variant line exists because the routing decision is otherwise INVISIBLE: both variants
 render the same geometry, so a router stuck on one of them looks exactly like a working one from
-outside. It is also how you tell, from a user's console, whether they paid for the 2.75 MB band.
+outside. It is also how you tell, from a user's console, whether they paid for the 4.1 MB band.
 
 `fab-gui:ready` fires at "the app is VISIBLE" (first frame), NOT "geometry is done" — the worker
 round-trip takes a second or two after, and the app shows its OWN loading pulse for that (the reactive
@@ -201,8 +201,8 @@ mechanism as the Tailwind CLI fetch, one tar.gz because the bundle is many files
 | `fab_gui_bg.wasm` | the app, wasm-opt `-Oz` |
 | `fab_gui_bg.wasm.br` / `.gz` | brotli-11 / gzip-9 precompressed — serve one, never recompress |
 | `geom/fab_geom.js` | the kernel worker's wasm-bindgen glue |
-| `geom/fab_geom_bg.wasm` (`.br`/`.gz`) | the kernel + evaluator + transpiled band, run in the worker — 3.85 MB brotli |
-| `geom-lean/` (same members) | SZ.4: the same worker WITHOUT the transpiled band, 1.10 MB brotli. The app picks between them from the model's include closure, so a model naming no library never fetches 2.75 MB of natives it cannot call. Identical answers — a native is bit-identical to interpreting its reference — so this is download size only. BOTH must be deployed; a missing `geom-lean/` breaks every no-library render |
+| `geom/fab_geom_bg.wasm` (`.br`/`.gz`) | the kernel + evaluator + transpiled band, run in the worker — 5.4 MB brotli |
+| `geom-lean/` (same members) | SZ.4: the same worker WITHOUT the transpiled band, 1.3 MB brotli. The app picks between them from the model's include closure, so a model naming no library never fetches 4.1 MB of natives it cannot call. Identical answers — a native is bit-identical to interpreting its reference — so this is download size only. BOTH must be deployed; a missing `geom-lean/` breaks every no-library render |
 | `geom/geom-worker.js` | the worker entry (GPL, ours) — bincode byte envelope over the seam |
 | `libs.json` (`.br`/`.gz`) | BOSL2 + scad-lib + the demo, packed once; the app computes each model's include closure from it. The bundle's LARGEST member — 4.29 MB raw, 0.72 MB brotli — so it is precompressed like the wasm: serve one variant, never recompress |
 | `manifest.json` | `{version, entry, wasm, sha256:{path→hash}}` — the build asserts this contract |
@@ -225,7 +225,7 @@ time races real worker threads (relearned the hard way on fab-web 0.11.0).
 
 The demo is `include <fabdemo.scad>`, a bare-prefix file, so it routes to the LEAN worker. That is
 worth knowing: for a long time it was the ONLY browser gate, and it meant the full worker — the
-3.85 MB one carrying the whole transpiled band — shipped without ever being executed. Two more gates
+5.4 MB one carrying the whole transpiled band — shipped without ever being executed. Two more gates
 close that, and both run in CI as well as at release:
 
 - **`e2e-web-native-parity.sh`** (SZ.9.2/9.3) renders a real BOSL2 model, asserts the router picked

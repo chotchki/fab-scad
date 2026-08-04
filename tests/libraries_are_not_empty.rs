@@ -121,7 +121,7 @@ fn this_build_carries_at_least_one_library() {
         assert!(
             libs.is_empty(),
             "the `libraries` feature is OFF but this build carries {} — the lean variant is not \
-             lean, and the 2.75 MB it exists to save is still in the binary",
+             lean, and the 4.1 MB it exists to save is still in the binary",
             libs.len()
         );
     }

@@ -98,9 +98,9 @@ run_wasm_opt -Oz "$stage/fab_gui_bg.wasm" --enable-reference-types --enable-bulk
 # page for SharedArrayBuffer. Serve with packaging/web/dev-server.py, NOT plain http.server.
 echo "building fab-geom FULL worker (transpiled band, threaded)…"
 build_geom geom --features par
-# SZ.4 — the LEAN worker beside it: same kernel, same evaluator, no transpiled band (1.10 MB brotli
-# against the full 3.85). The app routes to it when a model's include closure names no banded
-# library, so a `cube(10);` visitor never fetches 2.75 MB of natives they cannot call into.
+# SZ.4 — the LEAN worker beside it: same kernel, same evaluator, no transpiled band (1.3 MB brotli
+# against the full 5.4). The app routes to it when a model's include closure names no banded
+# library, so a `cube(10);` visitor never fetches 4.1 MB of natives they cannot call into.
 echo "building fab-geom LEAN worker (no transpiled band)…"
 build_geom geom-lean --no-default-features --features par
 

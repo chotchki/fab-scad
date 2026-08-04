@@ -167,8 +167,8 @@ jobs:
           echo "boot gate: OK (bundle boots + kernel renders the demo)"
       # SZ.9.2 + SZ.9.3 — the FULL worker, and whether its geometry matches the desktop's. The demo
       # above is `include <fabdemo.scad>`, a bare-prefix file, so `wanted_variant` routes it LEAN:
-      # every browser gate in this repo was exercising the 1.10 MB worker and NOTHING had ever booted
-      # the 3.85 MB one carrying the transpiled band, let alone compared what it computed against
+      # every browser gate in this repo was exercising the 1.3 MB worker and NOTHING had ever booted
+      # the 5.4 MB one carrying the transpiled band, let alone compared what it computed against
       # what the desktop computes for the same model.
       - name: Web/native geometry parity through the FULL worker (SZ.9.2/9.3)
         run: bash packaging/web/e2e-web-native-parity.sh target/fab-gui/stage 8897 240

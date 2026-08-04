@@ -2,8 +2,8 @@
 //!
 //! The web worker ships in two variants. The FULL one carries the transpiled band (BOSL2's 1322
 //! functions + MCAD's 39); the LEAN one carries the kernel and the evaluator and nothing else, and
-//! the app picks between them from the model's own `include` lines. Measured, brotli: 3.85 MB
-//! against 1.10 MB, because the band is 71% of that download.
+//! the app picks between them from the model's own `include` lines. Measured, brotli: 5.4 MB
+//! against 1.3 MB, because the band is 76% of that download.
 //!
 //! The reason a variant is SAFE is the whole premise of the compiled tier: a transpiled native is
 //! bit-identical to interpreting its reference by construction, so dropping it changes speed and
@@ -116,7 +116,7 @@ fn the_band_tracks_its_feature() {
             wired <= base,
             "the `libraries` feature is OFF but {wired} natives armed against fab-lang's own \
              {base} rows — the lean build is carrying a band it is supposed to have dropped, so \
-             the 2.75 MB it exists to save is still in the binary"
+             the 4.1 MB it exists to save is still in the binary"
         );
     }
 }

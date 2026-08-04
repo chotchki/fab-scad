@@ -278,4 +278,4 @@ W.3.29.3 (cover on wasm): DEFERRED. save_to_disk is native-only; needs a render-
 - **Compiled call-site console-order seam: fill_slots diagnostics vs arg side effects** — added 2026-07-30.
 - **Split PER SOURCE FILE, not per library — a BOSL2 user saves nothing from per-library** — deferred from SZ.4.4 on 2026-08-03.
 - **The desktop half: cdylib + libloading on the SAME boundary, not a second mechanism** — deferred from SZ.4.5 on 2026-08-03.
-- **Load a library only when a model first references it — the actual 2.75 MB win** — deferred from SZ.4.6 on 2026-08-03.
+- **Load a library only when a model first references it — the actual 4.1 MB win** — deferred from SZ.4.6 on 2026-08-03.

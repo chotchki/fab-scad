@@ -27,10 +27,10 @@ thread_local! {
 /// bit-identical to interpreting its reference by construction — so this is purely how much wasm the
 /// browser downloads.
 ///
-///     lean  1.10 MB brotli   BOSL2/MCAD calls INTERPRET
-///     full  3.85 MB brotli   they dispatch to compiled natives
+///     lean  1.3 MB brotli   BOSL2/MCAD calls INTERPRET
+///     full  5.4 MB brotli   they dispatch to compiled natives
 ///
-/// Worth 2.75 MB to a `cube(10);` user, and worth nothing to a BOSL2 user — of 122 real models there
+/// Worth 4.1 MB to a `cube(10);` user, and worth nothing to a BOSL2 user — of 122 real models there
 /// are nine distinct include-closures and every one pulls 67-76% of BOSL2, so there is no middle
 /// case to split more finely for. That measurement is why this is a variant rather than a loader.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

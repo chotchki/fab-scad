@@ -5,8 +5,8 @@
 #
 # SZ.9.2 — NOTHING HAD EVER BOOTED THE FULL WORKER. The sourceless demo is `include <fabdemo.scad>`
 # and the save e2e's fixture is `color("red") cube(20)`; neither names a banded library, so
-# `wanted_variant` routes both LEAN. Every browser gate in the repo was exercising the 1.10 MB
-# worker. The 3.85 MB one — all 1361 transpiled natives, the entire point of phases AR and SZ — was
+# `wanted_variant` routes both LEAN. Every browser gate in the repo was exercising the 1.3 MB
+# worker. The 5.4 MB one — all 1361 transpiled natives, the entire point of phases AR and SZ — was
 # shipping on the strength of "it compiles".
 #
 # SZ.9.3 — AND NOTHING COMPARED THE TWO PLATFORMS' GEOMETRY. `handle_with_store` is one function, so

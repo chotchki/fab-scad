@@ -29,9 +29,14 @@ jobs:
       - run: cargo nextest run --workspace
       - run: cargo test --workspace --doc
       # SU.2 (sustainment): the intrinsic parity matrix vs the COMMITTED BOSL2 pin, rendered into the
-      # job summary so a drift is READ, not excavated from logs. The hard gate is the
-      # tests/intrinsic_matrix.rs integration test in the nextest run above — this step makes the same
-      # verdict visible (and fails redundantly on drift, exit-code preserved through the pipe).
+      # job summary so a drift is READ, not excavated from logs.
+      #
+      # This is the STRICTER of the two audits, not a redundant echo of the test — a comment here
+      # used to claim otherwise and it was wrong. `tests/intrinsic_matrix.rs` calls
+      # `intrinsic_matrix()`, which audits fab-lang's OWN ~66 hand rows; this calls
+      # `intrinsic_matrix_with_registry()` against the PRODUCT registry, which since AR.26 carries
+      # the whole transpiled band — 1395 rows. The test can be green while this fails, and was.
+      # Do not delete it as duplicate coverage.
       - name: Intrinsic matrix → job summary
         run: set -o pipefail; cargo run --quiet --bin fab -- intrinsics --md | tee -a "$GITHUB_STEP_SUMMARY"
       # scad-rs (fab-lang) ratchet lane: pedantic + missing_docs + the determinism bans already ride

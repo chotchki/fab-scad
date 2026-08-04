@@ -1212,10 +1212,81 @@ fn builtins_cmd(md: bool) -> Result<()> {
 fn intrinsics_cmd(bosl2: &Path, json: bool, md: bool) -> Result<()> {
     // AGAINST THE PRODUCT'S OWN REGISTRY, not fab-lang's default: the audit answers "did the library
     // drift out from under the rows we dispatch on", so it has to be looking at those rows.
+    //
+    // AND THE PROBE HAS TO SPAN WHAT THAT REGISTRY CLAIMS. A row the probe cannot see audits as
+    // `Missing`, which the gate treats as drift — so a probe narrower than the registry reports
+    // false drift, loudly, for every row outside it. That is exactly what AR.26 caused and nobody
+    // saw for a week: pointing this at the product registry took the audited set from ~66 hand rows
+    // (all inside std's closure) to 1395 transpiled ones spanning EVERY BOSL2 file, while the probe
+    // stayed `include <std.scad>`. 431 rows — `_adendum` from gears, `_ISO_thread_tolerance` from
+    // threading, the whole `3dtri_` family — reported as drifted when nothing had drifted at all.
+    // The band was dispatching correctly the entire time; only the auditor was wrong.
+    //
+    // So the probe is DERIVED from the libraries rather than written down: every top-level `.scad`
+    // of every DECLARED library, which is the same set the transpilers emitted from. Sorted, so the
+    // audit is reproducible and a double-definition (BOSL2 has them — `_sort_vectors` is the known
+    // one) resolves the same way on every run rather than by directory order.
+    //
+    // EVERY library, not just BOSL2, for the same reason: the registry is the product's, and the
+    // product's carries MCAD too. Probing only the BOSL2 tree left MCAD's 39 rows — `involute`,
+    // `bearingDimensions`, the `linearBearing_*` family — permanently un-probed and therefore
+    // permanently "drifted". `libraries()` is the SAME declaration the registry is built from
+    // (SZ.2), so a fourth library cannot be added to one and forgotten in the other.
+    let scads = |dir: &Path, prefix: &str| -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "scad"))
+            .filter_map(|p| {
+                p.file_name()
+                    .map(|n| format!("{prefix}{}", n.to_string_lossy()))
+            })
+            .collect();
+        out.sort();
+        out
+    };
+
+    // The library under audit is rooted at `bosl2` and included BARE (the sustainment nightly points
+    // this at a CANDIDATE checkout, so it must not resolve through the committed pin's prefix).
+    #[allow(
+        unused_mut,
+        reason = "a build without `mcad` compiles out the only extend below"
+    )]
+    let mut includes = scads(bosl2, "");
+    if includes.is_empty() {
+        bail!(
+            "no .scad under {} — is the submodule checked out?",
+            bosl2.display()
+        );
+    }
+    // The OTHER banded library resolves by prefix against the workspace `libs/`. Gated on the same
+    // feature that puts its rows in the registry, because the probe has to track the ROWS, not the
+    // source declaration: `libraries()` lists source unconditionally (SZ.4.3 — a lean build still
+    // has to RESOLVE a library it interprets), so driving the probe off it would include libraries
+    // that contributed nothing to audit.
+    //
+    // machineblocks is deliberately absent even under its feature: `libraries()` maps it
+    // `libs/machineblocks/lib` -> `machineblocks/`, a rewrite that exists only in the flat web pack,
+    // so `include <machineblocks/axis.scad>` does not resolve natively at all. Its 57 rows audit as
+    // Missing under `--features machineblocks`, which is the audit reporting a real gap — that
+    // native/web asymmetry is worth its own fix, not a workaround here.
+    let root = find_root();
+    let search: Vec<PathBuf> = root.iter().map(|r| r.join("libs")).collect();
+    #[cfg(feature = "mcad")]
+    if let Some(r) = &root {
+        includes.extend(scads(&r.join("libs/MCAD"), "MCAD/"));
+    }
+    let probe: String = includes
+        .iter()
+        .map(|f| format!("include <{f}>\n"))
+        .collect();
+
     let rows = fab_lang::intrinsic_matrix_with_registry(
-        "include <std.scad>\n",
+        &probe,
         bosl2,
-        &[],
+        &search,
         fab_scad::import::registry(),
     )
     .map_err(|e| anyhow::anyhow!("intrinsic audit against {}: {e}", bosl2.display()))?;

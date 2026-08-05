@@ -215,6 +215,8 @@ pub fn generate_module_native(
         def_name: None,
         def_root: None,
         fn_locals: Vec::new(),
+        outlined: Vec::new(),
+        outline_prefix: None,
     };
     let fn_ident = rust_fn_ident(name)?;
     let mut out = String::new();
@@ -468,6 +470,12 @@ pub fn generate_native(
         return Err("reference holds no function definition".into());
     };
 
+    // The Rust fn NAME is keyword-escaped (BOSL2 has `function while(...)`); every STRING —
+    // the fallback lookup, the mint def — stays the scad name, which is the runtime's key.
+    // Computed BEFORE the emitter because it is also the outline-helper prefix, and that prefix
+    // is what keeps one function's helpers from colliding with another's in the shared `mod
+    // functions`.
+    let fn_ident = rust_fn_ident(name)?;
     let mut em = Emitter {
         baked,
         siblings,
@@ -478,10 +486,9 @@ pub fn generate_native(
         def_name: Some(name),
         def_root: Some(body),
         fn_locals: Vec::new(),
+        outlined: Vec::new(),
+        outline_prefix: Some(fn_ident.clone()),
     };
-    // The Rust fn NAME is keyword-escaped (BOSL2 has `function while(...)`); every STRING —
-    // the fallback lookup, the mint def — stays the scad name, which is the runtime's key.
-    let fn_ident = rust_fn_ident(name)?;
     let mut out = String::new();
     let _ = write!(
         out,
@@ -564,6 +571,13 @@ pub fn generate_native(
     // The `let out` shape keeps clippy quiet when the whole body is a fallible sibling call
     // (`Ok(f(..)?)` would be needless_question_mark).
     let _ = writeln!(out, "    let out = {body_expr};\n    Ok(out)\n}}");
+    // The hoisted helpers follow their function, as siblings of it rather than items nested
+    // inside it: a nested `fn` cannot be named by the `#[inline(never)]` call it replaces once
+    // that call has itself been hoisted into an OUTER helper, which is exactly what the greedy
+    // bottom-up walk produces. Order is irrelevant to rustc — items are not sequenced.
+    for helper in &em.outlined {
+        out.push_str(helper);
+    }
     Ok(out)
 }
 
@@ -611,7 +625,32 @@ struct Emitter<'a, 'e> {
     /// def still declines. Span, not name: a same-named def in a deeper scope is a DIFFERENT
     /// binding (the interpreter registers per block) and must not ride the top registration.
     registered_defs: Vec<(usize, usize)>,
+    /// TA.1 — sub-expressions hoisted OUT of this emission into helper `fn`s, in creation order.
+    ///
+    /// A generated function is ONE LLVM function, and a function is the atomic unit of
+    /// optimisation: it cannot be split across codegen units or across threads, so no
+    /// `codegen-units` setting and no number of cores can divide it. BOSL2's
+    /// `regular_polyhedron_info` transpiled to a single 1.21 MB expression — 17% of the whole
+    /// band in one body — and on `x86_64-pc-windows-msvc` LLVM went superlinear on it: MEASURED
+    /// at 4h17m of sustained 1.00-core CPU holding 28.4 GB resident, without finishing, against
+    /// 816s for the entire crate on aarch64-darwin. The frontend was never the cost (`cargo
+    /// check` of the same crate: 2m03s), so the fix belongs here, in what we hand LLVM.
+    outlined: Vec<String>,
+    /// The helper-name prefix, and the SWITCH — `None` disables outlining.
+    ///
+    /// Only the function band sets it. Module bodies emit against a `ModuleCtx` (a different
+    /// helper signature) into per-source files that rustc already partitions separately, and the
+    /// sibling-default probe never emits a body at all.
+    outline_prefix: Option<String>,
 }
+
+/// Emitted bytes past which a sub-expression is hoisted into its own `fn` (TA.1).
+///
+/// Greedy and bottom-up: [`Emitter::expr`] measures every node, so a subtree that crossed the
+/// threshold is already a short call by the time its parent is measured. That bounds an emitted
+/// body at roughly this many bytes times the node's arity — which is small for the `if`/`let`
+/// nesting the OpenSCAD expression grammar actually produces.
+const OUTLINE_THRESHOLD: usize = 32 * 1024;
 
 impl Emitter<'_, '_> {
     /// A collision-proof Rust ident for a `let`-bound scad name (shadowing gets a new number).
@@ -638,7 +677,59 @@ impl Emitter<'_, '_> {
         Ok(format!("l{id}_{}", name.trim_start_matches('_')))
     }
 
+    /// Emit `e`, hoisting the result into a helper `fn` if it has grown past
+    /// [`OUTLINE_THRESHOLD`] — see [`Emitter::outlined`] for why.
     fn expr(&mut self, e: &Expr) -> Result<String, String> {
+        let text = self.expr_inner(e)?;
+        Ok(self.outline(text))
+    }
+
+    /// Hoist `text` into a helper and return the call that replaces it, or hand it back unchanged
+    /// when outlining is off or the text is small enough to leave alone.
+    fn outline(&mut self, text: String) -> String {
+        let Some(prefix) = self.outline_prefix.clone() else {
+            return text;
+        };
+        if text.len() <= OUTLINE_THRESHOLD {
+            return text;
+        }
+        // Every in-scope binding becomes a parameter, BY VALUE. A local is read as
+        // `{ident}.clone()` everywhere in this emitter, and `(&Value).clone()` is a `&Value`, not a
+        // `Value` — so a by-reference helper would mean rewriting the whole read path for nothing.
+        // The clone is an `rt::Value` clone at a boundary that exists a few dozen times in the
+        // band, against a body LLVM could not compile at all.
+        //
+        // DEDUPED by Rust ident, keeping the LAST. `fresh_ident` is unique by counter, so the only
+        // way two entries share an ident is the repeated `p_{name}` a DUPLICATE parameter emits —
+        // and reading the last slot is exactly what the two-phase bind already made correct
+        // (AN.6), which is why `let_expr` can leave the shadowed earlier binds standing.
+        let mut params: Vec<String> = Vec::new();
+        for (_, ident) in &self.locals {
+            if let Some(pos) = params.iter().position(|p| p == ident) {
+                params.remove(pos);
+            }
+            params.push(ident.clone());
+        }
+        let name = format!("{prefix}__o{}", self.outlined.len());
+        let sig = params
+            .iter()
+            .map(|p| format!(", {p}: rt::Value"))
+            .collect::<String>();
+        let args = params
+            .iter()
+            .map(|p| format!(", {p}.clone()"))
+            .collect::<String>();
+        // `#[inline(never)]` is the load-bearing half. A helper with ONE call site is precisely
+        // what LLVM's inliner folds straight back into its caller, which would reassemble the
+        // single huge body and leave only the clones behind.
+        self.outlined.push(format!(
+            "#[inline(never)]\nfn {name}(fx: &dyn rt::FnCtx{sig}) -> rt::Result<rt::Value> {{\n    \
+             Ok({text})\n}}\n"
+        ));
+        format!("{name}(fx{args})?")
+    }
+
+    fn expr_inner(&mut self, e: &Expr) -> Result<String, String> {
         use fab_lang::BinOp;
         match &e.kind {
             ExprKind::Num(n) => Ok(emit_num(*n)),
@@ -2184,6 +2275,8 @@ fn sibling_of(subject: &Subject<'_>) -> Result<Sibling, String> {
         def_name: None,
         def_root: None,
         fn_locals: Vec::new(),
+        outlined: Vec::new(),
+        outline_prefix: None,
     };
     let defaults = params
         .iter()
@@ -3231,6 +3324,7 @@ pub fn generate_batch(subjects: &[Subject<'_>], declared: &[&str]) -> Result<Str
          \x20   clippy::too_many_lines,\n\
          \x20   clippy::collapsible_if,\n\
          \x20   clippy::vec_init_then_push,\n\
+         \x20   clippy::too_many_arguments,\n\
          \x20   reason = \"generated code: bit-exact from_bits literals, mechanical clones, \\\n\
          \x20             upstream's underscore-prefixed names (params too — `p__total`), unused \\\n\
          \x20             loop binders a body never reads, fresh idents differing by counter, and \\\n\

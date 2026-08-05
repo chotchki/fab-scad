@@ -181,27 +181,65 @@ added 2026-07-07.
 - [ ] S.3 - S.3 - test C: native (arm64) vs wasm cross-platform check — DEFERRED (needs a headless wasm mesh harness that doesn't exist yet; wasm is browser-only wasm32-uu). Predicted outcome: polyhedra match, curved primitives diverge on libm → collapses into libm-transcendental-divergence (fix = libm crate), NOT a Manifold issue
 - [x] S.4 - S.4 - RESOLVED by the pure-Rust kernel (2026-07-19) — the C++ S.4 died at M.7.4. The reopened non-determinism was a C++-Manifold-CORE defect (atomic-slot races in disjoint-write assembly + a non-total-order `EdgePos` comparator, `boolean_result.cpp:197`), UNREACHABLE from outside the kernel — owning it in Rust is exactly what let us design the class out (the payoff W.3.9 predicted). `fab_manifold::par` is determinism-BY-CONSTRUCTION: rayon is clippy-banned outside par.rs (one door), a `CommutativeAssociative` compile-gate (non-associative float reduce WON'T COMPILE → `reduce_serial` Kahan), index-order `map_collect` (the serial/par crossover moves, never a byte), total-order sorts (`morton.then(idx)` — the M.4 tiebreak flag, landed), `SortGeometry` canonicalizes on POSITION before output so `mesh_id`/`tri_ref` are never emitted (the global `MESH_ID_COUNTER` atomic can't reach bytes; `build_geo_parts` is sequential regardless). VERIFIED two ways: (a) EMPIRICAL — garage_door + window_light_blocker + pill_holder + ashtray all bit-identical run-to-run, par on 16 cores (`tests/determinism_render.rs`, kept as the standing regression guard — determinism-by-construction is only as good as the proof no future edit opens a SECOND parallelism door); (b) AUDIT — a 5-lens adversarial Workflow (unordered-iteration / parallel-reduce / sort-tiebreak / global-atomic / float) × per-finding skeptical verify found 0 surviving over 6 candidates. Hardened the ONE non-total-order comparator the audit surfaced — `Solid::components()` (`bbox-min.then(num_tri)` → self-contained: both bbox corners + num_tri + num_vert + volume, all `total_cmp`) so a future PARALLEL `decompose()` can't reintroduce it; output-neutral on real models (no ties). Doctrine #36 holds same-platform run-to-run; cross-platform (native vs wasm libm) is S.3, a separate axis.
 ## Phase TA - Windows packaging: the build that stopped fitting in a runner
-- [ ] TA.1 - Windows release builds exceed the 6-hour ceiling since the band became real
-  - MEASURED (bounded probe, `.github/workflows/win-probe.yml`, same commit both platforms):
-    - `fab-bosl2` DOMINATES — macOS 816.5s of a 918s step, ~89%. Built TWICE per release: once
-      under fab's feature set, once under fab-gui's (719.5s).
-    - Windows cannot finish in 45 min what macOS does in 15. BOTH probe steps expired, so no
-      Windows timings report exists at all — cargo only writes one on completion.
-    - At the kill, `fab_scad`'s rustc was in flight, started 40 min earlier (45.3s on macOS).
-      `fab-bosl2` started 3 min before it. Cargo never prints unit COMPLETIONS, so the log cannot
-      separate the two — do not assume it is one of them.
-  - REFUTED, so nobody re-runs them: MSVC link.exe (swapped to rust-lld via the stable
-    `-Clinker-flavor=lld-link`; `msvc-lld` is nightly-gated — identical stall, same place);
-    the band as a compile-time cost (Windows reached the next unit on macOS's schedule);
-    fab-gui's font build script (cache-hit fast path, and its regen path panics on Windows for
-    want of shasum rather than hanging).
-  - THE ANOMALY: windows-latest has 4 cores to macos-14's 3, so Windows should be FASTER. A 70x+
-    gap on identical rustc/LLVM/flags is not a CPU story.
-  - UNTESTED LEADS, in order: Windows Defender scanning every intermediate object rustc writes (a
-    target-dir + CARGO_HOME exclusion is a known 2-5x CI win, and the crate writing the most files
-    is exactly the one that dies); then memory pressure (16 GB, parallel LLVM over one huge module
-    — paging is indistinguishable from a hang). `opt-level`/`codegen-units` on fab-bosl2 come LAST:
-    they trade away the transpiler's entire point.
+- [x] TA.1 - Windows release builds exceed the 6-hour ceiling since the band became real
+  - ROOT CAUSE, measured on a real Windows box (64 GB, rustc 1.97.1 / LLVM 22.1.6 — the toolchain
+    CI resolves) after the CI probe could only ever report silence. It was never a hang:
+    - `fab_bosl2`'s rustc ran **4h17m at exactly 1.000 core sustained**, growing to and plateauing
+      at **28.4 GB resident**, and had still not finished. `readMB`/`writeMB` never moved after the
+      first minute — not I/O, not paging (26 GB stayed free).
+    - `cargo check --release -p fab-bosl2` = **2m03s**. The frontend was never the cost; 100% of it
+      is LLVM codegen.
+    - The band is 7.01 MB of generated Rust, and `regular_polyhedron_info` alone transpiled to a
+      **1,213,327-byte function whose body was a single 1,029,620-byte expression** — 17% of the
+      whole band in one body. **A function is the atomic unit of LLVM optimisation**: it cannot be
+      split across codegen units or across threads, so no `codegen-units` setting and no number of
+      cores can divide it. LLVM went superlinear on it.
+  - THE FIX (`lib/src/emit.rs`): the emitter now measures every sub-expression and, past 32 KB,
+    hoists it into an `#[inline(never)]` helper `fn` taking the in-scope locals by value. Greedy and
+    bottom-up, so a subtree that crossed the threshold is already a short call by the time its parent
+    is measured. `#[inline(never)]` is the load-bearing half — a single-call-site helper is exactly
+    what LLVM's inliner folds straight back in, which would reassemble the huge body and leave only
+    the clones behind. Outlining fires 32 times across the whole band.
+    - Largest function **1,213,327 → 171,567 B** (7.1x); longest line 1,029,620 → 170,505.
+      Functions ≥200 KB: 2 → 0. Coverage unchanged: 1322 of 1329 compiled, same 7 declines.
+    - `fab_bosl2` rustc: **4h17m unfinished / 28.4 GB → ~530s CPU / 1,970 MB peak**. macOS builds
+      the same crate in 816.5s, so Windows is now FASTER than macOS on it, at 1/8th the runner's
+      memory. Full `cargo build --release` of the crate: **7m11s**.
+    - Acceptance suite green after the change — 27 passed / 0 failed across all 7 bosl2 test
+      binaries, `dispatch_diff` + `surface_diff` + the generated-program differential included. The
+      AR.2 contract ("compiled tier == interpreter") still holds.
+  - CORRECTED, because the earlier entry asserted these and they are wrong:
+    - NOT built twice per release. That reading came from the probe running two separate `cargo`
+      steps, which cannot share a unit; `release-native` uses ONE invocation with both `-p` flags.
+    - The "70x+" gap was inferred from the release job's silence, not measured. The probe bounds it
+      only at ≥2.9x. The real factor is unbounded — the build never terminated.
+    - "THE ANOMALY: 4 cores to macOS's 3, so Windows should be FASTER" dissolves entirely. Core
+      count is irrelevant when the critical path is one LLVM function on one thread.
+    - Windows Defender is EXONERATED by measurement, not by argument: 763.9s of user CPU across the
+      whole 4.5-hour window, and rustc's I/O counters were frozen throughout. No exclusion needed.
+    - Memory pressure was the right instinct at the wrong magnitude — not paging within 16 GB, but a
+      process that wanted 28.4 GB.
+    - NOT a v1.2.0→v1.3.0 regression. v1.2.0 passed in 5m30s because that workflow lacked
+      `submodules:`, so BOSL2 was empty and the band compiled nothing. v1.3.0 is the first Windows
+      build that ever compiled a real band.
+  - `opt-level`/`codegen-units` on fab-bosl2 were never reached, and should stay unreached: they
+    trade away the transpiler's entire point, and the defect was in what we handed LLVM.
+- [ ] TA.2 - Hoist the closed-constant helpers (follow-on to TA.1, runtime win — NOT needed for CI)
+  - Of TA.1's 32 outlined helpers, **12 read none of their parameters and never touch `fx`** — they
+    are closed constants. `regular_polyhedron_info__o0` takes 34 parameters and uses zero. That is
+    67.3% of all helper text (1,641,392 of 2,436,943 B).
+  - They are also DUPLICATED: `regular_polyhedron_info` emits the same 170,505-byte body **7 times**
+    (one md5 across seven helpers), `isosurface` emits two distinct bodies twice each. 50.4% of
+    helper text (1,227,750 B) is byte-identical repetition.
+  - So BOSL2's polyhedron table — 3352 float literals — is rebuilt from scratch seven times on
+    every single call. Emitting it once into a lazily-initialised cell subsumes the dedup win and
+    adds the runtime one; that matters for AO's speed numbers, not for the build.
+  - CONSTRAINT: `rt::Value` is `Rc`-based (`lang/src/eval/value.rs:12`) and therefore not
+    `Send + Sync` — a plain `static OnceLock<Value>` will NOT compile. Needs `thread_local!` +
+    `OnceCell` (arguably better: no cross-thread contention, one init per thread).
+  - Do NOT claim a binary-size win without measuring: MSVC `/OPT:ICF` is on by default and very
+    likely folds the identical bodies already. What ICF cannot do is save COMPILE time — it runs
+    after LLVM has optimised all seven copies independently, which is why the 7x cost is real today.
   - Meanwhile v1.3.0 and v1.3.1 both ship the web bundle + the macOS dmg; only the .exe is missing,
     and every release back to v1.1.0 had one.
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)

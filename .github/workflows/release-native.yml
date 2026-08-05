@@ -75,47 +75,31 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # WINDOWS LINKS WITH lld, not MSVC's link.exe. v1.3.0's Windows job died at the 6-hour ceiling
-      # with 5h37m of silence after `Compiling bevy v0.19.0`; macOS did the same work in 25 minutes.
-      # The ratio is the tell — at v1.2.0 (empty band, warm cache) Windows was 2m34s against macOS's
-      # 1m18s, a normal 2x. With the transpiled band real it went to >12x, and superlinear-in-input
-      # is a linker scaling problem, not "there is more code now".
+      # WINDOWS IS BROKEN HERE AND lld IS NOT THE FIX — do not re-try it without reading this.
       #
-      # NO INSTALL NEEDED: `rust-lld` ships in the toolchain sysroot, version-matched to rustc where
-      # an LLVM install would be a second thing to pin and a second thing to drift.
+      # The Windows job has hit the 6-hour ceiling on every tag since the transpiled band became
+      # real. It was tried with `rust-lld` (`-Clinker-flavor=lld-link`, the stable spelling —
+      # `msvc-lld` is nightly-gated) and the stall was IDENTICAL, in the same place. The linker was
+      # never the problem, so that step is gone rather than left in as an unproven change on the
+      # release path.
       #
-      # POINT AT `rust-lld.exe` ITSELF, not the `gcc-ld/lld-link` shim beside it. The shim looks like
-      # the obvious choice — rust-lld is a multicall driver that picks its flavor from argv[0], so a
-      # binary NAMED lld-link is pre-flavored — but that is for `-fuse-ld=lld` through a GCC driver,
-      # not for `-Clinker`. rustc drives lld by passing `-flavor link` explicitly, and the pre-flavored
-      # shim rejects it:
+      # What the bounded probe (.github/workflows/win-probe.yml) actually established:
       #
-      #     rust-lld: warning: ignoring unknown argument '-flavor'
-      #     rust-lld: error: could not open 'link': no such file or directory
+      #   - `fab-bosl2` DOMINATES this build. macOS: 816.5s of a 918s step, ~89%. And it is built
+      #     TWICE per release — once under fab's feature set, once under fab-gui's (719.5s).
+      #   - Windows cannot finish in 45 min what macOS does in 15. Both probe steps expired, so no
+      #     Windows timings report exists — cargo only writes one on completion.
+      #   - At the kill, `fab_scad`'s rustc was in flight, started 40 min earlier (45.3s on macOS).
+      #     `fab-bosl2` started 3 min before it and cargo never prints unit COMPLETIONS, so the two
+      #     cannot be told apart from the log. Do not assume it is one of them.
       #
-      # `rust-lld.exe` is the driver that WANTS `-flavor`, so it is the one to name. The explicit
-      # `-Clinker-flavor=lld-link` is what guarantees rustc emits that flag: flavor is otherwise
-      # inferred from the linker's NAME, and "rust-lld" is not "lld-link", so inference would fall
-      # back to plain msvc and invoke the generic driver with no flavor at all — which fails with
-      # "lld is a generic driver".
-      #
-      # CI-ONLY, via env rather than a committed `.cargo/config.toml`: pinning a linker in the repo
-      # config would break every Windows contributor whose sysroot path differs, to solve a problem
-      # that only exists inside a 6-hour job ceiling.
-      - name: Link with lld on Windows (MSVC link.exe does not finish)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          LLD="$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
-          if [ ! -x "$LLD" ]; then
-            echo "::error::no rust-lld at $LLD — the toolchain layout moved. NOT falling back to link.exe: a silent fallback reads as 'lld did not help'."
-            ls -la "$(dirname "$LLD")" || true
-            exit 1
-          fi
-          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$LLD" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-Clinker-flavor=lld-link" >> "$GITHUB_ENV"
-          echo "linking with $LLD (-Clinker-flavor=lld-link)"
+      # The anomaly to chase: windows-latest has 4 cores to macos-14's 3, so Windows should be
+      # FASTER. A 70x+ gap on identical rustc/LLVM/flags is not a CPU story. Untested leads, in the
+      # order worth trying — Windows Defender scanning every intermediate object rustc writes (a
+      # target-dir + CARGO_HOME exclusion is a known 2-5x CI win, and the crate writing the most
+      # files is exactly the one that dies), then memory pressure (16 GB, parallel LLVM on one huge
+      # module — paging looks exactly like a hang). `opt-level`/`codegen-units` on fab-bosl2 would
+      # trade away the transpiler's entire point, so they come last.
       # A `vX.Y.Z` tag must BE Packager.toml's version — a mismatched tag would publish artifacts
       # whose embedded version contradicts the release they hang off.
       - name: Tag matches Packager.toml version

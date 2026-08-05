@@ -180,6 +180,30 @@ added 2026-07-07.
 - [x] S.2 - S.2 - test B: native MANIFOLD_PAR=ON vs a PAR=OFF rebuild — confirm parallel ≡ serial output bit-for-bit
 - [ ] S.3 - S.3 - test C: native (arm64) vs wasm cross-platform check — DEFERRED (needs a headless wasm mesh harness that doesn't exist yet; wasm is browser-only wasm32-uu). Predicted outcome: polyhedra match, curved primitives diverge on libm → collapses into libm-transcendental-divergence (fix = libm crate), NOT a Manifold issue
 - [x] S.4 - S.4 - RESOLVED by the pure-Rust kernel (2026-07-19) — the C++ S.4 died at M.7.4. The reopened non-determinism was a C++-Manifold-CORE defect (atomic-slot races in disjoint-write assembly + a non-total-order `EdgePos` comparator, `boolean_result.cpp:197`), UNREACHABLE from outside the kernel — owning it in Rust is exactly what let us design the class out (the payoff W.3.9 predicted). `fab_manifold::par` is determinism-BY-CONSTRUCTION: rayon is clippy-banned outside par.rs (one door), a `CommutativeAssociative` compile-gate (non-associative float reduce WON'T COMPILE → `reduce_serial` Kahan), index-order `map_collect` (the serial/par crossover moves, never a byte), total-order sorts (`morton.then(idx)` — the M.4 tiebreak flag, landed), `SortGeometry` canonicalizes on POSITION before output so `mesh_id`/`tri_ref` are never emitted (the global `MESH_ID_COUNTER` atomic can't reach bytes; `build_geo_parts` is sequential regardless). VERIFIED two ways: (a) EMPIRICAL — garage_door + window_light_blocker + pill_holder + ashtray all bit-identical run-to-run, par on 16 cores (`tests/determinism_render.rs`, kept as the standing regression guard — determinism-by-construction is only as good as the proof no future edit opens a SECOND parallelism door); (b) AUDIT — a 5-lens adversarial Workflow (unordered-iteration / parallel-reduce / sort-tiebreak / global-atomic / float) × per-finding skeptical verify found 0 surviving over 6 candidates. Hardened the ONE non-total-order comparator the audit surfaced — `Solid::components()` (`bbox-min.then(num_tri)` → self-contained: both bbox corners + num_tri + num_vert + volume, all `total_cmp`) so a future PARALLEL `decompose()` can't reintroduce it; output-neutral on real models (no ties). Doctrine #36 holds same-platform run-to-run; cross-platform (native vs wasm libm) is S.3, a separate axis.
+## Phase TA - Windows packaging: the build that stopped fitting in a runner
+- [ ] TA.1 - Windows release builds exceed the 6-hour ceiling since the band became real
+  - MEASURED (bounded probe, `.github/workflows/win-probe.yml`, same commit both platforms):
+    - `fab-bosl2` DOMINATES — macOS 816.5s of a 918s step, ~89%. Built TWICE per release: once
+      under fab's feature set, once under fab-gui's (719.5s).
+    - Windows cannot finish in 45 min what macOS does in 15. BOTH probe steps expired, so no
+      Windows timings report exists at all — cargo only writes one on completion.
+    - At the kill, `fab_scad`'s rustc was in flight, started 40 min earlier (45.3s on macOS).
+      `fab-bosl2` started 3 min before it. Cargo never prints unit COMPLETIONS, so the log cannot
+      separate the two — do not assume it is one of them.
+  - REFUTED, so nobody re-runs them: MSVC link.exe (swapped to rust-lld via the stable
+    `-Clinker-flavor=lld-link`; `msvc-lld` is nightly-gated — identical stall, same place);
+    the band as a compile-time cost (Windows reached the next unit on macOS's schedule);
+    fab-gui's font build script (cache-hit fast path, and its regen path panics on Windows for
+    want of shasum rather than hanging).
+  - THE ANOMALY: windows-latest has 4 cores to macos-14's 3, so Windows should be FASTER. A 70x+
+    gap on identical rustc/LLVM/flags is not a CPU story.
+  - UNTESTED LEADS, in order: Windows Defender scanning every intermediate object rustc writes (a
+    target-dir + CARGO_HOME exclusion is a known 2-5x CI win, and the crate writing the most files
+    is exactly the one that dies); then memory pressure (16 GB, parallel LLVM over one huge module
+    — paging is indistinguishable from a hang). `opt-level`/`codegen-units` on fab-bosl2 come LAST:
+    they trade away the transpiler's entire point.
+  - Meanwhile v1.3.0 and v1.3.1 both ship the web bundle + the macOS dmg; only the .exe is missing,
+    and every release back to v1.1.0 had one.
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)
 - [ ] V.1 - V.1 - per-part parallelism: render/slice/print-layout each part on its own worker thread
 ## Phase Y - Y - Verification hardening: 100%-Rust re-derivation — shrink the unsafe surface, aim each tier where it uniquely covers

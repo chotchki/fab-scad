@@ -59,6 +59,38 @@ jobs:
       # transpiles the pinned BOSL2 submodule, so `cargo build --workspace` is what proves the emitted
       # band still COMPILES. A coverage number is a lie until it does.
 
+  # TA.3 — the WINDOWS gate, and it exists because its absence shipped two defects in one release.
+  #
+  # Every other job here is macOS or ubuntu. Windows was compiled ONLY by release-native, which
+  # fires on a `v*` tag — so the first Windows compile of any change happened AFTER it had been
+  # tagged, and the tag ruleset's "release tags require green CI" reads like protection against
+  # exactly that while naming five checks that never touch Windows. TA.1 was a release-profile LLVM
+  # blowup on a 1.21 MB generated function (4h17m at one core, 28.4 GB, never finished); the second
+  # was `fab-mcad`'s build script overflowing the 1 MiB stack that windows-msvc gives a process's
+  # main thread against 8 MiB elsewhere. Both Windows-only, neither reachable by any gate.
+  #
+  # RELEASE, and a BUILD rather than a check, because `cargo check` would have caught NEITHER: the
+  # blowup is codegen (a check of the same crate is 2m03s) and the overflow is a build SCRIPT
+  # running. The two transpiled library crates are the whole point and the rest of the tree is
+  # already covered by the macOS job, so this stops at them — bevy would triple the time and add
+  # nothing this is watching for.
+  #
+  # `timeout-minutes` is the ratchet: a TA.1-class regression fails here in an hour instead of
+  # burning the 6-hour runner ceiling in a release job. Expected is ~15-20 min.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Caching cannot mask either defect: fab-lib is a BUILD-dependency of both crates, so an
+      # emitter change rebuilds the build script and re-runs it, which is precisely when the
+      # transpile happens and precisely what both defects needed.
+      - run: cargo build --release -p fab-bosl2 -p fab-mcad --verbose
+
   # Kani proofs on the evaluator kernels (I.7): panic-freedom on the exact loop that runs untrusted
   # SCAD — range termination, stack pop/pop discipline, tessellation index bounds, guarded shifts. A
   # SEPARATE job on ubuntu (kani's home platform; fab-lang is pure Rust so it builds anywhere) because

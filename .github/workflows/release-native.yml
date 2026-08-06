@@ -36,7 +36,10 @@ jobs:
           runs=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100" \
             --paginate --jq '.check_runs[] | "\(.name)=\(.conclusion)"')
           fail=0
-          for c in build kani miri asan boot-gate; do
+          # TA.3 added `windows`. Until this release, every name on this list was macOS or ubuntu,
+          # so the gate asserted green CI on a commit no Windows machine had ever compiled — and
+          # that is exactly how v1.3.0 and v1.3.1 shipped a Windows build that could not finish.
+          for c in build windows kani miri asan boot-gate; do
             if ! grep -qx "$c=success" <<< "$runs"; then
               echo "::error::required CI check '$c' is not green on $GITHUB_SHA — release blocked"
               fail=1

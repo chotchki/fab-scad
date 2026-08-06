@@ -217,6 +217,7 @@ pub fn generate_module_native(
         fn_locals: Vec::new(),
         outlined: Vec::new(),
         outline_prefix: None,
+        outlined_keys: std::collections::HashMap::new(),
     };
     let fn_ident = rust_fn_ident(name)?;
     let mut out = String::new();
@@ -488,6 +489,7 @@ pub fn generate_native(
         fn_locals: Vec::new(),
         outlined: Vec::new(),
         outline_prefix: Some(fn_ident.clone()),
+        outlined_keys: std::collections::HashMap::new(),
     };
     let mut out = String::new();
     let _ = write!(
@@ -642,6 +644,14 @@ struct Emitter<'a, 'e> {
     /// helper signature) into per-source files that rustc already partitions separately, and the
     /// sibling-default probe never emits a body at all.
     outline_prefix: Option<String>,
+    /// TA.2 — the signature+body of every helper already emitted, to the name that emitted it.
+    ///
+    /// BOSL2 repeats itself at scale: `regular_polyhedron_info` outlined the SAME 170,505-byte
+    /// body SEVEN times and `isosurface` two bodies twice each — 50.4% of all helper text was
+    /// byte-identical repetition. Identical signature plus identical body is the same function,
+    /// and LLVM optimises every copy independently; the MSVC linker's `/OPT:ICF` folds them only
+    /// afterwards, which saves binary size and cannot save a second of the compile.
+    outlined_keys: std::collections::HashMap<String, String>,
 }
 
 /// Emitted bytes past which a sub-expression is hoisted into its own `fn` (TA.1).
@@ -651,6 +661,42 @@ struct Emitter<'a, 'e> {
 /// body at roughly this many bytes times the node's arity — which is small for the `if`/`let`
 /// nesting the OpenSCAD expression grammar actually produces.
 const OUTLINE_THRESHOLD: usize = 32 * 1024;
+
+/// The call that replaces a hoisted sub-expression (TA.1/TA.2).
+///
+/// A closed constant is infallible and takes nothing, so it substitutes as a bare `rt::Value` with
+/// no `?` — which matters, because the hole it fills is an expression position that may sit inside
+/// a closure the `?` would not return from.
+fn call_of(name: &str, args: &str, closed: bool) -> String {
+    if closed {
+        format!("{name}()")
+    } else {
+        format!("{name}({args})?")
+    }
+}
+
+/// Does `text` name `ident` as a whole TOKEN?
+///
+/// Substring alone is wrong and would be wrong silently: BOSL2 ships the string `"prefix"`, and a
+/// naive scan reads `fx` straight out of the middle of it. Boundary-checking both ends is what
+/// keeps [`Emitter::outline`]'s closed-constant test from mis-classifying on a string literal —
+/// and in the one direction it can still err (a literal that IS `"fx"` reads as a context use) it
+/// errs toward NOT hoisting, which costs nothing but the optimisation.
+fn mentions_ident(text: &str, ident: &str) -> bool {
+    let is_ident_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(hit) = text[from..].find(ident).map(|i| i + from) {
+        let before = hit == 0 || !is_ident_byte(bytes[hit - 1]);
+        let end = hit + ident.len();
+        let after = end >= bytes.len() || !is_ident_byte(bytes[end]);
+        if before && after {
+            return true;
+        }
+        from = hit + 1;
+    }
+    false
+}
 
 impl Emitter<'_, '_> {
     /// A collision-proof Rust ident for a `let`-bound scad name (shadowing gets a new number).
@@ -710,23 +756,77 @@ impl Emitter<'_, '_> {
             }
             params.push(ident.clone());
         }
+        // TA.2 — a CLOSED CONSTANT: the text names neither the context nor any binding in scope,
+        // so it evaluates to the same `rt::Value` on every call and takes no parameters at all.
+        // BOSL2's polyhedron table is 3352 float literals that `regular_polyhedron_info` rebuilt
+        // from scratch SEVEN times per call; `isosurface` and `_clipfacevertices` are the same
+        // shape. Twelve of TA.1's thirty-two helpers qualify — 67.3% of all helper text.
+        //
+        // THREE CONDITIONS, and every one of them fails SAFE. `?`-free is not redundant with the
+        // other two: it is the cheap proof that nothing fallible — and so nothing that reaches the
+        // runtime by a route this scan does not model — is hiding in the body, and it lets the
+        // memoised init be infallible. A false POSITIVE here is impossible in the direction that
+        // matters: mistaking a constant for a live expression only costs the hoist, while the
+        // reverse would freeze a value that moves, so the scan is deliberately over-eager to
+        // disqualify.
+        let closed = !text.contains('?')
+            && !mentions_ident(&text, "fx")
+            && !mentions_ident(&text, "args")
+            && !mentions_ident(&text, "_depth")
+            && params.iter().all(|p| !mentions_ident(&text, p));
+
+        let (sig, args) = if closed {
+            (String::new(), String::new())
+        } else {
+            (
+                format!("fx: &dyn rt::FnCtx{}", {
+                    params
+                        .iter()
+                        .map(|p| format!(", {p}: rt::Value"))
+                        .collect::<String>()
+                }),
+                format!("fx{}", {
+                    params
+                        .iter()
+                        .map(|p| format!(", {p}.clone()"))
+                        .collect::<String>()
+                }),
+            )
+        };
+        // Same signature and same body IS the same function — see [`Emitter::outlined_keys`]. The
+        // signature belongs in the key: two bodies can only be interchangeable if they also take
+        // the same parameters in the same order.
+        let key = format!("{sig}\u{0}{text}");
+        if let Some(name) = self.outlined_keys.get(&key) {
+            return call_of(name, &args, closed);
+        }
+
         let name = format!("{prefix}__o{}", self.outlined.len());
-        let sig = params
-            .iter()
-            .map(|p| format!(", {p}: rt::Value"))
-            .collect::<String>();
-        let args = params
-            .iter()
-            .map(|p| format!(", {p}.clone()"))
-            .collect::<String>();
         // `#[inline(never)]` is the load-bearing half. A helper with ONE call site is precisely
         // what LLVM's inliner folds straight back into its caller, which would reassemble the
-        // single huge body and leave only the clones behind.
-        self.outlined.push(format!(
-            "#[inline(never)]\nfn {name}(fx: &dyn rt::FnCtx{sig}) -> rt::Result<rt::Value> {{\n    \
-             Ok({text})\n}}\n"
-        ));
-        format!("{name}(fx{args})?")
+        // single huge body and leave only the clones behind. Dedup makes some of these helpers
+        // multi-call-site, where the attribute matters less — but the singletons are still the
+        // majority and it costs nothing to keep it uniform.
+        self.outlined.push(if closed {
+            // Computed ONCE PER THREAD rather than once per call. `rt::Value` is `Rc`-based
+            // (`lang/src/eval/value.rs`) and so is neither `Send` nor `Sync` — a plain
+            // `static OnceLock<Value>` would not compile, and `thread_local!` is the right vehicle
+            // anyway: no cross-thread contention on a value every thread wants to read.
+            format!(
+                "#[inline(never)]\nfn {name}() -> rt::Value {{\n    \
+                 thread_local! {{\n        \
+                 static CACHE: std::cell::OnceCell<rt::Value> = const {{ std::cell::OnceCell::new() }};\n    \
+                 }}\n    \
+                 CACHE.with(|cache| cache.get_or_init(|| {text}).clone())\n}}\n"
+            )
+        } else {
+            format!(
+                "#[inline(never)]\nfn {name}({sig}) -> rt::Result<rt::Value> {{\n    \
+                 Ok({text})\n}}\n"
+            )
+        });
+        self.outlined_keys.insert(key, name.clone());
+        call_of(&name, &args, closed)
     }
 
     fn expr_inner(&mut self, e: &Expr) -> Result<String, String> {
@@ -2277,6 +2377,7 @@ fn sibling_of(subject: &Subject<'_>) -> Result<Sibling, String> {
         fn_locals: Vec::new(),
         outlined: Vec::new(),
         outline_prefix: None,
+        outlined_keys: std::collections::HashMap::new(),
     };
     let defaults = params
         .iter()

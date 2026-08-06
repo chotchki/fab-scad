@@ -23,6 +23,7 @@
     clippy::too_many_lines,
     clippy::collapsible_if,
     clippy::vec_init_then_push,
+    clippy::too_many_arguments,
     reason = "generated code: bit-exact from_bits literals, mechanical clones, \
               upstream's underscore-prefixed names (params too — `p__total`), unused \
               loop binders a body never reads, fresh idents differing by counter, and \

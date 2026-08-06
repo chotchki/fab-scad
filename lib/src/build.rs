@@ -28,12 +28,43 @@ pub struct Library<'a> {
     pub out_file: &'a str,
 }
 
+/// The stack the transpile runs on, matching `fab_scad::EVAL_STACK` — the same 64 MiB, for the same
+/// reason, at the one layer that had never been given it. (Not that constant: fab-lib cannot depend
+/// on fab-scad, the dependency runs the other way.)
+///
+/// A build script gets the process's MAIN thread, and that thread's stack is fixed at LINK time —
+/// 1 MiB on `x86_64-pc-windows-msvc` against 8 MiB on macOS and Linux, and nothing inside the
+/// program can raise it. The transpiler walks the AST by recursion, so the ceiling it is really
+/// working against is 1 MiB on exactly one platform. MCAD hit it: STATUS_STACK_OVERFLOW
+/// (0xc00000fd) out of `fab-mcad`'s build script, transpiling source macOS takes without complaint.
+/// Everything else in this workspace that recurses deeply already runs on an explicit stack —
+/// `EVAL_STACK` has fourteen call sites — and build scripts were simply the place nobody had
+/// reached yet, because CI has never built on Windows.
+const TRANSPILE_STACK: usize = 64 * 1024 * 1024;
+
 /// Transpile `lib` into `OUT_DIR`, emitting cargo directives as it goes.
+///
+/// Runs on a spawned thread with [`TRANSPILE_STACK`] rather than the build script's own — see there
+/// for why. Scoped, so `lib`'s borrows need no `'static`; a panic inside is resumed here so it
+/// still fails the build with its own message rather than a bare join error.
 ///
 /// # Panics
 /// When `OUT_DIR` is unwritable, or the emitter cannot produce a file at all — both are build
 /// failures with nothing useful to fall back to. A per-function decline is NOT one of these.
 pub fn transpile(lib: &Library) {
+    std::thread::scope(|scope| {
+        let handle = std::thread::Builder::new()
+            .name("transpile".into())
+            .stack_size(TRANSPILE_STACK)
+            .spawn_scoped(scope, || transpile_inner(lib))
+            .expect("spawn the transpile thread");
+        if let Err(panic) = handle.join() {
+            std::panic::resume_unwind(panic);
+        }
+    });
+}
+
+fn transpile_inner(lib: &Library) {
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
     let root = lib.root;
     let name = lib.name;

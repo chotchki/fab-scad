@@ -224,6 +224,27 @@ added 2026-07-07.
       build that ever compiled a real band.
   - `opt-level`/`codegen-units` on fab-bosl2 were never reached, and should stay unreached: they
     trade away the transpiler's entire point, and the defect was in what we handed LLVM.
+  - SECOND Windows-only defect, found by the same box and fixed alongside: `fab-mcad`'s build script
+    died with STATUS_STACK_OVERFLOW (0xc00000fd). A build script runs on the process's MAIN thread,
+    whose stack is fixed at LINK time — 1 MiB on `x86_64-pc-windows-msvc` against 8 MiB on macOS and
+    Linux — and the transpiler walks the AST by recursion. So it had always been running on an
+    eighth of the headroom on exactly one platform. Everything else in the workspace that recurses
+    deeply already runs on an explicit stack (`fab_scad::EVAL_STACK`, 64 MiB, fourteen call sites);
+    build scripts were the layer nobody had reached. `fab_lib::build::transpile` now spawns the work
+    on a scoped 64 MiB thread, so every library crate inherits it rather than each build script
+    remembering. TA.1's outlining made it worse (`expr` -> `expr_inner` adds a frame per nesting
+    level) but did not create it — which is why it reproduced intermittently, not always.
+- [ ] TA.3 - CI HAS NO WINDOWS RUNNER, and that is why both TA.1 defects shipped
+  - `ci.yml`'s five jobs are macos-latest, ubuntu-latest, ubuntu-latest, macos-latest,
+    ubuntu-latest. Windows is compiled ONLY by `release-native`, which fires on a `v*` tag — so the
+    first Windows compile of any change happens after it has already been tagged for release. Both
+    TA.1 defects (the LLVM blowup and the 1 MiB build-script stack) are Windows-only, and neither
+    was reachable by any gate.
+  - The tag ruleset requires `build`/`kani`/`miri`/`asan`/`boot-gate` green, which reads like
+    protection and is not: none of those five ever touch Windows.
+  - Cheapest real coverage is a `cargo check`-or-build job on windows-latest in `ci.yml`. Note that
+    `cargo check` would NOT have caught either one — the LLVM blowup is codegen (check of the same
+    crate: 2m03s) and the stack overflow is a build SCRIPT execution. It has to build.
 - [ ] TA.2 - Hoist the closed-constant helpers (follow-on to TA.1, runtime win — NOT needed for CI)
   - Of TA.1's 32 outlined helpers, **12 read none of their parameters and never touch `fx`** — they
     are closed constants. `regular_polyhedron_info__o0` takes 34 parameters and uses zero. That is

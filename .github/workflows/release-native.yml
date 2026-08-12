@@ -189,7 +189,14 @@ jobs:
           UPDATER_SIGN_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
         run: |
           install -m 600 /dev/null "$RUNNER_TEMP/updater.key"
-          printf '%s\n' "$UPDATER_SIGN_KEY" >> "$RUNNER_TEMP/updater.key"
+          # Strip ALL whitespace, then PROVE the result is base64 before the 20-minute build gets
+          # anywhere near it: cargo-packager read_to_string()s this file with NO trim and decodes
+          # strictly, so a single trailing newline (a `gh secret set < file` artifact — and the
+          # `printf '%s\n'` this step itself used to do) kills the v1.3.3-style release at the
+          # packaging step with an error that doesn't name the key. Fail HERE, loudly, instead.
+          printf '%s' "$UPDATER_SIGN_KEY" | tr -d '[:space:]' > "$RUNNER_TEMP/updater.key"
+          base64 -d < "$RUNNER_TEMP/updater.key" > /dev/null \
+            || { echo "::error::CARGO_PACKAGER_SIGN_PRIVATE_KEY is not clean base64 even after whitespace strip"; exit 1; }
           {
             echo "CARGO_PACKAGER_SIGN_PRIVATE_KEY=$RUNNER_TEMP/updater.key"
             echo "CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD="

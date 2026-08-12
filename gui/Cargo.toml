@@ -54,6 +54,21 @@ async-channel = "2"
 path = ".."
 features = ["kernel", "native"]
 
+# --- macOS only ---
+# Self-update (TB): check the GitHub release's latest.json, verify + install the signed .app.tar.gz
+# that cargo-packager emits (CrabNebula's own updater — same minisign scheme, co-released with the
+# packager). Blocking reqwest inside AsyncComputeTaskPool tasks, the `publish_native` precedent.
+# rustls default keeps the no-system-OpenSSL rule. macOS-gated: the only shipped updater target.
+[target.'cfg(target_os = "macos")'.dependencies]
+cargo-packager-updater = "0.2.3"
+
+# e2e proof for the update path (tests/update_e2e.rs): mint a throwaway minisign keypair, sign a fake
+# bundle EXACTLY the way cargo-packager's sign_outputs does (base64-of-box over raw tar.gz bytes),
+# serve it from a localhost listener, and let the REAL updater crate swap a real .app directory.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+minisign = "0.7"
+base64 = "0.22"
+
 # --- wasm only ---
 # Kernel-FREE base: geometry runs in the fab-geom worker (W.3.4); this crate links the wire
 # types + pure helpers. Plus the browser host surface (canvas / config / file / download).

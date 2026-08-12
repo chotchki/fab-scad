@@ -39,6 +39,13 @@ pub(crate) fn settings_modal(
     mut contexts: EguiContexts,
     mut ev: MessageReader<PanelCmd>,
     mut state: ResMut<SettingsUi>,
+    // TB: the manual update check rides the PanelCmd bus like every other button — but via Commands,
+    // NOT MessageWriter: this system already holds MessageReader<PanelCmd>, and reader + writer of
+    // the same Messages<T> in one system is a B0002 param-conflict panic at schedule init (caught by
+    // review, live-repro'd on bevy_ecs 0.19). The deferred write lands next sync point; a one-flush
+    // latency on a button click is imperceptible. Unused off-macOS.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
+    mut commands: Commands,
 ) {
     // The gear raises the modal; reloading from disk on the next draw (loaded=false).
     if ev.read().any(|c| *c == PanelCmd::OpenSettings) {
@@ -143,6 +150,30 @@ pub(crate) fn settings_modal(
                         .color(theme::GOLD_DIM),
                 ),
             };
+        }
+
+        // TB: self-update lives here too — the automatic check runs at launch; this button is the
+        // "I want to know NOW" path. Result lands via the update dialog + status bar (crate::update).
+        #[cfg(target_os = "macos")]
+        {
+            ui.add_space(10.0);
+            ui.separator();
+            ui.label(
+                egui::RichText::new("Software update")
+                    .strong()
+                    .color(theme::NAVY),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "checks automatically at launch (FAB_UPDATE_CHECK=off disables)",
+                )
+                .small()
+                .color(theme::TEXT_MUTED),
+            );
+            ui.add_space(4.0);
+            if ui.button("Check for updates").clicked() {
+                commands.write_message(PanelCmd::CheckUpdates);
+            }
         }
     });
     // A backdrop click or Esc closes it.

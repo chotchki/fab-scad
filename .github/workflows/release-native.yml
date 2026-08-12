@@ -67,6 +67,9 @@ jobs:
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+      # TB: presence FLAG only — the update-signing key itself is scoped to the one step that
+      # writes it to a 0600 file ("Enable updater artifacts"), never the job-wide env.
+      UPDATER_KEY_PRESENT: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY != '' }}
     steps:
       # SUBMODULES, and this is not boilerplate: without them `libs/BOSL2` is EMPTY, fab-bosl2's
       # build script takes its not-checked-out path, and the signed app ships a library crate that
@@ -112,6 +115,13 @@ jobs:
           PKG=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml)
           TAG="${GITHUB_REF_NAME#v}"
           [ "$PKG" = "$TAG" ] || { echo "tag/version drift: tag=v$TAG but Packager.toml=$PKG"; exit 1; }
+          # TB: the self-updater compares env!(CARGO_PKG_VERSION) — gui/Cargo.toml's number, which
+          # NOTHING coupled to the tag until an update that "kept being available" would have shipped.
+          # head -1 pins the [package] version (dep tables carry version keys further down).
+          for f in Cargo.toml gui/Cargo.toml; do
+            V=$(sed -n 's/^version = "\(.*\)"/\1/p' "$f" | head -1)
+            [ "$V" = "$PKG" ] || { echo "version drift: $f=$V but Packager.toml=$PKG — bump the four pins together"; exit 1; }
+          done
       # The CFBundleVersion pin (packaging/macos/Info.plist) exists for reproducible builds — a
       # stale pin ships the wrong build number, so drift fails the run before the long build.
       - name: CFBundleVersion pin matches Packager.toml
@@ -155,7 +165,35 @@ jobs:
           name: cargo-timings-${{ matrix.os }}
           path: target/cargo-timings/
           if-no-files-found: warn
-      - run: cargo install cargo-packager --locked
+      # Pinned since TB: the updater artifact's tar layout + signature format are now a shipped
+      # contract with installed apps, so packager upgrades happen in the repo, not silently in CI.
+      # (0.11.8 is also the version whose source the signing/notarize/staple ordering was verified
+      # against — sign_outputs tars the .app AFTER package() staples it.)
+      - run: cargo install cargo-packager --locked --version 0.11.8
+      # TB self-update artifacts. With the key available, `cargo packager` tars the stapled .app
+      # into fab-scad.app.tar.gz and minisign-signs it (that .sig goes INTO latest.json below) —
+      # no key, no artifacts, same release as today. Deliberate hardening shape (review findings):
+      #   - gated on APPLE signing too — an unsigned/un-notarized build must never enter the
+      #     auto-update channel every installed app trusts;
+      #   - the secret is scoped to THIS step's env and written to a 0600 file; what GITHUB_ENV
+      #     carries forward is the PATH (cargo-packager accepts key-or-path), so the key material
+      #     never sits in the job-wide env where every later third-party action could read it;
+      #   - placed AFTER the build steps so the full dependency graph (build scripts, proc-macros)
+      #     compiles without the secret in its environment;
+      #   - the password var is genuinely empty but must be SET, or cargo-packager prompts
+      #     interactively and hangs the job (the key was minted passwordless — it lives inside a
+      #     secret store; a password stored beside it protects nothing).
+      - name: Enable updater artifacts (secrets present)
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != '' && env.UPDATER_KEY_PRESENT == 'true'
+        env:
+          UPDATER_SIGN_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
+        run: |
+          install -m 600 /dev/null "$RUNNER_TEMP/updater.key"
+          printf '%s\n' "$UPDATER_SIGN_KEY" >> "$RUNNER_TEMP/updater.key"
+          {
+            echo "CARGO_PACKAGER_SIGN_PRIVATE_KEY=$RUNNER_TEMP/updater.key"
+            echo "CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD="
+          } >> "$GITHUB_ENV"
       - run: cargo packager --release --formats ${{ matrix.formats }}
       # cargo-packager staples the .app but only SIGNS the dmg — notarize+staple the dmg too, so
       # Gatekeeper clears it before the user ever reaches the .app inside.
@@ -172,25 +210,69 @@ jobs:
         run: |
           spctl -a -t open --context context:primary-signature -vv target/packager/*.dmg
           spctl -a -t exec -vv target/packager/fab-scad.app
+      # TB: the update manifest the in-app updater polls at releases/latest/download/latest.json.
+      # cargo-packager does not write it (upstream #350); the shared script does — see its header
+      # for the macos-aarch64-not-darwin landmine. Tags only (the url embeds the tag); a run without
+      # the updater secret has no .sig and skips with a warning — that release just isn't
+      # self-updatable, exactly like every release before TB. macOS job only: Windows has no
+      # updater wired, and a second latest.json upload would clobber this one (softprops
+      # overwrite is delete-then-reupload, not merge) — fan that in properly if Windows ever joins.
+      - name: Update manifest (latest.json)
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          SIG=target/packager/fab-scad.app.tar.gz.sig
+          if [ ! -f "$SIG" ]; then
+            echo "::warning::no updater artifact (CARGO_PACKAGER_SIGN_PRIVATE_KEY unset) — this release ships without self-update"
+            exit 0
+          fi
+          # The one check that makes key rotation survivable: the artifact's signature must verify
+          # against the pubkey BAKED INTO THIS BUILD (gui/src/update.rs::PUBKEY). A CI secret
+          # swapped without re-baking the const would otherwise publish a manifest no installed
+          # app can verify — silently, forever. Fail the release instead.
+          brew install --quiet minisign
+          sed -n 's/^const PUBKEY: &str = "\(.*\)";$/\1/p' gui/src/update.rs | base64 -d > "$RUNNER_TEMP/fab.pub"
+          base64 -d "$SIG" > "$RUNNER_TEMP/fab.sig"
+          minisign -Vm target/packager/fab-scad.app.tar.gz -x "$RUNNER_TEMP/fab.sig" -p "$RUNNER_TEMP/fab.pub" \
+            || { echo "::error::updater artifact signed with a key that does NOT match gui/src/update.rs::PUBKEY — installed apps could never verify this update"; exit 1; }
+          PKG=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml)
+          bash packaging/macos/make-update-manifest.sh "$PKG" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${PKG}/fab-scad.app.tar.gz" \
+            "$SIG" target/packager/latest.json
+          cat target/packager/latest.json
       - uses: actions/upload-artifact@v4
         with:
           name: fab-scad-${{ matrix.os }}
           path: |
             target/packager/*.dmg
             target/packager/*.exe
+            target/packager/*.app.tar.gz
+            target/packager/latest.json
           if-no-files-found: error
       # Tags publish: each matrix job attaches its installer to the tag's release (created by
-      # whichever job lands first; release-web adds the wasm bundle to the same one).
+      # whichever job lands first; release-web adds the wasm bundle to the same one). The updater
+      # pair (fab-scad.app.tar.gz + latest.json) rides the same upload; absent patterns are
+      # skipped, so secretless releases still publish the installers.
       - name: Release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           prerelease: false
           make_latest: true
+          # TB: published-tag assets are IMMUTABLE. A re-run must only backfill missing assets
+          # (the Windows .exe that died), never replace live ones — softprops' overwrite is
+          # delete-then-reupload, and a rebuilt tarball replacing the old one BEFORE latest.json
+          # follows would leave the live manifest's signature pointing at bytes it never signed.
+          # A genuinely bad artifact ships as a new patch tag, not a re-run.
+          overwrite_files: false
           files: |
             target/packager/*.dmg
             target/packager/*.exe
+            target/packager/*.app.tar.gz
+            target/packager/latest.json
           body: |
             fab-scad native installers — macOS DMG (Developer-ID signed + notarized + stapled) and
             Windows NSIS (unsigned — winget pins SHA256, docs/packaging.md "signing bill").
             The matching wasm bundle (fab-gui-*.tar.gz) is attached by release-web.
+            fab-scad.app.tar.gz + latest.json feed the macOS in-app self-update (docs/packaging.md
+            "auto-update") — install from the DMG, update from the app.

@@ -584,6 +584,13 @@ pub(crate) enum PanelCmd {
     /// file, Z.3.7) — pops a native Save-As `.scadproj` dialog, then adopts that path as the home.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     SaveAsProject,
+    /// Manual update check (TB) — the Settings modal's "Check for updates" button. macOS only: the
+    /// sole platform with signed updater artifacts ([`crate::update`]).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    CheckUpdates,
+    /// Open the self-update dialog (TB) — the header's gold "UPDATE x.y.z" badge. macOS only.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    OpenUpdate,
 }
 
 /// The in-flight Save-As `.scadproj` (Z.3.7) — the native Save dialog + the zip write run off-thread (rfd

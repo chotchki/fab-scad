@@ -86,6 +86,8 @@ mod screenshot;
 mod script;
 mod state;
 mod theme; // W.1 — central egui Visuals/Style + fonts + the 3D palette, ported from hotchkiss.io
+#[cfg(target_os = "macos")]
+mod update; // TB — macOS self-update: launch check, header badge, prompted install + relaunch
 mod view; // U.3.11 — headless script-driven state-assertion tests for the Parts drill
 // Web model NAMING (Z.3.9) — pure string logic (native-tested), no web-sys. Prefers the response's
 // `Content-Disposition` filename over the `?model=` basename, which is an opaque `media_ref` hash.
@@ -361,6 +363,18 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         .add_systems(
             EguiPrimaryContextPass,
             publish_dialog::publish_dialog.run_if(theme::theme_ready),
+        );
+    // TB: macOS self-update — check at launch (packaged builds only), poll the check/install tasks,
+    // draw the dialog. Windowed app only: screenshot/scripted runs must never swap the bundle
+    // under themselves, so they simply don't register any of this (the panel badge reads the
+    // resource as `Option` for exactly that reason).
+    #[cfg(target_os = "macos")]
+    app.init_resource::<update::UpdateState>()
+        .add_systems(Startup, update::update_check_startup)
+        .add_systems(Update, update::update_action)
+        .add_systems(
+            EguiPrimaryContextPass,
+            update::update_dialog.run_if(theme::theme_ready),
         );
     // Browser-only file-IO surface (W.3.12): the `?model=` fetch resource + its landing system, plus
     // the save-back (W.5.7/.8): derive the `PUT /media/<ref>/variants` target from the SAME `?model=`

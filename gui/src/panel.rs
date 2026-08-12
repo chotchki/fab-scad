@@ -40,6 +40,10 @@ pub(crate) struct PanelView<'w> {
     pub(crate) media_item: Res<'w, MediaItem>,
     /// Where the wordmark navigates home to (W.3.7.4): `Some` ⇒ it's a link, not a label.
     pub(crate) back_link: Res<'w, BackLink>,
+    /// Self-update state (TB): a found update shows the header badge. `Option` because only the
+    /// windowed app registers the resource — screenshot/scripted runs skip the update systems.
+    #[cfg(target_os = "macos")]
+    pub(crate) update: Option<Res<'w, crate::update::UpdateState>>,
 }
 
 /// Bake the live slicing config into the buffer and persist it — the ONE local-save path, driven by both
@@ -386,6 +390,22 @@ pub(crate) fn panel_ui(
                         .clicked()
                     {
                         writers.cmd.write(PanelCmd::OpenSettings);
+                    }
+                    // TB: the self-update badge — gold, left of the gear, only while an update is
+                    // ready. chrome() uppercases; the version digits are ASCII, no tofu risk.
+                    #[cfg(target_os = "macos")]
+                    if let Some(v) = view.update.as_ref().and_then(|u| u.found_version()) {
+                        let badge = egui::Button::new(
+                            theme::chrome(format!("update {v}"), 13.0).color(theme::NAVY),
+                        )
+                        .fill(theme::GOLD);
+                        if ui
+                            .add(badge)
+                            .on_hover_text("A new version is ready — click to install")
+                            .clicked()
+                        {
+                            writers.cmd.write(PanelCmd::OpenUpdate);
+                        }
                     }
                 });
             });

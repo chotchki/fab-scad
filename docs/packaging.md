@@ -143,6 +143,83 @@ icon.svg` → `make-icon.sh` renders a 1024 master (headless Chrome) then packs 
 (macOS, `sips`+`iconutil`) and `fab-scad.ico` (Windows, ImageMagick multi-size), wired in `Packager.toml`'s
 `icons` (cargo-packager picks per platform).
 
+## Auto-update (TB)
+
+The macOS app updates ITSELF: on launch (packaged builds only — a bare `cargo run` has nothing to
+swap) a background task fetches `latest.json` off the newest GitHub release; a newer version raises
+a gold UPDATE badge in the header, the badge opens a dialog, and "Install and relaunch" downloads
+the signed `.app.tar.gz`, minisign-verifies it, swaps the bundle in place and restarts into the same
+model. PROMPTED, never silent — the badge can sit there all week. Manual check: Settings → "Check
+for updates" (that path also reports "up to date" and errors; the launch check never nags, because a
+release mid-upload 404s exactly like "no update"). Opt out with `FAB_UPDATE_CHECK=off`.
+
+Mechanism: `cargo-packager-updater` 0.2.3 in fab-gui (macOS-gated dep) + artifacts from the
+`cargo-packager` 0.11.8 we already run — with `CARGO_PACKAGER_SIGN_PRIVATE_KEY` set, its
+`sign_outputs` tars the ALREADY-stapled `.app` into `fab-scad.app.tar.gz` and writes a minisign
+`.sig` beside it (ordering verified in its source: staple happens inside `package()`, the tar after).
+CI is pinned to 0.11.8 now — the tar layout + signature format are a shipped contract with every
+installed app, so packager upgrades happen in the repo, not silently in a runner.
+
+What CI adds per `v*` tag (macOS job only): the tarball, plus `latest.json` written by
+`packaging/macos/make-update-manifest.sh` — the SAME script the e2e test runs, so the published
+shape and the parsed shape cannot drift. Two landmines that script exists to encode:
+
+- The platform key is **`macos-aarch64`**. The updater's own 0.2.3 docs say `darwin-aarch64`; its
+  CODE says otherwise (`get_updater_target()` returns "macos"). Copy the docs and updates silently
+  never fire.
+- `format: "app"` is REQUIRED per platform entry, and `pub_date` must be strict RFC 3339 — either
+  wrong fails deserialization of the ENTIRE manifest.
+
+The app polls `releases/latest/download/latest.json` — a plain web redirect, NOT the GitHub API, so
+no rate limits and no auth (public repo is load-bearing: the cross-host redirect strips auth
+headers). There IS a self-inflicted 404 window: the release goes public when the FIRST matrix job
+lands, and `latest.json` 404s until the macOS job uploads it. Benign — the launch check swallows it.
+
+### The update-signing key ceremony (SECOND ceremony, independent of Apple's)
+
+Minted 2026-08-11, passwordless (`cargo packager signer generate --password ""` — the key lives
+inside a secret store either way; a password stored beside it protects nothing), private key at
+`~/.config/fab-scad/update-signing.key` (0600), public key baked into `gui/src/update.rs::PUBKEY`.
+
+1. Repo secret (the one step a human must run):
+   `gh secret set CARGO_PACKAGER_SIGN_PRIVATE_KEY --repo chotchki/fab-scad < ~/.config/fab-scad/update-signing.key`
+2. **Back the key file up to the password manager NOW.** GitHub secrets are write-only, and losing
+   this key ORPHANS every installed app: the baked pubkey rejects anything a new key signs, so
+   recovery is "everyone re-downloads a DMG by hand" — the exact chore this phase deletes.
+   Rotating deliberately has the same cost; if it must happen, ship one release signed with the OLD
+   key whose app embeds the NEW pubkey, then switch.
+3. No password secret needed — the workflow hardcodes `CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD=""`
+   (the var must be SET or cargo-packager prompts interactively and hangs the job).
+
+Secrets-gated like Apple signing: no key → no tarball, no manifest, a warning, and that release
+simply isn't self-updatable — same artifacts as before TB.
+
+### Limits (inherited from the updater crate, accepted + documented)
+
+- The swap is NOT atomic and has NO rollback: old bundle → temp backup, new bundle → renamed in; a
+  failure between leaves no app. The DMG on the release page is the recovery path. (Sparkle does
+  this better; it also isn't Rust and isn't 30 lines of glue.)
+- A translocated / run-from-DMG / external-volume app CANNOT self-update: the updater's first move
+  is a plain `fs::rename` into `$TMPDIR`, which fails across devices (and translocation mounts are
+  read-only besides). The dialog detects both up front — the `AppTranslocation` path marker AND a
+  bundle-vs-tempdir device mismatch — and says "copy to /Applications" instead of failing after a
+  40 MB download.
+- If `/Applications` isn't writable, the updater falls back to an osascript admin-password prompt —
+  that dialog is macOS asking, not us.
+- **Never add App Sandbox** to the entitlements: sandboxed apps cannot self-update (updater #397).
+  Hardened runtime + notarization WITHOUT sandbox — today's exact signing config — is the proven
+  combination. The update payload itself needs no notarization (the app's own downloads carry no
+  quarantine xattr), but the tarred `.app` ships signed + stapled anyway because it IS the release
+  bundle.
+- Updates flow only FORWARD (strict semver `>`), and only for versions that shipped WITH the
+  updater: the first TB release can update nothing retroactively — v1.3.2-and-earlier installs get
+  one last manual DMG download.
+
+Proof: `gui/tests/update_e2e.rs` (macOS) drives manifest → signature → localhost download →
+verify → REAL bundle swap on disk, plus a tampered-payload must-fail check. What it can't reach —
+the GitHub redirect chain and Gatekeeper on the swapped bundle — gets a manual through-the-app
+update on the first real pair of TB releases.
+
 ## Known gaps before a real release
 
 - ~~CFBundleVersion is a build timestamp~~ — PINNED (W.2.2.1): `packaging/macos/Info.plist`

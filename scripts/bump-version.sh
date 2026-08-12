@@ -23,7 +23,12 @@ done
 for f in Cargo.toml gui/Cargo.toml Packager.toml; do
   sed -i '' "s/^version = \".*\"/version = \"$NEW\"/" "$f"
 done
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEW" packaging/macos/Info.plist
+# sed, NOT `PlistBuddy Set`: PlistBuddy REWRITES the plist and strips the W.2.2.1 comment that
+# explains why the pin exists (the file itself warns about this; the first run of this script
+# proved it). The pin dict holds exactly one <string> — assert that before touching it.
+PLIST=packaging/macos/Info.plist
+[[ "$(grep -c '<string>' "$PLIST")" == 1 ]] || { echo "$PLIST grew a second <string> — fix the script first" >&2; exit 1; }
+sed -i '' "s|<string>.*</string>|<string>$NEW</string>|" "$PLIST"
 # Refresh the two members' versions in Cargo.lock (metadata resolves + rewrites a stale lock).
 cargo metadata --format-version 1 >/dev/null
 

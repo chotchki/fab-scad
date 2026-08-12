@@ -238,8 +238,10 @@ jobs:
           # swapped without re-baking the const would otherwise publish a manifest no installed
           # app can verify — silently, forever. Fail the release instead.
           brew install --quiet minisign
+          # base64 via STDIN both times: macOS base64 rejects a positional file argument ("invalid
+          # argument", exit 64) — that Linux-ism cost the second v1.3.3 run its macOS job.
           sed -n 's/^const PUBKEY: &str = "\(.*\)";$/\1/p' gui/src/update.rs | base64 -d > "$RUNNER_TEMP/fab.pub"
-          base64 -d "$SIG" > "$RUNNER_TEMP/fab.sig"
+          base64 -d < "$SIG" > "$RUNNER_TEMP/fab.sig"
           minisign -Vm target/packager/fab-scad.app.tar.gz -x "$RUNNER_TEMP/fab.sig" -p "$RUNNER_TEMP/fab.pub" \
             || { echo "::error::updater artifact signed with a key that does NOT match gui/src/update.rs::PUBKEY — installed apps could never verify this update"; exit 1; }
           PKG=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml)

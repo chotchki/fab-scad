@@ -200,6 +200,11 @@ jobs:
           V=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
           cargo install wasm-bindgen-cli --version "$V" --locked
       - name: Build the bundle (the release's own script)
+        # FAB_GEOM_TOOLCHAIN empty = the script's geom-worker builds use THIS job's pinned
+        # toolchain instead of their local `+nightly` fallback (which resolves to the latest
+        # nightly and un-pins exactly what the pin above pins). Must match release-web.yml.
+        env:
+          FAB_GEOM_TOOLCHAIN: ""
         run: bash gui/web/build-wasm.sh --stage target/fab-gui/stage --no-opt
       - name: Boot the bundle in Chrome
         run: |

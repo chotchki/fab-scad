@@ -68,7 +68,13 @@ patch_worker_helpers() {  # <out dir>
 build_geom() {  # <out subdir> <cargo feature flags...>
   local out="$stage/$1"; shift
   mkdir -p "$out"
-  RUSTFLAGS="$GEOM_RUSTFLAGS" cargo +nightly build -p fab-geom --release \
+  # `${FAB_GEOM_TOOLCHAIN-+nightly}`: local runs keep `+nightly` (the worker needs -Zbuild-std),
+  # but CI sets the var EMPTY so this build uses the workflow's dtolnay toolchain — a hardcoded
+  # `+nightly` here resolves to the LATEST nightly behind the workflow's back, which re-broke
+  # boot-gate the day ci.yml pinned nightly-2026-08-12 (rustup synced a fresh nightly without
+  # rust-src and would have hit the same bevy E0034 the pin exists to dodge). No-colon expansion
+  # on purpose: empty means "use the default toolchain", only UNSET falls back to +nightly.
+  RUSTFLAGS="$GEOM_RUSTFLAGS" cargo ${FAB_GEOM_TOOLCHAIN-+nightly} build -p fab-geom --release \
     --target wasm32-unknown-unknown "$@" -Z build-std=panic_abort,std
   wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir "$out" \
     "target/wasm32-unknown-unknown/release/fab_geom.wasm"

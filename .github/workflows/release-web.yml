@@ -102,6 +102,10 @@ jobs:
       #    deliberate (older builds corrupt wasm-bindgen's externref table), so the fix is a binaryen
       #    BUMP once one is verified, not un-pinning. Sizes at v1.3.0: 5.4 MB brotli for the full worker, 1.3 for the lean.
       - name: Build the bundle (app + both geom workers + lib pack)
+        # FAB_GEOM_TOOLCHAIN empty = the script's geom-worker builds use THIS job's pinned
+        # toolchain instead of their local `+nightly` fallback. Must match ci.yml's boot-gate.
+        env:
+          FAB_GEOM_TOOLCHAIN: ""
         run: bash gui/web/build-wasm.sh --stage "$STAGE"
       - name: Stage the bundle (docs/web-embed.md contract)
         run: |

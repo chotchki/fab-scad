@@ -416,7 +416,7 @@ impl Solid {
         let mut out = Vec::with_capacity(84 + 50 * ntri as usize);
         out.extend_from_slice(&[0u8; 80]); // header
         out.extend_from_slice(&ntri.to_le_bytes());
-        for t in idx.chunks_exact(3) {
+        for t in idx.as_chunks::<3>().0 {
             let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
             let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
             let w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
@@ -494,7 +494,9 @@ impl Solid {
             .map(|i| Vec3::new(v[i * stride], v[i * stride + 1], v[i * stride + 2]))
             .collect();
         let tris = idx
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|t| Tri::new(t[0], t[1], t[2]))
             .collect();
         (verts, tris)
@@ -1262,7 +1264,9 @@ fn to_3mf_mesh(s: &Solid) -> threemf::model::Mesh {
         })
         .collect();
     let triangle = idx
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| threemf::model::Triangle {
             v1: t[0] as usize,
             v2: t[1] as usize,

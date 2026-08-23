@@ -61,8 +61,15 @@ jobs:
       # NIGHTLY + rust-src: the geom worker is THREADED (W.6.2), which needs -Zbuild-std to rebuild std
       # with atomics/shared-memory. The app itself is stable-clean; nightly builds it fine (superset).
       # Pin a date here if a nightly regression ever bites — the boot + save e2e gates below would catch it.
-      - uses: dtolnay/rust-toolchain@nightly
+      #
+      # PINNED (2026-08-23): the regression bit. Current nightlies changed method resolution and
+      # bevy_render 0.19's bare `.run_if(...)` went E0034-ambiguous against bevy_ecs's
+      # ObserverSystemExt::run_if — 0.19.1 ships the same code, no fix to bump to. nightly-2026-08-12
+      # (3d6c19bb9) is the last proven-green build; MUST match ci.yml's boot-gate pin. Unpin when a
+      # bevy release disambiguates the call.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-08-12
           targets: wasm32-unknown-unknown
           components: rust-src
       - uses: Swatinem/rust-cache@v2

@@ -54,7 +54,12 @@ use crate::status::Error;
 fn union_all(meshes: Vec<Mesh>) -> Option<Mesh> {
     let mut level = meshes;
     while level.len() > 1 {
-        let pairs: Vec<(&Mesh, &Mesh)> = level.chunks_exact(2).map(|c| (&c[0], &c[1])).collect();
+        let pairs: Vec<(&Mesh, &Mesh)> = level
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| (&c[0], &c[1]))
+            .collect();
         let mut next = par::map_collect_min_len(&pairs, 2, |&(x, y)| boolean(x, y, OpType::Add));
         drop(pairs);
         if level.len() % 2 == 1 {

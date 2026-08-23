@@ -749,7 +749,9 @@ mod tests {
         }
         let mut scene = Mesh {
             vert_pos: verts
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|c| Vec3::new(c[0], c[1], c[2]))
                 .collect(),
             ..Default::default()

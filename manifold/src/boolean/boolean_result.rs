@@ -1159,7 +1159,7 @@ mod tests {
             0.0,0.0,1.0, 1.0,0.0,1.0, 1.0,1.0,1.0, 0.0,1.0,1.0,
         ];
         let mut verts = Vec::new();
-        for c in base.chunks_exact(3) {
+        for c in base.as_chunks::<3>().0 {
             verts.push(c[0] + ox);
             verts.push(c[1] + oy);
             verts.push(c[2] + oz);

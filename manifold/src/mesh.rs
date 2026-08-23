@@ -734,8 +734,10 @@ impl Mesh {
             // their self-loop/duplicate halfedges would poison the pairing.
             let tri_verts: Vec<[u32; 3]> = m
                 .tri_verts
-                .chunks_exact(3)
-                .map(|c| [c[0], c[1], c[2]])
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .copied()
                 .filter(|t| t[0] != t[1] && t[1] != t[2] && t[2] != t[0])
                 .collect();
             let mut mesh = Mesh {
@@ -758,7 +760,7 @@ impl Mesh {
             // kept triangles' original rows ride along for the prop overwrite below.
             let mut tri_geo: Vec<[u32; 3]> = Vec::new();
             let mut kept_rows: Vec<[u32; 3]> = Vec::new();
-            for c in m.tri_verts.chunks_exact(3) {
+            for c in m.tri_verts.as_chunks::<3>().0 {
                 let g = [
                     prop2vert[c[0] as usize],
                     prop2vert[c[1] as usize],
@@ -1587,7 +1589,7 @@ fn cancel_opposed_tris(m: &MeshGl) -> Option<MeshGl> {
     let mut any = false;
     // Key = the sorted triple; the flag encodes the winding CLASS (canonical-cycle orientation).
     let mut queues: HashMap<[u32; 3], [VecDeque<usize>; 2]> = HashMap::new();
-    for (t, c) in m.tri_verts.chunks_exact(3).enumerate() {
+    for (t, c) in m.tri_verts.as_chunks::<3>().0.iter().enumerate() {
         let idx = |i: usize| -> Option<u32> { geo.get(c[i] as usize).copied() };
         let (Some(a), Some(b), Some(cc)) = (idx(0), idx(1), idx(2)) else {
             return None; // out-of-bounds index — let the raw ingest reject
@@ -1614,7 +1616,9 @@ fn cancel_opposed_tris(m: &MeshGl) -> Option<MeshGl> {
     }
     let tri_verts: Vec<u32> = m
         .tri_verts
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .enumerate()
         .filter(|(t, _)| !dead[*t])
         .flat_map(|(_, c)| c.iter().copied())
@@ -1797,7 +1801,7 @@ mod tests {
         let uc = unit_cube();
         // Two unit cubes 10 apart in x.
         let mut verts = uc.vert_properties.clone();
-        for c in uc.vert_properties.chunks_exact(3) {
+        for c in uc.vert_properties.as_chunks::<3>().0 {
             verts.extend_from_slice(&[c[0] + 10.0, c[1], c[2]]);
         }
         let mut tris = uc.tri_verts.clone();
@@ -1871,8 +1875,8 @@ mod tests {
         });
         assert_eq!(red.num_prop, 4); // extras only; interchange (`to_mesh_gl`) would report 7
         assert_eq!(red.properties.len(), 8 * 4); // 8 prop-verts × 4 extras
-        for row in red.properties.chunks_exact(4) {
-            assert_eq!(row, rgba);
+        for row in red.properties.as_chunks::<4>().0 {
+            assert_eq!(*row, rgba);
         }
         assert_eq!(red.volume(), 1.0); // positions untouched
         assert!(red.is_manifold());
@@ -1883,8 +1887,8 @@ mod tests {
                 *n = 2.0 * o;
             }
         });
-        for row in doubled.properties.chunks_exact(4) {
-            assert_eq!(row, [0.4, 0.8, 1.2, 2.0]);
+        for row in doubled.properties.as_chunks::<4>().0 {
+            assert_eq!(*row, [0.4, 0.8, 1.2, 2.0]);
         }
 
         // num_prop == 0 strips back to position-only. Compare against the CANONICALIZED fixture —
@@ -2091,7 +2095,9 @@ mod tests {
         let bits = |m: &Mesh| {
             let mut rows: Vec<[u64; 4]> = m
                 .properties
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|r| {
                     [
                         r[0].to_bits(),

@@ -880,7 +880,9 @@ fn slab_orients(ups: &HashMap<([usize; 3], usize), [f64; 3]>) -> Vec<PieceOrient
 /// `StlMesh` positions (flat, 3 verts/tri) → `[Vec3; 3]` triangles for the orientation math.
 fn mesh_tris(m: &stl::StlMesh) -> Vec<[Vec3; 3]> {
     m.positions
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| std::array::from_fn(|i| Vec3::new(t[i][0] as f64, t[i][1] as f64, t[i][2] as f64)))
         .collect()
 }

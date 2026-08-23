@@ -317,14 +317,14 @@ fn elementwise(op: BinOp, a: &Value, b: &Value) -> Value {
 /// I.5 (echo precision) / K (the harness).
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     let mut lanes = [0.0f64; 4];
-    let (mut ac, mut bc) = (a.chunks_exact(4), b.chunks_exact(4));
-    for (ca, cb) in ac.by_ref().zip(bc.by_ref()) {
+    let ((ac, ar), (bc, br)) = (a.as_chunks::<4>(), b.as_chunks::<4>());
+    for (ca, cb) in ac.iter().zip(bc) {
         lanes[0] += ca[0] * cb[0];
         lanes[1] += ca[1] * cb[1];
         lanes[2] += ca[2] * cb[2];
         lanes[3] += ca[3] * cb[3];
     }
-    for (lane, (&x, &y)) in ac.remainder().iter().zip(bc.remainder()).enumerate() {
+    for (lane, (&x, &y)) in ar.iter().zip(br).enumerate() {
         lanes[lane] += x * y;
     }
     (lanes[0] + lanes[1]) + (lanes[2] + lanes[3])
@@ -899,15 +899,15 @@ fn int_to_f64(x: i64) -> f64 {
 #[cfg(kani)]
 mod proofs {
     /// `dot()`'s 4-lane tail indexes `lanes[lane]` (`lanes: [f64; 4]`) where `lane` enumerates the
-    /// remainder of `chunks_exact(4)` — whose length is ALWAYS < 4 (the std guarantee: a remainder is
+    /// remainder of `as_chunks::<4>()` — whose length is ALWAYS < 4 (the std guarantee: a remainder is
     /// shorter than the chunk size). So every `lane` is a valid index into the 4-lane accumulator. The
     /// invariant is modeled directly (`rem_len < 4`, a symbolic tail length) so CBMC proves the index
-    /// bound without unwinding `Vec`/`chunks_exact` internals — this IS the "indices in bounds" proof.
+    /// bound without unwinding `Vec`/`as_chunks` internals — this IS the "indices in bounds" proof.
     #[kani::proof]
     #[kani::unwind(4)]
     fn dot_tail_index_stays_in_bounds() {
         let rem_len: usize = kani::any();
-        kani::assume(rem_len < 4); // chunks_exact(4).remainder().len() is always < 4
+        kani::assume(rem_len < 4); // as_chunks::<4>().1.len() is always < 4
         let mut lanes = [0.0f64; 4];
         let mut lane = 0usize;
         while lane < rem_len {

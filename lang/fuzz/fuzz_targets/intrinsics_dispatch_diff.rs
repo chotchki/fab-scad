@@ -41,7 +41,7 @@ fuzz_target!(|data: &[u8]| {
             intrinsics,
             ..fab_lang::Config::default()
         };
-        fab_lang::resolve_geometry_with_base_full(&src, &tmp, &[], None, config, |raw: &str| {
+        fab_lang::resolve_geometry_with_base_full(&src, &tmp, &[], config, |raw: &str| {
             Err(fab_lang::Error::Load(format!("no reader for '{raw}'")))
         })
     };

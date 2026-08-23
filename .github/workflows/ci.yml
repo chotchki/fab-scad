@@ -59,6 +59,31 @@ jobs:
       # transpiles the pinned BOSL2 submodule, so `cargo build --workspace` is what proves the emitted
       # band still COMPILES. A coverage number is a lie until it does.
 
+  # The fuzz crates COMPILE-gate. All three are workspace-excluded (cargo-fuzz convention — the
+  # stable root build must never compile nightly+libFuzzer), which means the W.7 `--workspace
+  # --all-targets` doctrine above structurally cannot see them: they are the one code surface only
+  # the nightly builds. AR.21.1 removed a parameter from `resolve_geometry_with_base_full` and the
+  # two fuzz targets still passing `None` for it burned 11 straight red nightlies before anyone
+  # looked — API drift that should have died in the PR. A plain `cargo check` is enough to catch
+  # exactly that class (the sanitizer build stays the nightly's job), and stable suffices: nightly
+  # is a `cargo fuzz run` requirement, not a compile one.
+  fuzz-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No submodules: lang/fuzz stops at fab-lang, and the root crate's `kernel` feature
+      # deliberately excludes the transpiled band — nothing here runs a BOSL2 transpile.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            lang/fuzz
+            fuzz
+            manifold/fuzz
+      - run: cargo check --manifest-path lang/fuzz/Cargo.toml
+      - run: cargo check --manifest-path fuzz/Cargo.toml
+      - run: cargo check --manifest-path manifold/fuzz/Cargo.toml
+
   # TA.3 — the WINDOWS gate, and it exists because its absence shipped two defects in one release.
   #
   # Every other job here is macOS or ubuntu. Windows was compiled ONLY by release-native, which

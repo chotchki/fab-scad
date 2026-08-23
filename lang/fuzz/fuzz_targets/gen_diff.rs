@@ -17,7 +17,7 @@ fuzz_target!(|data: &[u8]| {
     let src = fab_gen::generate_ab(seed); // AB surface: cheap + seedless rands (AS.5)
     let tmp = std::env::temp_dir();
     let run = |config: fab_lang::Config| {
-        fab_lang::resolve_geometry_with_base_full(&src, &tmp, &[], None, config, |raw: &str| {
+        fab_lang::resolve_geometry_with_base_full(&src, &tmp, &[], config, |raw: &str| {
             Err(fab_lang::Error::Load(format!("no reader for '{raw}'")))
         })
     };

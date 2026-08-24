@@ -676,9 +676,12 @@ fn the_generated_programs_actually_reach_the_transpiled_band() {
     let (registry, surface) = harness();
 
     // (1) The surface is the LIBRARY's, not fab-lang's 85 and not the builtins.
+    // 1329 → 1341 at the TC.4 pin bump (v2.0.747 → v2.0.751): upstream added 12 functions
+    // (threading/bottlecaps growth). The number is a non-vacuity floor, so it moves WITH the pin —
+    // in the same commit, with the count taken from the failing assert, never guessed.
     assert_eq!(
         fab_bosl2::Bosl2.callables().len(),
-        1329,
+        1341,
         "the generation surface is not BOSL2's declared set"
     );
 

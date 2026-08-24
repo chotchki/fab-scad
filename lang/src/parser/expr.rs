@@ -477,7 +477,13 @@ fn lc_for(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     let start = i.current_token_start();
     bump(i)?; // 'for'
     expect(i, TokenKind::LParen, "'(' after `for`")?;
-    let init = arg_list_rec(i, depth + 1)?;
+    // Empty INIT (`[for (; cond; update) …]`) — mirrors the spine's For arm (the probe note lives
+    // there). `arg_list_rec` only returns empty on `)`, so the `;` head needs its own gate.
+    let init = if peek_kind(i) == Some(TokenKind::Semi) {
+        Vec::new()
+    } else {
+        arg_list_rec(i, depth + 1)?
+    };
     let kind = if peek_kind(i) == Some(TokenKind::Semi) {
         bump(i)?; // ';'  → C-style
         let cond = expr_recursive(i, depth + 1)?;

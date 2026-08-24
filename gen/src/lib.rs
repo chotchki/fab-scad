@@ -994,12 +994,24 @@ impl Gen {
                 format!("[for ({i} = {r}) if ({i} % {m} == 0) {body}]")
             }
             2 => {
-                // C-style: bounded by construction (i strictly increases to a small cap)
+                // C-style: bounded by construction (i strictly increases to a small cap). The
+                // empty-clause forms ride here low-weighted (TC.5): upstream allows init and
+                // update to each be empty (TC.1 probes) and BOSL2 ≥748's `is_matrix` LIVES on the
+                // empty-init form, so the differential must emit them continuously. Bounds hold by
+                // construction throughout: the empty-init loop carries a paren-let binding the
+                // update strictly increases (the `_im_shape` shape — update-assigned names join
+                // the carried vars), and the empty-update forms make the cond false immediately —
+                // the only bounded shape an updateless loop has.
                 let n = self.int_between(1, 6);
                 self.vars.push(i.clone());
                 let body = self.expr();
                 self.vars.pop();
-                format!("[for ({i} = 0; {i} < {n}; {i} = {i} + 1) {body}]")
+                match self.below(8) {
+                    0 => format!("(let({i} = 0) [for (; {i} < {n}; {i} = {i} + 1) {body}])"),
+                    1 => format!("[for ({i} = 0; {i} < 0;) {body}]"),
+                    2 => format!("[for (; false;) {body}]"),
+                    _ => format!("[for ({i} = 0; {i} < {n}; {i} = {i} + 1) {body}]"),
+                }
             }
             _ => {
                 // let-carrying: [for (i = r) let (t = body) t]
@@ -1365,6 +1377,8 @@ mod tests {
             ("each splice", "each "),
             ("comprehension", "[for ("),
             ("C-style for", " = 0; "),
+            ("C-style empty init", "[for (; "),
+            ("C-style empty update", ";) "),
             ("comprehension if", ") if ("),
             ("indexing", ")["),
             ("swizzle .x", ".x"),
@@ -1508,9 +1522,12 @@ mod tests {
         // Re-baselined 2026-07-28 (AS.5): appending log/is_function to BUILTINS changed
         // `floor(u * len)` on builtin picks — seeds 7 and 1337 moved, the other three did not
         // (the draw COUNT per program is unchanged, only where a pick lands).
+        // Re-baselined 2026-08-23 (TC.5): the C-style comprehension arm gained a below(8) draw to
+        // pick among the empty-clause forms (empty init/update — the BOSL2 ≥748 `is_matrix`
+        // surface), so any seed reaching that arm shifts its stream. Seed 7 alone reaches it.
         const PINNED: &[(u32, usize, &str)] = &[
             (0, 838, "union() {\n  sphe"),
-            (7, 649, "$fn = 4;\ncube([6"),
+            (7, 630, "$fn = 4;\ncube([6"),
             (42, 854, "intersection_for"),
             (1337, 798, "v2 = [for (i0 = "),
             (99_991, 545, "$fn = 9;\nv0 = -2"),

@@ -863,50 +863,21 @@ fn fast_equals_slow_epsilon_family() {
         }
     }
 
-    // is_matrix(A[,m,n,square]).
-    let im_ref = reference_of("is_matrix").unwrap();
-    let im_deps = refs(&[
-        "is_vector",
-        "is_finite",
-        "is_nan",
-        "is_consistent",
-        "_list_pattern",
-    ]);
-    let mut mats = battery.clone();
-    mats.extend([
-        Value::list(vec![
-            Value::num_list(vec![1.0, 2.0]),
-            Value::num_list(vec![3.0, 4.0]),
-        ]),
-        Value::list(vec![
-            Value::num_list(vec![1.0, 2.0]),
-            Value::num_list(vec![3.0]),
-        ]),
-        Value::list(vec![
-            Value::num_list(vec![1.0, 2.0, 5.0]),
-            Value::num_list(vec![3.0, 4.0, 6.0]),
-        ]),
-    ]);
-    let ms = [Value::Undef, Value::Num(2.0), Value::Num(3.0)];
-    let ns = [Value::Undef, Value::Num(2.0), Value::string("n")];
-    let squares = [Value::Bool(false), Value::Bool(true)];
-    for a in &mats {
-        for m in &ms {
-            for n in &ns {
-                for square in &squares {
-                    let args = [a.clone(), m.clone(), n.clone(), square.clone()];
-                    assert!(
-                        same_result(
-                            &with_native(im_ref, &im_deps, &consts, |fx, f| f(fx, &args)),
-                            &interpret_with_deps_consts(im_ref, &im_deps, &consts, &args)
-                        ),
-                        "is_matrix diverged on ({a:?}, m {m:?}, n {n:?}, square {square:?})"
-                    );
-                }
-            }
-        }
-    }
+    // is_matrix's own battery is GONE with its hand row (TC.4): the transpiled band owns the
+    // name, and fab-bosl2's corpus + differentials cover it there. Callers below still exercise
+    // their outward `fx.call_named` dispatch of it via IS_MATRIX_DEF.
 }
+
+/// TC.4 — `is_matrix` retired from the hand registry (the transpiled band owns it), but the
+/// caller natives below dispatch it OUTWARD at runtime, so their test programs must still define
+/// the name. The 747-era five-liner: any self-consistent definition works — both legs of a caller
+/// differential run the SAME interpreted def — and this one keeps the fixtures' expectations.
+const IS_MATRIX_DEF: &str = "function is_matrix(A,m,n,square=false) =
+   is_list(A)
+   && (( is_undef(m) && len(A) ) || len(A)==m)
+   && (!square || len(A) == len(A[0]))
+   && is_vector(A[0],n)
+   && is_consistent(A);";
 
 /// A 2D point as the interpreter builds it.
 fn p2(x: f64, y: f64) -> Value {
@@ -1227,7 +1198,7 @@ fn fast_equals_slow_aggregate_band() {
     let ap_deps: Vec<&str> = shape_deps
         .iter()
         .copied()
-        .chain([reference_of("is_matrix").unwrap(), i2t_ref])
+        .chain([IS_MATRIX_DEF, i2t_ref])
         .collect();
     let mat4 = |rows: [[f64; 4]; 4]| {
         let rows: Vec<Value> = rows.iter().map(|r| Value::num_list(r.to_vec())).collect();
@@ -1312,7 +1283,7 @@ fn fast_equals_slow_aggregate_band() {
         .chain([
             reference_of("same_shape").unwrap(),
             reference_of("is_def").unwrap(),
-            reference_of("is_matrix").unwrap(),
+            IS_MATRIX_DEF,
             pin_reference_of("constrain").unwrap(),
         ])
         .collect();
@@ -1699,7 +1670,7 @@ fn fast_equals_slow_band5_batch2() {
         .iter()
         .copied()
         .chain([
-            reference_of("is_matrix").unwrap(),
+            IS_MATRIX_DEF,
             reference_of("is_vector").unwrap(),
             reference_of("is_consistent").unwrap(),
             reference_of("_list_pattern").unwrap(),
@@ -1733,9 +1704,12 @@ fn fast_equals_slow_band5_batch2() {
         vec![Value::Undef],
     ];
     for args in &ip_cases {
+        // TC.4: `with_native`, NOT the ctx-less pointer call — is_path's `is_matrix` reach is an
+        // OUTWARD `fx.call_named` since the hand row retired, and a `NoClosures` caller has no
+        // program to resolve it against (the old static sibling call needed none).
         assert!(
             same_result(
-                &super::is_path(&crate::surface::NoClosures, args),
+                &with_native(ip_ref, &ip_deps, &consts, |fx, f| f(fx, args)),
                 &interpret_with_deps_consts(ip_ref, &ip_deps, &consts, args)
             ),
             "is_path diverged on {args:?}"
@@ -1969,7 +1943,7 @@ fn fast_equals_slow_o9_tree1() {
             reference_of("vector_angle").unwrap(),
             reference_of("same_shape").unwrap(),
             reference_of("is_def").unwrap(),
-            reference_of("is_matrix").unwrap(),
+            IS_MATRIX_DEF,
             pin_reference_of("constrain").unwrap(),
         ])
         .collect();
@@ -4061,7 +4035,6 @@ fn the_hand_native_cone_runs_generated() {
         "same_shape",
         "is_def",
         "is_vector",
-        "is_matrix",
         "_sum",
         "sum",
         "default",
@@ -4091,6 +4064,10 @@ fn the_hand_native_cone_runs_generated() {
     let mut refs = String::from(
         "_EPSILON = 1e-9;\nPI = 3.141592653589793;\nUP = [0, 0, 1];\nRIGHT = [1, 0, 0];\n",
     );
+    // TC.4: is_matrix is no longer a hand row (the transpiled band owns it), but cone members
+    // still CALL it — outward-dispatched, so the program needs a definition for the name.
+    refs.push_str(IS_MATRIX_DEF);
+    refs.push('\n');
     for name in names {
         refs.push_str(reference_of(name).expect("registered"));
         refs.push('\n');

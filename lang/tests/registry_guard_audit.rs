@@ -57,14 +57,20 @@ fn routed_through_dispatch(entry: &str) -> &'static [&'static str] {
         // The `approx` ↔ `idx` ↔ `posmod` group: its three members, plus `_get_ear`, which calls
         // in and loses `approx` outright. Merged because the SETS are equal, not the reasons.
         "approx" | "idx" | "posmod" | "_get_ear" => &["approx", "idx", "posmod"],
-        // The `is_vector` ↔ `all_nonzero` group, and the three entries that call into it. Same:
-        // one member and three callers, one set.
-        "is_vector" | "is_vnf" | "determinant" | "constrain" => &["all_nonzero"],
+        // The `is_vector` ↔ `all_nonzero` group, and the entries that call into it. Same:
+        // members and callers, one set each.
+        "is_vector" | "is_vnf" => &["all_nonzero"],
+        // TC.4 — `is_matrix` RETIRED to the transpiled band: its hand row is gone, so every old
+        // sibling call to it compiles to `fx.call_named` and resolves against the running program
+        // (the same AR.27 argument as `_fab_poc_absent` — dispatched calls bake nothing, so there
+        // is nothing for a dep pin to prove). These entries also rode the is_vector group.
+        "determinant" | "constrain" => &["all_nonzero", "is_matrix"],
+        "_apply" | "is_path" | "vector_angle" => &["is_matrix"],
         "all_nonzero" => &["is_vector"],
         // `_vnf_centroid` still INLINES `approx` (and so still guards its `abs`/`is_bool`); it only
         // stops inheriting what `approx` itself used to reach.
         "_vnf_centroid" => &["idx", "posmod"],
-        "affine3d_rot_from_to" => &["all_nonzero", "idx", "posmod"],
+        "affine3d_rot_from_to" => &["all_nonzero", "idx", "posmod", "is_matrix"],
         _ => &[],
     }
 }
@@ -95,7 +101,7 @@ fn pruned_by_author(entry: &str) -> &'static [&'static str] {
         "select" | "_none_inside" | "_get_ear" | "vector_axis" => &["all_nonzero"],
         "unit" | "_bt_search" | "_point_dist" => &["all_nonzero", "abs"],
         "_vnf_centroid" | "v_abs" => &["all_nonzero", "norm"],
-        "is_matrix" | "sum" | "_apply" | "is_path" | "v_theta" => &["all_nonzero", "abs", "norm"],
+        "sum" | "_apply" | "is_path" | "v_theta" => &["all_nonzero", "abs", "norm"],
         // `apply` adds the sum family: its `is_matrix`/`is_vector` shape tests never reach the
         // point-list branch that would call `sum`/`_sum`.
         "apply" => &["all_nonzero", "abs", "norm", "sum", "_sum"],

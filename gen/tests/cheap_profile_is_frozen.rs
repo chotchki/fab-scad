@@ -31,9 +31,12 @@ fn corpus_digest() -> u64 {
 
 #[test]
 fn the_cheap_corpus_has_not_moved() {
+    // Re-captured 2026-08-23 (TC.5): the C-style comprehension arm gained the empty-clause forms
+    // (empty init/update — the BOSL2 ≥748 `is_matrix` surface), a DELIBERATE program-space change:
+    // the fuzz corpora re-explore, which is the point of adding the arm.
     assert_eq!(
         corpus_digest(),
-        0xd4c4_ae68_e161_32b2,
+        0x8c1a_f341_64cc_1ee1,
         "the `cheap` profile's output changed — every gen_diff / jit_dispatch_diff corpus entry and the \
          AJ.1 coverage gate now describe a different program space. Intentional? re-capture. Otherwise \
          the profile refactor leaked."

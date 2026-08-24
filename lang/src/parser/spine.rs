@@ -227,6 +227,22 @@ fn operand(
             Some(TokenKind::For) => {
                 bump(i)?; // 'for'
                 expect(i, TokenKind::LParen, "'(' after `for`")?;
+                // Empty INIT — `[for (; cond; update) …]`, the C-style head BOSL2 ≥748's
+                // `_im_shape`/`_im_check_shape` lean on (TC.1). Oracle-probed 2026-08-23: init and
+                // update may each be empty (update already lands via LcForCCond's `)` peek); the
+                // CONDITION may not, and the STATEMENT `for` rejects empty clauses too — both stay
+                // strict because this arm is comprehension-only.
+                if peek_kind(i) == Some(TokenKind::Semi) {
+                    bump(i)?; // ';' → C-style with no init bindings
+                    frames.push(Frame::LcForCCond {
+                        start,
+                        init: Vec::new(),
+                    });
+                    return Ok(Mode::Operand {
+                        vec_elem: false,
+                        top: true,
+                    });
+                }
                 return begin_args_or_empty(
                     i,
                     frames,
@@ -1413,6 +1429,11 @@ mod tests {
             "[for (i = r, j = s) i + j]",
             "[for (i = 0; i < 5; i = i + 1) i]",
             "[for (i = 0; i < 5; i = i + 1, j = j - 1) i]",
+            // empty C-style clauses (TC.1): init, update, both — cond stays required
+            "[for (; i < 5; i = i + 1) i]",
+            "[for (i = 0; i < 5;) i]",
+            "[for (; x;) 1]",
+            "[for (; is_list(l) && len(l) > 0; l = l[0]) len(l)]",
             "[each list]",
             "[each [1, 2]]",
             "[for (i = r) if (i > 0) i]",

@@ -64,9 +64,7 @@ pub(super) use fingerprint::fingerprint;
 #[cfg(test)]
 use generated::{_fab_poc_isup as poc_isup, _fab_poc_near0 as poc_near0, _fab_poc_sq as poc_sq};
 #[cfg(test)]
-use generated::{
-    affine3d_identity, force_list, ident, in_list, is_2d_transform, is_consistent, is_path,
-};
+use generated::{affine3d_identity, force_list, ident, in_list, is_2d_transform, is_consistent};
 #[cfg(test)]
 use generated::{point2d, vector_axis};
 // AR.17 stage A — these hand natives are DELETED; their direct-call unit tests now exercise the
@@ -954,7 +952,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         // The is_vector cone (+ det2's is_def and sum's _sum) rides in transitively — the
         // derived audit folds a dep's closure into the caller's guard set.
-        deps: &["det2", "det3", "det4", "is_matrix", "sum", "_sum", "is_def", "is_vector", "is_consistent", "_list_pattern", "is_finite", "is_nan"],
+        deps: &["det2", "det3", "det4", "sum", "_sum", "is_def", "is_vector", "is_consistent", "_list_pattern", "is_finite", "is_nan"],
         builtins: &["is_list", "len", "is_undef", "cross", "is_num", "norm"],
         func: generated::determinant,
     },
@@ -964,7 +962,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts: &[],
         consts_v: &[],
         // The is_vector cone + list_to_matrix's `default` ride in transitively.
-        deps: &["is_vector", "is_matrix", "flatten", "list_to_matrix", "default", "is_consistent", "_list_pattern", "is_finite", "is_nan"],
+        deps: &["is_vector", "flatten", "list_to_matrix", "default", "is_finite", "is_nan"],
         builtins: &["is_num", "max", "min", "is_list", "len", "is_undef", "norm"],
         func: generated::constrain,
     },
@@ -1106,22 +1104,13 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &["is_list", "len", "is_undef", "is_num", "norm"],
         func: generated::is_vector,
     },
-    // `is_vector(A[0],n)` is a fixed 2-arg call, so the zero/norm and all_nonzero branches are unreachable
-    // from is_matrix — the deps close over what interpreting THIS reference can run, not all of is_vector.
-    Entry {
-        name: "is_matrix",
-        reference: "function is_matrix(A,m,n,square=false) =
-   is_list(A)
-   && (( is_undef(m) && len(A) ) || len(A)==m)
-   && (!square || len(A) == len(A[0]))
-   && is_vector(A[0],n)
-   && is_consistent(A);",
-        consts: &[],
-        consts_v: &[],
-        deps: &["is_vector", "is_finite", "is_nan", "is_consistent", "_list_pattern"],
-        builtins: &["is_list", "len", "is_undef", "is_num"],
-        func: generated::is_matrix,
-    },
+    // TC.4 — `is_matrix` RETIRED to the transpiled band. BOSL2 v2.0.751 rewrote it into a
+    // tensor rank/shape check (`_im_shape`/`_im_check_shape`, empty-init C-style comprehensions);
+    // re-deriving the hand row would invest in the tier AR.1 schedules for deletion, so the row is
+    // gone instead and fab-bosl2's regenerated native owns the name. Callers here that used to
+    // sibling-call it now emit `fx.call_named` (the AR.27 outward mechanism) and carry NO dep pin
+    // for it — a dispatched call resolves against the running program, so there is no baked
+    // semantics to pin.
     // ── O.5.3, the EARCUT band (geometry.scad) ───────────────────────────────────────────────────────────
     // BOSL2 triangulates every VNF polygon by ear-cutting IN THE INTERPRETER: `_tri_class` (the CW/CCW/
     // collinear classifier) is 12.4s/3.9M calls across the O.4 four — window_air_cover's single biggest
@@ -1282,16 +1271,8 @@ pub(super) static REGISTRY: &[Entry] = &[
                           \"), data of dimension \",datadim));",
         consts: &[],
         consts_v: &[],
-        deps: &[
-            "is_matrix",
-            "is_vector",
-            "is_finite",
-            "is_nan",
-            "is_consistent",
-            "_list_pattern",
-            "is_2d_transform",
-        ],
-        builtins: &["is_list", "len", "is_undef", "is_num", "concat", "str"],
+        deps: &["is_2d_transform"],
+        builtins: &["len", "concat", "str"],
         func: generated::_apply,
     },
     Entry {
@@ -1345,7 +1326,6 @@ pub(super) static REGISTRY: &[Entry] = &[
             "_list_pattern",
             "is_consistent",
             "is_vector",
-            "is_matrix",
             "is_finite",
             "is_nan",
             "constrain",
@@ -1552,12 +1532,9 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts: &[],
         consts_v: &[],
         deps: &[
-            "is_matrix",
             "is_vector",
             "is_finite",
             "is_nan",
-            "is_consistent",
-            "_list_pattern",
             "in_list",
             "is_def",
             "force_list",
@@ -1707,7 +1684,7 @@ pub(super) static REGISTRY: &[Entry] = &[
     ];",
         consts: &[],
         consts_v: &[],
-        deps: &["is_vector", "is_finite", "is_nan", "unit", "point3d", "point2d", "approx", "affine3d_identity", "ident", "affine3d_zrot", "v_theta", "vector_axis", "v_abs", "vector_angle", "same_shape", "is_def", "is_matrix", "is_consistent", "_list_pattern", "constrain"],
+        deps: &["is_vector", "is_finite", "is_nan", "unit", "point3d", "point2d", "approx", "affine3d_identity", "ident", "affine3d_zrot", "v_theta", "vector_axis", "v_abs", "vector_angle", "same_shape", "is_def", "is_consistent", "_list_pattern", "constrain"],
         builtins: &["is_list", "len", "is_undef", "is_num", "norm", "abs", "cross", "atan2", "sin", "cos", "acos", "min", "max", "is_bool"],
         func: generated::affine3d_rot_from_to,
     },

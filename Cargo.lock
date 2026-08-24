@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "fab-gui"
-version = "1.3.4"
+version = "1.3.5"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2894,7 +2894,7 @@ dependencies = [
 
 [[package]]
 name = "fab-scad"
-version = "1.3.4"
+version = "1.3.5"
 dependencies = [
  "anyhow",
  "bincode",

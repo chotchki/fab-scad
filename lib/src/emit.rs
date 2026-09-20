@@ -345,12 +345,24 @@ fn callee_shape(callee: &Expr) -> &'static str {
 /// besides: the island binds exactly what the library wrote, so the two cannot disagree about what
 /// the constant means. The bootstrap path, whose registry entries carry values rather than source,
 /// still re-renders — and still refuses non-finite, because there it genuinely has nothing better.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Baked {
     /// The value the native compiles in.
     pub value: fab_lang::Value,
     /// What the fallback island binds. The library's own source where there is one.
     pub scad: String,
+}
+
+/// BIT-level, matching the arm-time guard's notion of "unchanged" ([`fab_lang::value_bits_eq`]):
+/// same-bits NaNs are EQUAL, `0.0`/`-0.0` are DISTINCT. A derived PartialEq would ride `Value`'s,
+/// where NaN != NaN — and BOSL2 v2.0.752 is the first tree where two compiled subjects both bake
+/// `NAN = acos(2)`, so the derive read a self-consistent batch as a conflict (TD.2). Distinct NaN
+/// PAYLOADS still conflict, which is what the guard needs: `value_to_scad` formats every NaN alike,
+/// so bits are the only spelling that can tell them apart.
+impl PartialEq for Baked {
+    fn eq(&self, other: &Self) -> bool {
+        fab_lang::value_bits_eq(&self.value, &other.value) && self.scad == other.scad
+    }
 }
 
 impl Baked {
@@ -3525,7 +3537,7 @@ pub fn generate_batch(subjects: &[Subject<'_>], declared: &[&str]) -> Result<Str
     for subject in subjects {
         for (n, b) in &subject.baked {
             if let Some(prev) = expectations.insert(n, b)
-                && prev.value != b.value
+                && prev != b
             {
                 return Err(format!("const `{n}` baked differently across the batch"));
             }
@@ -4244,6 +4256,36 @@ fn walk(e: &Expr, scope: &mut Vec<String>, out: &mut Analysis) {
 )]
 mod tests {
     use super::analyze_function;
+
+    /// TD.2 — `Baked` equality is BIT-level, the arm-time guard's spelling. The derived
+    /// (`Value`) PartialEq called NaN unequal to itself, which read BOSL2 v2.0.752's two
+    /// `NAN = acos(2)` bakes as a cross-batch conflict and killed the build.
+    #[test]
+    fn baked_equality_is_bit_level() {
+        use super::Baked;
+        use fab_lang::Value;
+        let nan = Baked::from_source(Value::Num(f64::NAN), "acos(2)");
+        assert_eq!(nan, nan.clone(), "same-bits NaN bakes are the SAME bake");
+        let other_payload = Baked::from_source(
+            Value::Num(f64::from_bits(f64::NAN.to_bits() ^ 1)),
+            "acos(2)",
+        );
+        assert_ne!(
+            nan, other_payload,
+            "distinct NaN payloads still conflict — value_to_scad formats every NaN alike, so bits are the only spelling that can tell them apart"
+        );
+        let pos = Baked::from_source(Value::Num(0.0), "0");
+        let neg = Baked::from_source(Value::Num(-0.0), "0");
+        assert_ne!(
+            pos, neg,
+            "0.0/-0.0 stay DISTINCT — the determinism doctrine"
+        );
+        let renamed = Baked::from_source(Value::Num(f64::NAN), "0/0");
+        assert_ne!(
+            nan, renamed,
+            "the island's verbatim source is part of identity: same bits, different scad is a conflict"
+        );
+    }
 
     /// AR.20 — the MODULE half of the coverage ratchet, and the roadmap for what modules need
     /// next. Same contract as the function ratchet: a floor that must not fall, plus a decline

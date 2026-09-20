@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "scad-rs: an OpenSCAD-language front end in Rust, feeding the Manifold kernel"
 license = "GPL-2.0-or-later"
+# Matches fab-lib: nothing here is published, so a `pub` addition (TD.2's `value_bits_eq`) is not a
+# semver event and CI needs no API gate to say so.
+publish = false
 
 [lib]
 name = "fab_lang"

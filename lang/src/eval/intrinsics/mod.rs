@@ -1803,7 +1803,12 @@ pub fn assert_decline() -> crate::Error {
 /// `to_bits` (same-bits NaNs are EQUAL, `0.0`/`-0.0` are DISTINCT — the determinism doctrine), lists
 /// recurse, and the VARIANT must match exactly (a `NumList` never equals the element-wise-equal `List` —
 /// conservative: an unexpected construction declines rather than wires).
-pub(crate) fn value_bits_eq(a: &Value, b: &Value) -> bool {
+///
+/// Public because the transpiler's build-time bake dedup must spell equality the SAME way this
+/// arm-time guard does: `Value`'s own `PartialEq` calls NaN unequal to itself, which read BOSL2
+/// v2.0.752's two `NAN = acos(2)` bakes as a batch conflict (TD.2).
+#[must_use]
+pub fn value_bits_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => x.to_bits() == y.to_bits(),
         (Value::NumList(x), Value::NumList(y)) => {

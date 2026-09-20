@@ -73,6 +73,9 @@ pub use eval::intrinsics::native_rt::peak_native_depth;
 pub use eval::intrinsics::surface::{
     SurfaceDomain, SurfaceFn, SurfaceParam, native_surface, widest_domain,
 };
+/// TD.2 — the arm-time const guard's bit-level equality, published so the transpiler's build-time
+/// bake dedup compares the same way (a `Value` `PartialEq` calls NaN unequal to itself).
+pub use eval::intrinsics::value_bits_eq;
 pub use eval::module_rt::native_module_runs;
 pub use eval::rng::RandStream;
 pub use eval::{

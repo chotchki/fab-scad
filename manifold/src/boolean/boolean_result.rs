@@ -1243,6 +1243,67 @@ mod tests {
         assert!(saw_zero, "the cut faces from B carry zero properties");
     }
 
+    /// AO.17 — a MIRRORED boolean output keeps its prop refs valid. `flip_tris` used to stamp
+    /// `prop_vert = end_vert` — a POSITION id, coincidentally right only while `prop_vert ==
+    /// start_vert` (position-only meshes, every mirror test until now). A boolean output whose
+    /// property table DEDUPES (here: the colored operand is swallowed, so every surviving corner
+    /// shares one zero row — 1 row, 8 verts) breaks the coincidence: the stamp wrote vert ids into
+    /// prop refs, and the NEXT boolean's `create_properties` read `properties[num_prop * vert_id]`
+    /// — OOB. Found by gen-perf (dial 4, seed 464) as `mirror(union(sphere, color cube))` inside a
+    /// `difference`. The pinned v3.5.1 `FlipTris` has a DIFFERENT bug at this line — a `{2,1,0}`
+    /// shuffle of valid prop ids, so miscoloured mirrors rather than an OOB (elalish/manifold#1781,
+    /// fixed upstream in `422ab6fce`); `flip_tris` in mesh.rs spells out all three permutations.
+    #[test]
+    fn mirrored_boolean_output_keeps_prop_refs_valid() {
+        use crate::linalg::{Mat3x4, Vec3};
+        use crate::mesh_ids::TriId;
+
+        // Colored unit cube FULLY INSIDE an uncolored 4³ cube: union output = the big cube's
+        // faces only, all sharing create_properties' single missing-prop row.
+        let big = cube(0.0, 0.0, 0.0)
+            .transform(Mat3x4::scale(Vec3::splat(4.0)))
+            .unwrap();
+        let small = cube(1.5, 1.5, 1.5).set_properties(4, |new, _pos, _old| {
+            new.copy_from_slice(&[1.0, 0.0, 0.0, 1.0])
+        });
+        let joined = boolean(&big, &small, OpType::Add);
+        assert_eq!(joined.num_prop, 4, "num_prop = max(0, 4)");
+        assert!(
+            joined.num_prop_vert() < joined.num_vert(),
+            "setup must produce a DEDUPED table (rows {} < verts {}) or the stamp stays coincidentally in range",
+            joined.num_prop_vert(),
+            joined.num_vert()
+        );
+
+        let mirrored = joined
+            .transform(Mat3x4::scale(Vec3::new(-1.0, 1.0, 1.0)))
+            .unwrap();
+        assert!(mirrored.is_manifold(), "mirror must stay manifold");
+        for tri in 0..mirrored.num_tri() {
+            let t = TriId::from_usize(tri);
+            for i in 0..3 {
+                let pv = mirrored.prop(t.halfedge(i));
+                assert!(
+                    pv.is_some() && pv.u() < mirrored.num_prop_vert(),
+                    "tri {tri} corner {i}: prop ref {pv:?} must index the {}-row table",
+                    mirrored.num_prop_vert()
+                );
+            }
+        }
+
+        // The original crash shape: a further boolean READS those refs. The mirrored solid must be
+        // the MINUEND — the probe sits strictly inside its [-4,0]×[0,4]² footprint, so
+        // `probe - mirrored` is EMPTY, and `is_manifold()` is unconditionally true on an empty mesh.
+        // Spelled that way round this assertion passes without reading a single prop ref.
+        let probe = cube(-2.0, 1.0, 1.0);
+        let cut = boolean(&mirrored, &probe, OpType::Subtract);
+        assert!(
+            cut.num_tri() > 0,
+            "the cut must produce geometry, or the manifold check below is vacuous"
+        );
+        assert!(cut.is_manifold(), "the follow-up boolean must survive");
+    }
+
     /// M.3.4b.7 — a property-carrying boolean output SURVIVES a MeshGL serialization round-trip. The
     /// seam-split prop-verts become coincident interchange rows tagged by merge-vectors; re-import folds
     /// them back into a manifold with the properties intact. Then CHAINED: the re-imported coloured mesh

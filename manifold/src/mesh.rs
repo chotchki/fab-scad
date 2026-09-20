@@ -1347,12 +1347,31 @@ impl Mesh {
             // New slot i is sourced from old slot [2,1,0][i] with start/end swapped.
             let src = [base + 2, base + 1, base];
             for (i, &s) in src.iter().enumerate() {
-                // End of half-edge `s` = start of the next half-edge in its (same) triangle.
-                let end_vert = old[base + (s - base + 1) % 3].start_vert;
+                // End of half-edge `s` = start of the next half-edge in its (same) triangle — and
+                // the prop ref RIDES WITH THAT CORNER, which is `(p0, p2, p1)`. THREE spellings of
+                // this exist and only one is right, so name all three (AO.17):
+                //   pinned v3.5.1 `FlipTris`: `SetProp(3*tri+i, face[i].propVert)` off the
+                //     already-reversed `face` = `(p2, p1, p0)` — right field, WRONG permutation. It
+                //     shuffles VALID ids, so it cannot go out of bounds; it just miscolours every
+                //     mirror (elalish/manifold#1781).
+                //   this line, as it used to read (`prop_vert = end_vert`): `(v0, v2, v1)` — right
+                //     permutation, WRONG FIELD, and that bug is OURS, not a faithful port of
+                //     theirs. Coincidentally correct on position-only meshes where
+                //     `prop_vert == start_vert` by construction; on a DEDUPED property table it
+                //     writes VERT ids into PROP refs and the next boolean reads
+                //     `properties[num_prop * vert_id]` — OOB.
+                //   upstream `422ab6fce` (the fix for #1781): computes the props permutation
+                //     SEPARATELY from the halfedges = `(p0, p2, p1)`, which is what `next.prop_vert`
+                //     yields below.
+                // So this line is deliberately AHEAD of the v3.5.1 pin. The fix is in no Manifold
+                // RELEASE — the 3.5.x maintenance branch never took it — which is why a
+                // release-watch would never surface it and a master watch is the only design that
+                // would (TE.4).
+                let next = &old[base + (s - base + 1) % 3];
                 self.halfedge[base + i] = Halfedge {
-                    start_vert: end_vert,
+                    start_vert: next.start_vert,
                     paired_halfedge: flip_halfedge(old[s].paired_halfedge),
-                    prop_vert: end_vert,
+                    prop_vert: next.prop_vert,
                 };
             }
         }

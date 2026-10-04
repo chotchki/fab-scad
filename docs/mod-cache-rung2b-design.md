@@ -2,7 +2,7 @@
 
 Status: DESIGN (BU.8, decided 2026-07-16) — builds on the shipped rung 2a
 (`lang/src/eval/mod_cache.rs`, J.5.2a). Sequenced after the BU.4.6 kernel parallelization lands;
-feeds the cache-default-ON decision and the BU.7 cache-leverage measurement (PLAN.md).
+feeds the cache-default-ON decision and the BU.7 cache-leverage measurement (PLAN_ARCHIVE.md).
 
 ## The problem, in one sentence
 

@@ -2,7 +2,7 @@
 
 Round 2, 2026-07-04 (round 1 + chotchki's inline comments absorbed as decisions). `[OPEN]`
 marks what's still unsettled. The workflow tool's spec moved to SPEC_workflow.md — it keeps
-working and its backlog waits in PLAN.md.
+working and its backlog waits in openspec/backlog.md.
 
 ## Mission
 

@@ -162,7 +162,7 @@ rendered around the canvas server-side); /projects links to it. v1 is single-thr
 dependency. Stretch for later: showcase pages deep-linking a published model's STL INTO the
 slicer (same-origin media fetch, works under COEP `require-corp`).
 
-## What the spike must answer (→ PLAN.md Phase 18)
+## What the spike must answer (→ PLAN_ARCHIVE.md Phase 18)
 
 1. Native: does cargo-packager produce a working .app+DMG and a Windows installer for our
    two-binary workspace? (Expect yes — this spike is mostly turning the crank + writing down

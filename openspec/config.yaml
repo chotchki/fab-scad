@@ -1,0 +1,61 @@
+schema: spec-driven
+
+context: |
+  fab-scad: a from-scratch Rust reimplementation of OpenSCAD (the language, fab-lang in lang/, over a
+  pure-Rust port of the Manifold kernel, fab-manifold in manifold/) plus the print workflow around it
+  (slice, connect, pack, export, publish), shipped as one Bevy + egui app on the desktop and in the
+  browser plus the `fab` CLI beside it. Stock OpenSCAD is the ORACLE, never a dependency of the app or
+  the web build (`fab render` still defaults to the OpenSCAD binary on purpose: it is the
+  differential): correct means matching its echo, warnings and geometry, and upstream's recorded test
+  outputs are the conformance spec. BOSL2, MCAD and machineblocks are pinned submodules that lib/'s
+  build-time transpiler compiles into the bosl2/, mcad/ and machineblocks/ crates. README.md is the
+  map. A docs/*.md named for a subsystem owns it (transpiler-design, sustainment, packaging,
+  web-embed, geometry-service ...); the spike dossiers, the blog post and the JIT docs are history.
+  SPEC.md owns scad-rs, SPEC_workflow.md the print workflow, SPEC_manifold-rs.md (+ _R1) the kernel
+  port, and gui/CLAUDE.md the GUI conventions. Read the owning doc BEFORE proposing a change to that
+  subsystem, and treat it as source material for specs, not text to copy (duplicates drift).
+
+  Specs grow one change at a time: openspec/specs/ started EMPTY on 2026-10-04 and never gets a bulk
+  backfill. A change that alters behavior ADDs or MODIFIEs the requirements it touches; a pure
+  refactor, perf, tooling or docs change sets skip_specs: true in its .openspec.yaml. Every change
+  that came over from PLAN.md starts with skip_specs: true.
+
+  Phase ids carry over from the PLAN.md era, because ~3000 lines of code comments (279 files) and half
+  the commit subjects cite them ("AR.26", "TE.4a"). A change is named <id>-<slug>, where <id> is the
+  next two-letter id, spreadsheet-style, after the highest one under openspec/changes/ (archive/
+  included, ignoring the YYYY-MM-DD- prefix an archived folder gets) and in PLAN_ARCHIVE.md. PLAN-era
+  ids ran in three interleaved two-letter runs (AA-AS, SU-SZ, TA-TE) plus a lone BU, beside numbered
+  phases (0-18) and single letters; TE was the highest, so the next is TF, and TZ rolls to UA. Gaps
+  (e.g. AT-AZ, BA-BT, SA-ST, D/E/F) are never backfilled, because a backfilled id reads as older than
+  it is. Tasks are numbered <ID>.<N> (TF.1, TF.2 ...) and in a new change <ID>.0 is the phase-exit
+  criterion. Changes that came over from PLAN.md keep their numbering, and no migrated .0 is an exit:
+  AR.0 is a ticked go/no-go rule (AR's direction box is AR.1) and TE.0 is a DIRECTION box.
+
+  Pre-OpenSpec history lives in PLAN_ARCHIVE.md (frozen) and git log. Unphased ideas and tech debt
+  live in openspec/backlog.md: promoting one means proposing a change and deleting its backlog line.
+
+rules:
+  proposal:
+    - Under Impact, name the doc that owns the subsystem (a docs/*.md, a SPEC*.md or gui/CLAUDE.md), or say that none does
+    - State the release reach (CI on every push; a v* tag puts the macOS dmg/.app, the Windows installer and the web bundle on one GitHub release and publishes latest.json to the macOS auto-updater; hotchkiss.io moves only when its own build.rs pin does) and any one-way door (a published latest.json reaches every installed app that checks; the updater signing key cannot rotate without a bridge release)
+  specs:
+    - Requirements describe observable behavior (what a .scad renders, echoes or warns against the OpenSCAD oracle, fab CLI verbs and exit codes, what the GUI shows, the files written), never internal type or function names
+  tasks:
+    - Number tasks <ID>.<N> under one "## <ID>. <title>" group, where <ID> is the change name's id prefix in uppercase
+    - <ID>.0 is the phase exit and says so - every box ticked, every ci.yml job green on the landing commit (ci.yml is the gate list, don't restate it here; boot-gate is where the browser e2e runs), any e2e lane CI doesn't run that the change touches (packaging/web/e2e-save.sh runs only on a release tag), the owning doc updated
+    - Unit tests ship in the same task as the code they cover, never in a trailing "add tests" task
+    - End with a docs task (the owning doc, plus README.md when the user-facing surface moved) and, for anything that ships, a release task (a v* tag, only on chotchki's word)
+
+operations:
+  apply:
+    guidance:
+      - Tick each box the moment its work is done, not in batches - chotchki watches tasks.md live
+      - When a box can't be finished, split it - tick what shipped and add a new unchecked box for what's left; partial or expanded work never goes undocumented
+      - Run full suites unpiped into a file and read the file (`cargo nextest run --workspace | tail` masks cargo's exit code and truncates the log)
+      - Plain `cargo test` covers only the default member (fab-scad), so a phase-exit run is always --workspace; cfg(wasm32) code needs the wasm build too, since no native check compiles it
+      - Keep cargo fmt and cargo clippy --workspace --all-targets -D warnings at zero (.githooks/pre-push runs both)
+  archive:
+    guidance:
+      - Archive only once the change has reached its users - in a v* release if it touches what ships (a change aimed at hotchkiss.io's users also waits for hotchkiss-io's pin, or says why not), on main if it is CI-, test- or tooling-only - because archived always reads as released; a landed-but-unreleased change stays in openspec/changes/ with every box ticked
+      - Archive only when the exit criterion holds (<ID>.0 in a new change, every box ticked in a migrated one); open boxes get split or descoped to openspec/backlog.md first
+      - Sync any delta specs into openspec/specs/ before moving the folder

@@ -1,0 +1,43 @@
+# Phase R - Generator + success-function search (perf + correctness fitness)
+
+## Why
+
+K.3's generator only SAMPLES (seed → program → label), so it finds a bad program only when a seed happens to land on one. R puts a pluggable objective on that fixed machinery ("generation is fixed machinery; the success function is the pluggable objective", `3e319c3a`): deterministic interpreter cost first, then divergence from the OpenSCAD oracle. The corpus then ranks the worst inputs, and later hunts for them.
+
+## What Changes
+
+- Shipped: R.1–R.1.3 in `3e319c3a` (2026-07-10), all still on HEAD. `fab_lang::evaluate_geometry_metered` returns `(Result<Geo>, eval_steps)` under a budget (`lang/src/eval/mod.rs:2904`, pinned by `metered_cost_is_monotone_deterministic_and_bounded`). `scad-gen` writes `cost` on every manifest line and `<out>/perf_report.md`: percentiles, a decade histogram and the top-20 replayable seeds (`gen/src/main.rs:192`, `:245`). Two tests pin it, `cost_is_deterministic_and_monotone` and `perf_report_ranks_worst_case_first`. They run in the workspace nextest job. scad-gen itself runs in no workflow, so the report is something you run by hand.
+- R.1's prose is stale, and no box tracks it. AR.21.1 (`cf0428c6`) deleted the JIT check scad-gen labeled with. The comments outlived it:
+  - `gen/src/main.rs:1-13` still documents a `jit` manifest field and a copy into `divergences/`. The directory is still created (`:87-89`) and nothing writes to it.
+  - `gen/src/lib.rs:21` says the binary runs the JIT check, and `:29` and `:116` name the deleted `jit_dispatch_diff` target.
+  - The report's doc comment (`main.rs:243`) aims the ranking at "the JIT/cache/intrinsics". AR.21 deleted the JIT outright and the hand-written intrinsics (`1ea52a5a`); the native tier is transpiler output now, and only the caches stand as written.
+- R.2 (OPEN): the echo half has shipped under other ids. `fab gen-diff` calls itself "R.2's values/echo first made concrete" (`src/gendiff.rs:5`). It landed as AJ.8 (`1af83abc`), went through the AK cycles (`69d1828b`: 3000 seeds, 0 unexplained) and has run nightly since AL.1–3 (`7dc5f217`). Tonight's sustain run (37203195228, 2026-10-04, issue #1) was 1000/1000 echo-match against OpenSCAD 2026.10.03, 0 diverged. The library surfaces were diffed against OpenSCAD by hand at landing: 200/200 for BOSL2 (AR.36, `b771794a`, after a 60-seed first run) and 200/200 for MCAD (AR.37.2, `28926b17`). The nightly runs the builtin surface only (`sustain.yml:146`), although its checkout already pulls submodules (`:42`).
+- R.2's geometry half has not been built, and the gate it waited on no longer exists. J.4.5 was ticked RESOLVED on 2026-07-17 (`262e99a1`: the Rust kernel runs rayon, not TBB). S.4 then closed with determinism by construction (`17274a94`, guarded by `tests/determinism_render.rs`). S.3 (native vs wasm) is still open, but it does not gate a native-vs-oracle diff.
+  - What's left is wiring. gen-diff builds our solid and throws it away (`src/gendiff.rs:327`, `let _solid`). The oracle's OFF export is written and then deleted unread (`:417`). The mesh tiers already exist in `src/differ.rs`. `tests/differential.rs` gates hand-written snippets on genus + boolean residual through `diff`/`diff_within`; the volume tier lives only in `differ::compare`, which only differ.rs's own `$fn` sweep calls (`:809`).
+  - Three calls the box doesn't name. First, the threshold: SPEC.md's G.3.7 gate is residual < 1e-5 (`SPEC.md:301`), while `differ::diff` uses 1e-3. Second, the generator emits partial `rotate_extrude` with angle 30–360 (`gen/src/lib.rs:714-719`). That is J.3.5's documented relaxed class, so a strict gate would report a known tessellation artifact as a divergence. Third, 2D and empty top levels (5/1000 oracle-export failures with agreeing eval tonight; the report doesn't split them by cause). differ.rs lowers ours to `Empty` but `oracle::run` turns the failed export into `Rejected`, so its taxonomy reused as-is reads them as a shape-class mismatch, despite differ.rs:385's "likewise empty" comment.
+- AO.6 is ticked as gating gen-perf timing on "echo + geometry residual", but `one_seed` gates on echo only (`src/genperf.rs:181-190`). No lane compares generated geometry with OpenSCAD today.
+- R.3 (OPEN, nothing built): seeds are sampled in order (`gen/src/main.rs:102`). The closest things to a search are the generator-driven fuzz targets, where libFuzzer mutates 4 seed bytes under coverage guidance against an A/B oracle, not a score: `gen_diff` (caches off vs on) and `intrinsics_dispatch_diff` (native tier off vs on, twice gen_diff's budget share) in `fuzz.yml`, plus `bosl2_dispatch_diff`, which no workflow runs.
+  - A seed has no locality: one MT19937 stream means neighboring seeds give unrelated programs. "Evolve seeds" is therefore random search. The real genome is the draw sequence, since every grammar choice goes through `below`/`chance`/`int_between` on one `RandStream` (`gen/src/lib.rs:378`, `:456-494`). That stream is the seam to record and mutate. Any refactor must keep seeded output byte-identical, because `the_cheap_corpus_has_not_moved` hashes 2000 seeds.
+  - Worth asking whether R.3 still pays for itself. Its perf half lost two of its three named consumers (the JIT, the hand intrinsics). The transpiled tier that replaced the intrinsics runs library code, which scad-gen's builtin-only surface never calls, so as built the ranking reaches only the caches. Its correctness half competes with sampling, which already finds more than gets triaged. Tonight's weekly gen-perf table lists 15 per-dial disagreements (14 unique: seed 51's repeats at dials 4 and 8) across dials 2–16, and AO.16 owns them, untriaged.
+- R then reduces to the gen-diff geometry channel (R.2's second half), a go/no-go on R.3, the untracked cleanup (R.1's stale JIT prose, AO.6's box text) and an optional library-surface nightly.
+
+## Capabilities
+
+### New Capabilities
+
+None declared yet. This change came over from PLAN.md on 2026-10-04 as a task list, not a spec, so `.openspec.yaml` carries `skip_specs: true`. When work resumes on a box that changes behavior, name the capability here, write its delta under `specs/` and drop the flag.
+
+### Modified Capabilities
+
+None yet.
+
+## Impact
+
+- `gen/` (fab-gen): `src/lib.rs` is the generator and R.3's draw-source seam; `src/main.rs` is scad-gen plus the R.1 report.
+- `lang/src/eval/mod.rs`: `evaluate_geometry_metered` and the `eval_steps` counter (`:374`, `:429`).
+- `src/gendiff.rs` (R.2's channel), `src/differ.rs` + `src/oracle.rs` (the mesh tiers and OFF parsing it would reuse), `src/genperf.rs` (shares `oracle_report` and `first_echo_divergence`).
+- `.github/workflows/sustain.yml` (nightly gen-diff, weekly gen-perf) and `.github/workflows/fuzz.yml:107-121` (`gen_diff`, `intrinsics_dispatch_diff`: both feed seeds to the generator).
+- Tests: the three R.1 tests above; `gen/tests/cheap_profile_is_frozen.rs` (R.3's refactor must keep it green); `tests/gen_ab.rs`; `tests/differential.rs` (the geometry gate R.2 reuses); `tests/determinism_render.rs`. `src/gendiff.rs` and `src/genperf.rs` have 0 `#[test]`s; the sustain workflow is their only exercise (gen-diff nightly, gen-perf weekly). A geometry channel brings its own test.
+- Source of truth: SPEC.md owns the differential gate ("Oracle + corpus", "Testing + verification": the G.3.7 residual). `docs/sustainment.md` owns the gen-diff and gen-perf lanes and still names mesh-level differential "Phase R.2's territory" (`:21`). No doc covers the R.1 report or scad-gen's corpus mode: scad-gen appears only as the replay command in `docs/sustainment.md:109`, and README has one line for `gen/` (`:83`). `docs/tbb-backend-spike.md:17-23,94` ties R.2 to the native↔wasm libm gap, which is S.3's ground now.
+- Release reach: CI and tooling only. `gendiff`, `genperf` and `oracle` are `native`-gated (`src/lib.rs:52-55`, `:88-91`), so nothing reaches the web bundle or hotchkiss.io's pin. The `fab` CLI rides in the desktop bundle (`Packager.toml` `[[binaries]]`), so a gen-diff change ships with the next v* tag as a dev verb that needs a local OpenSCAD. scad-gen ships nowhere. No one-way door: nothing here touches latest.json or the updater key.
+- External: the oracle. CI uses the newest upstream Linux nightly AppImage from files.openscad.org/snapshots (2026.10.03 tonight); dev runs use the local OpenSCAD 2026.06.12. gen-diff prints the judging oracle's version and auto-labels one skew family (multi-letter swizzles); any other CI-vs-dev skew is read by hand. The library surfaces also need the BOSL2 and MCAD submodule pins.

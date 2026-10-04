@@ -83,6 +83,10 @@ kernel gets its `SharedArrayBuffer`: `python3 packaging/web/dev-server.py gui/we
 - `gen/` — a grammar-directed `.scad` generator (valid-by-construction programs; the fuzzer's corpus).
 - `scad-lib/` — my MIT SCAD modules (the slicer + connector lib). `libs/` — BOSL2 and friends as pinned
   submodules. `models/` — the designs, a SEPARATE repo (CC BY-NC-SA), pinned as a submodule.
+- `openspec/` — the plan: `openspec list` is the open work (one change per phase, ids kept from the
+  PLAN.md era, which is why code comments cite things like `AR.26`), `openspec/backlog.md` the unphased
+  ideas. `PLAN_ARCHIVE.md` is everything before 2026-10-04, frozen. `SPEC*.md` + `docs/` own their
+  subsystems.
 
 ## Building + testing
 

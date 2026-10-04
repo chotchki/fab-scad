@@ -1,7 +1,8 @@
 # SPEC — 3D print workflow, backup, and showcase
 
-Status: DRAFT, round 2 (chotchki redlines folded in). The PLAN (`PLAN.md`) is downstream
-of this — don't start building until the decisions here are signed off.
+Status: DRAFT, round 2 (chotchki redlines folded in). The PLAN (`PLAN.md`, frozen into
+`PLAN_ARCHIVE.md` when planning moved to OpenSpec) is downstream of this — don't start building
+until the decisions here are signed off.
 
 ## The problem
 
@@ -101,7 +102,7 @@ retrofit of all 62. (chotchki: agreed.)
       src/*.scad                 # source — the only truly precious bytes
       out/                       # generated STL/3mf — GITIGNORED, regenerated
       renders/                   # small cover/thumbnail PNGs — kept
-  SPEC.md  PLAN.md
+  SPEC.md  openspec/
 ```
 
 Excluded from git (regenerable / live on NAS): `out/`, Rust `target/`, `BOSL2.wiki`,

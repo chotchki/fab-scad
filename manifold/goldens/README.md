@@ -9,7 +9,7 @@ Everything the differential oracle proved gets RECORDED here while the C++ is st
   current output against the frozen C++ metrics at the SAME tolerances the live differential used
   (volume 1e-9 rel, genus exact where it was gated, bbox 1e-9) and fingerprint-equality for byte
   stability. `area` is recorded but NOT asserted — it was never a live gate (cleanliness-sensitive;
-  see the M.1.6 methodology note in PLAN.md).
+  see the M.1.6 methodology note in PLAN_ARCHIVE.md).
 - `models/*.obj` — the frozen nasty-corpus inputs. Provenance: test assets from
   https://github.com/elalish/manifold (Apache-2.0); vendored because they previously came from the
   C++ build directory, which dies with the dependency.

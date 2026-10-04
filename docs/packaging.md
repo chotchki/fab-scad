@@ -217,8 +217,8 @@ simply isn't self-updatable — same artifacts as before TB.
 
 Proof: `gui/tests/update_e2e.rs` (macOS) drives manifest → signature → localhost download →
 verify → REAL bundle swap on disk, plus a tampered-payload must-fail check. What it can't reach —
-the GitHub redirect chain and Gatekeeper on the swapped bundle — gets a manual through-the-app
-update on the first real pair of TB releases.
+the GitHub redirect chain and Gatekeeper on the swapped bundle — got its manual through-the-app
+check on a real install: an installed app updated itself to v1.4.0 (TB.5, closed 2026-10-04).
 
 ## Known gaps before a real release
 

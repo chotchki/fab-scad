@@ -248,7 +248,7 @@ mod tests {
         // Debug + Clone + PartialEq are all exercised (the derives are covered code).
         for s in [&u, &d, &i, &off, &xf, &proj] {
             assert_eq!(s.clone(), *s);
-            assert!(!format!("{s:?}").is_empty());
+            assert_ne!(format!("{s:?}"), "");
         }
         assert_ne!(u, d);
         assert_eq!(Shape2D::Empty, Shape2D::Empty);
@@ -259,7 +259,7 @@ mod tests {
         assert_ne!(Join2D::Round, Join2D::Miter);
         assert_ne!(Join2D::Miter, Join2D::Bevel);
         assert_eq!(Join2D::Round, Join2D::Round);
-        assert!(!format!("{:?}", Join2D::Bevel).is_empty());
+        assert_ne!(format!("{:?}", Join2D::Bevel), "");
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
         };
         assert_eq!(lin, lin); // Copy + PartialEq
         assert_ne!(lin, rot);
-        assert!(!format!("{lin:?}{rot:?}").is_empty());
+        assert_ne!(format!("{lin:?}{rot:?}"), "");
     }
 
     #[test]
@@ -293,7 +293,7 @@ mod tests {
         };
         assert_eq!(ex.clone(), ex);
         assert!(matches!(ex, GeoNode::Extrude { .. }));
-        assert!(!format!("{ex:?}").is_empty());
+        assert_ne!(format!("{ex:?}"), "");
     }
 
     #[test]
@@ -305,6 +305,6 @@ mod tests {
         // The tag is matchable — the whole point of the typed split.
         assert!(matches!(d2, Geo::D2(_)));
         assert!(matches!(d3, Geo::D3(_)));
-        assert!(!format!("{d3:?}").is_empty());
+        assert_ne!(format!("{d3:?}"), "");
     }
 }

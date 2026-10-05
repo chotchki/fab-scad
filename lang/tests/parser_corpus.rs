@@ -433,7 +433,7 @@ fn module_and_function_defs_parse() {
     let StmtKind::ModuleDef { params, body, .. } = &p.stmts[0].kind else {
         panic!("module def");
     };
-    assert!(params.is_empty());
+    assert_eq!(params.as_slice(), []);
     assert!(matches!(body.kind, StmtKind::Module(_)));
 
     // trailing comma in the parameter list; `;` (empty) body.
@@ -500,7 +500,7 @@ fn if_else_parses_in_every_position() {
         panic!("if");
     };
     assert_eq!(then.len(), 1);
-    assert!(els.is_empty());
+    assert_eq!(els.as_slice(), []);
 
     // if/else, block branches.
     let p = parse("if (x > 0) { a(); b(); } else { c(); }").expect("parses");
@@ -535,7 +535,7 @@ fn if_else_parses_in_every_position() {
     let StmtKind::If { then, .. } = &p.stmts[0].kind else {
         panic!("if");
     };
-    assert!(then.is_empty());
+    assert_eq!(then.as_slice(), []);
 }
 
 #[test]
@@ -742,9 +742,9 @@ fn caret_diagnostic_points_at_the_line() {
         "want the caret aligned under `;` in:\n{msg}"
     );
     // error at end-of-input maps to source length, not a panic
-    assert!(!err("v=1").is_empty());
+    assert_ne!(err("v=1"), "");
     // multibyte before the caret keeps it aligned (no byte/char confusion, no panic)
-    assert!(!err("v=\"héllo→\"+;").is_empty());
+    assert_ne!(err("v=\"héllo→\"+;"), "");
 }
 
 // ─────────────────────────────── derives + determinism ─────────────────────────────────────────

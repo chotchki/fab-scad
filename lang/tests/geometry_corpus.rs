@@ -116,7 +116,7 @@ fn cylinder_radius_forms() {
 
 fn all_on_radius_at_z(mesh: &Mesh, r: f64, z: f64) {
     let ring: Vec<_> = mesh.verts.iter().filter(|v| v[2] == z).collect();
-    assert!(!ring.is_empty());
+    assert_ne!(ring, [] as [&fab_lang::Vec3; 0]);
     for v in ring {
         assert!((v[0] * v[0] + v[1] * v[1] - r * r).abs() < 1e-9);
     }
@@ -495,7 +495,7 @@ fn too_many_range_elements_warns_and_skips() {
     // for-tests' "Correct" case stays correct: a big-but-legal range still iterates.
     let ok = evaluate_full("echo(len([for (i = [0:1:5000]) i])); cube(1);").expect("evaluates");
     assert_eq!(ok.echos(), ["5001"]);
-    assert!(ok.warnings().is_empty());
+    assert_eq!(ok.warnings(), [] as [&str; 0]);
 }
 
 /// AD.4: the C-style-for iteration limit, oracle-probed at BOTH edges — exactly 1,000,000 iterations

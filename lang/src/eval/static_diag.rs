@@ -262,9 +262,18 @@ mod tests {
 
     #[test]
     fn nested_scopes_do_not_collide_but_a_bare_block_folds_in() {
-        assert!(warnings("a = 1;\nif (true) { a = 2; }\n").is_empty());
-        assert!(warnings("a = 1;\nmodule m() { a = 2; }\n").is_empty());
-        assert!(warnings("a = 1;\ntranslate([0, 0, 0]) { a = 2; }\n").is_empty());
+        assert_eq!(
+            warnings("a = 1;\nif (true) { a = 2; }\n"),
+            [] as [String; 0]
+        );
+        assert_eq!(
+            warnings("a = 1;\nmodule m() { a = 2; }\n"),
+            [] as [String; 0]
+        );
+        assert_eq!(
+            warnings("a = 1;\ntranslate([0, 0, 0]) { a = 2; }\n"),
+            [] as [String; 0]
+        );
         // A bare block is NOT a scope — it flattens into its parent, so this one DOES collide.
         assert_eq!(
             warnings("a = 1;\n{ a = 2; }\n"),

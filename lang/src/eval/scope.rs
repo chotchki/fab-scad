@@ -309,13 +309,12 @@ impl Scope {
                 };
                 frame = parent;
             }
-        } else {
-            loop {
-                if let Some(value) = frame.vars.get(name) {
-                    return Some(value.clone());
-                }
-                frame = frame.parent.as_ref()?;
+        }
+        loop {
+            if let Some(value) = frame.vars.get(name) {
+                return Some(value.clone());
             }
+            frame = frame.parent.as_ref()?;
         }
     }
 

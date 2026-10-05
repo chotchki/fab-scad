@@ -274,7 +274,7 @@ fn offset_is_a_fixed_2d_op() {
         d2("offset(2) { }"),
         Shape2D::Offset { ref child, .. } if matches!(**child, Shape2D::Empty)
     ));
-    assert!(warnings("offset(2) { }").is_empty());
+    assert_eq!(warnings("offset(2) { }"), [] as [std::string::String; 0]);
 }
 
 #[test]
@@ -378,7 +378,10 @@ fn an_empty_block_is_dimension_neutral_and_drops_out() {
         Geo::D3(GeoNode::Difference(ref c)) => assert_eq!(c.len(), 1), // just the cube; the `{}` dropped
         other => panic!("expected a 3D Difference of one, got {other:?}"),
     }
-    assert!(warnings("difference() { { } cube(4, center = true); }").is_empty());
+    assert_eq!(
+        warnings("difference() { { } cube(4, center = true); }"),
+        [] as [std::string::String; 0]
+    );
 }
 
 // ─────────────────────────────── LOUD deferrals + no-backend flattening ───────────────────────────────
@@ -393,7 +396,7 @@ fn hull_over_2d_builds_the_hull_node() {
         Shape2D::Hull(ref c) => assert_eq!(c.len(), 2),
         other => panic!("hull() over 2D should build Shape2D::Hull of two, got {other:?}"),
     }
-    assert!(warnings(src).is_empty());
+    assert_eq!(warnings(src), [] as [std::string::String; 0]);
 }
 
 #[test]

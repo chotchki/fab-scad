@@ -166,12 +166,13 @@ fn every_production_parses() {
 #[test]
 fn empty_program_is_no_statements() {
     // `input : /*empty*/` (parser.y:174) — a hole the inventory owed a dedicated anchor.
-    assert!(parse("").expect("empty parses").stmts.is_empty());
-    assert!(
-        parse("   \n\t  ")
-            .expect("whitespace-only parses")
-            .stmts
-            .is_empty()
+    assert_eq!(
+        parse("").expect("empty parses").stmts,
+        [] as [fab_lang::Stmt; 0]
+    );
+    assert_eq!(
+        parse("   \n\t  ").expect("whitespace-only parses").stmts,
+        [] as [fab_lang::Stmt; 0]
     );
 }
 

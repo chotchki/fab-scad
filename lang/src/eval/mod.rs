@@ -4871,7 +4871,11 @@ mod tests {
             parse("_EPSILON = 1e-9; function _fab_poc_near0(x) = abs(x) < _EPSILON;").unwrap();
         let ctx = build_ctx(&program, crate::Config::default());
         // Nothing hoisted yet → the const is UNBOUND → declines (this is the mid-hoist state).
-        assert!(super::arm_guarded_intrinsics(&ctx).is_empty());
+        assert_eq!(
+            super::arm_guarded_intrinsics(&ctx).len(),
+            0,
+            "nothing hoisted yet, so nothing may arm"
+        );
 
         let bind_eps = |v: Value| {
             let mut g = Scope::new();

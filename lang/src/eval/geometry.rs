@@ -315,9 +315,12 @@ mod tests {
             vec![vec![p(-1.0, -1.0), p(1.0, -1.0), p(1.0, 1.0), p(-1.0, 1.0)]]
         );
         // Degenerate → no contours.
-        assert!(square(0.0, 5.0, false).is_empty());
-        assert!(square(5.0, -1.0, false).is_empty());
-        assert!(square(f64::NAN, 5.0, false).is_empty());
+        assert_eq!(square(0.0, 5.0, false), [] as [Vec<fab_types::Vec2>; 0]);
+        assert_eq!(square(5.0, -1.0, false), [] as [Vec<fab_types::Vec2>; 0]);
+        assert_eq!(
+            square(f64::NAN, 5.0, false),
+            [] as [Vec<fab_types::Vec2>; 0]
+        );
     }
 
     #[test]
@@ -333,9 +336,9 @@ mod tests {
         assert_eq!(c[0].len(), 32);
         assert_eq!(c[0][0], p(5.0, 0.0));
         // Degenerate radius → no contours.
-        assert!(circle(0.0, 16).is_empty());
-        assert!(circle(-2.0, 16).is_empty());
-        assert!(circle(f64::INFINITY, 16).is_empty());
+        assert_eq!(circle(0.0, 16), [] as [Vec<fab_types::Vec2>; 0]);
+        assert_eq!(circle(-2.0, 16), [] as [Vec<fab_types::Vec2>; 0]);
+        assert_eq!(circle(f64::INFINITY, 16), [] as [Vec<fab_types::Vec2>; 0]);
     }
 
     #[test]
@@ -344,7 +347,7 @@ mod tests {
         // No paths → all points, one contour.
         assert_eq!(polygon(&pts, None), vec![pts.to_vec()]);
         // Fewer than 3 points → no contour.
-        assert!(polygon(&pts[..2], None).is_empty());
+        assert_eq!(polygon(&pts[..2], None), [] as [Vec<fab_types::Vec2>; 0]);
         // Paths select + reorder points; two contours (e.g. an outer + a hole).
         let inner = [p(1.0, 1.0), p(2.0, 1.0), p(2.0, 2.0)];
         let all: Vec<Vec2> = pts.iter().chain(inner.iter()).copied().collect();

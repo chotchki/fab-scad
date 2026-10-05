@@ -958,6 +958,69 @@ mod tests {
         assert!(threemf.len() > 1000);
     }
 
+    /// The GUI's real 3MF path: an `import()` in a packed project, rendered whole the way the editor
+    /// asks the worker to (TF). `dir` holds the assets; `files` are the live buffers.
+    fn render_pack(dir: &std::path::Path, files: Vec<(String, String)>, entry: &str) -> Response {
+        handle_with_store(
+            &mut SolidStore::new(0),
+            Request::RenderWhole {
+                source: Source::Pack {
+                    files,
+                    entry: entry.into(),
+                    asset_dir: dir.to_string_lossy().into_owned(),
+                },
+                // The workspace root (libs/ lives here), as the editor's find_root resolves it.
+                root: Some(env!("CARGO_MANIFEST_DIR").to_string()),
+                preview: true,
+                quality: Quality::Draft,
+            },
+        )
+    }
+
+    #[test]
+    fn the_editor_renders_an_import_of_a_bambu_production_3mf() {
+        let tmp = std::env::temp_dir().join(format!("geomsvc_3mf_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("dish.3mf"),
+            crate::threemf_in::fixtures::production_cube(zip::CompressionMethod::Deflated),
+        )
+        .unwrap();
+        let r = render_pack(
+            &tmp,
+            vec![("model.scad".into(), "import(\"dish.3mf\");\n".into())],
+            "model.scad",
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+        let Response::Rendered { min, max, .. } = r else {
+            panic!("expected Rendered, got {}", label(&r))
+        };
+        // production_cube's item puts the unit cube at (10,20,30).
+        assert!(
+            (min[0] - 10.0).abs() < 1e-6 && (max[2] - 31.0).abs() < 1e-6,
+            "unexpected bbox {min:?}..{max:?}"
+        );
+    }
+
+    #[test]
+    fn analyze_reads_a_bambu_production_3mf() {
+        // TF: the Bambu Studio / MakerWorld shape (the root object is one component living in another
+        // part, metadata after the build, DEFLATE entries) through the geometry service's Analyze, the
+        // worker envelope's 3MF entry point, not just through import().
+        let bytes = crate::threemf_in::fixtures::production_cube(zip::CompressionMethod::Deflated);
+        match handle(Request::Analyze {
+            name: "dish.3mf".into(),
+            bytes,
+            bed: [40.0; 3],
+        }) {
+            Response::Analyzed { objects, tris, .. } => {
+                assert_eq!(tris, 12);
+                assert_eq!(objects.len(), 1);
+            }
+            other => panic!("expected analyzed, got {}", label(&other)),
+        }
+    }
+
     #[test]
     fn analyze_reports_view_only_for_soup() {
         // Open-shell soup: one triangle. Displays, never welds.

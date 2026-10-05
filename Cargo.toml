@@ -87,6 +87,9 @@ kernel = [
     "dep:fab-manifold",
     "dep:threemf",
     "dep:quick-xml",
+    # The 3MF reader decompresses in its own right (every Bambu Studio entry is DEFLATE) rather than
+    # through threemf's copy of the feature, which only the writer needs (TF.1).
+    "zip/deflate",
     "dep:usvg",
 ]
 # SZ.4 — THE TRANSPILED BAND, as its own axis so a build can have the kernel WITHOUT it. Measured:
@@ -152,8 +155,9 @@ toml = "0.8"
 tracing = "0.1"
 rayon = { version = "1", optional = true }
 threemf = { version = "0.8.0", optional = true }
-# threemf's serde can't round-trip <m:basematerials> (namespace-prefix renames) — threemf_in
-# pull-parses the materials table itself, prefix-agnostic.
+# The 3MF READER (threemf_in) is our own pull parser on local names; threemf above is the writer only.
+# Its serde reader couldn't take <metadata> split around <build>, never saw a component's p:path and
+# can't read its own <m:basematerials> back (TF).
 quick-xml = { version = "0.39", optional = true }
 # SVG (2D vector) import (Q.4). usvg NORMALIZES an SVG document — resolves viewBox/units/transforms, expands
 # shapes (rect/circle/ellipse/line/polyline/polygon) + use/defs/styles into a flat tree of Bézier paths — so
@@ -164,7 +168,8 @@ usvg = { version = "0.45", optional = true, default-features = false }
 # The geomsvc wire codec (worker postMessage envelope). Wire types are bincode-safe by
 # construction — no untagged enums (Num stays OUT of the wire).
 bincode = "1"
-# Stored (no compression) only — default features pull bzip2/zstd backends we don't need.
+# Stored (no compression) only — default features pull bzip2/zstd backends we don't need. The 3MF reader
+# adds DEFLATE through the `kernel` feature (TF.1), so the kernel-free gui wasm stays Stored-only.
 zip = { version = "8", optional = true, default-features = false }
 # The `.scadproj` manifest (fab-project.json) ser/de — rides `mesh-io` with `zip` (Phase Z). Also a
 # dev-dependency (the publish tests use it under `native`-without-`kernel`), which coexists.

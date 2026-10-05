@@ -2,7 +2,7 @@
 
 ## Purpose
 
-How fab-scad turns a `.3mf` package into geometry, for OpenSCAD's `import()` and for opening a `.3mf` in the GUI: which build items count, how components and transforms place their meshes, and how an unreadable package fails.
+How fab-scad turns a `.3mf` package into geometry, for OpenSCAD's `import()` and for the geometry service's analyze request (the worker envelope's 3MF entry point): which build items count, how components and transforms place their meshes, and how an unreadable package fails.
 
 ## ADDED Requirements
 
@@ -51,6 +51,39 @@ The system SHALL place a component's mesh by applying the component's own transf
 - **WHEN** the same cube is imported through a component translated by 5 in Z, under a build item whose transform is `1 0 0 0 0 1 0 -1 0 0 0 0` (a quarter turn about X, carrying +Z to -Y)
 - **THEN** it spans x [0,1], y [-6,-5], z [0,1] (OpenSCAD 2026.06.12: y [-1,0], z [5,6])
 
+### Requirement: Only printable objects contribute geometry
+An object whose `type` is `other` or `support`, and everything reached through it, SHALL contribute no geometry: the 3MF core specification says such objects are not part of the printed model. Bambu Studio writes its modifier, negative-part and support blocker/enforcer volumes this way, so they SHALL NOT import as material. Negative parts are dropped, not subtracted (subtracting them needs Bambu's private settings part). Objects of type `model`, `solidsupport` and `surface` import as before. This intentionally differs from the OpenSCAD oracle (observed in 2026.06.12), which imports every mesh whatever its type.
+
+#### Scenario: A modifier volume reached through a component
+- **WHEN** an object's components are a unit cube of type `model` and a unit cube of type `other` translated by 5 in Z
+- **THEN** the import spans z [0,1]; the `other` cube adds nothing (OpenSCAD 2026.06.12: z [0,6])
+
+#### Scenario: A Bambu package with an infill modifier
+- **WHEN** a Bambu Studio package's object is a printed part plus a `modifier_part` volume written as a type `other` object
+- **THEN** only the printed part's triangles import
+
+### Requirement: Mirrored placements import outward-facing
+When the transform a mesh is placed under (its components' and build item's, composed) has a negative determinant, the system SHALL reverse each triangle's vertex order, so a mirrored part imports with outward-facing triangles and positive volume. This intentionally differs from the OpenSCAD oracle (observed in 2026.06.12), which imports a mirrored part inside-out.
+
+#### Scenario: Mirrored build item
+- **WHEN** a unit cube is imported under a build item whose transform is `-1 0 0 0 1 0 0 0 1 0 0 0`
+- **THEN** it spans x [-1,0] with signed volume +1 (OpenSCAD 2026.06.12: signed volume -1)
+
+#### Scenario: Mirror at the component, not the item
+- **WHEN** the same cube is mirrored by its component's transform under an unmirrored build item
+- **THEN** it imports with signed volume +1
+
+### Requirement: Resource limits on hostile packages
+The system SHALL fail, with an error naming the limit and before allocating the geometry, a 3MF package whose build would expand to more than 50,000,000 triangles (components can instance an object exponentially, so a few kilobytes can describe billions). It SHALL also fail a package any of whose model parts decompresses past 2 GiB. Component cycles SHALL be detected exactly, and legal nesting SHALL NOT be mistaken for a cycle.
+
+#### Scenario: Exponential instancing
+- **WHEN** a package nests components nine levels deep with ten references at each level over a unit cube (10^8 instances in a few kilobytes)
+- **THEN** the import fails promptly with an error naming the 50,000,000-triangle limit
+
+#### Scenario: Deep but legal nesting
+- **WHEN** a unit cube is reached through a chain of twelve single-component objects
+- **THEN** it imports
+
 ### Requirement: Unresolvable references fail the import and name what is missing
 The system SHALL fail a 3MF import whose component names a model path the package lacks, whose component or build item names an object id its model file lacks, whose triangle references a vertex index past the mesh's vertex count, or whose components reference each other in a cycle. The failure message SHALL name the missing path, object id or index. From `import()` the failure SHALL surface as OpenSCAD's own warning, "Can't open import file '<name>': <reason>", and the model SHALL render without that import, as for any unreadable import.
 
@@ -71,11 +104,11 @@ The system SHALL fail a 3MF import whose component names a model path the packag
 - **THEN** the import fails promptly with an error, without hanging
 
 ### Requirement: Object colors and namespace prefixes
-When the GUI opens a `.3mf`, an object that references a base-material group SHALL take that entry's display color, with the group resolved in the model file that declares the object. Per-triangle property overrides SHALL be ignored. Element and attribute namespace prefixes SHALL NOT matter: a materials table is read whatever prefix the file binds to the materials namespace. `import()` SHALL produce uncolored geometry, as OpenSCAD does.
+When the geometry service analyzes a `.3mf`, an object that references a base-material group SHALL take that entry's display color, with the group resolved in the model file that declares the object. Per-triangle property overrides SHALL be ignored. Element and attribute namespace prefixes SHALL NOT matter: a materials table is read whatever prefix the file binds to the materials namespace. `import()` SHALL produce uncolored geometry, as OpenSCAD does.
 
 #### Scenario: Object color from a prefixed materials table
-- **WHEN** the GUI opens a 3MF whose object references entry 1 of an `<m:basematerials>` group whose entries are red then blue
-- **THEN** the object displays blue
+- **WHEN** the geometry service analyzes a 3MF whose object references entry 1 of an `<m:basematerials>` group whose entries are red then blue
+- **THEN** the object's reported color is blue
 
 ### Requirement: The model unit does not scale geometry
 The system SHALL read 3MF coordinates as millimeters whatever the model's `unit` attribute says, matching the OpenSCAD oracle (which ignores it).

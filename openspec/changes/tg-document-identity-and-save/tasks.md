@@ -2,11 +2,15 @@
 
 ## TG. The GUI says what document is open, and Save saves all of it
 
-- [ ] TG.0 Phase exit, which needs all of the following:
+- [x] TG.0 Phase exit, which needs all of the following:
   - every box below ticked;
   - every ci.yml job green on the landing commit (boot-gate compiles the cfg(wasm32) save and document-state arms, which no native check builds);
   - `packaging/web/e2e-save.sh` run against the release tag, because TG.4 changes what a web save uploads;
   - `docs/web-projects-design.md` updated (TG.9).
+  - **MET 2026-10-06:**
+    - CI run 37511981678 is green on `466c5cad`: all eight jobs, with CodeQL's four analyses green beside them.
+    - `e2e-save.sh` passed against the `v1.4.2` tag inside release-web 37514236625 (bundle job), and locally first on a fresh `--no-opt` bundle: a 3-variant PUT with the cookie riding.
+    - `docs/web-projects-design.md` gained "Phase TG" (TG.9).
 - [x] TG.1 The document's unsaved state (design Decisions 1-2):
   - **`ProjectDoc` gains** `structure_dirty`, `unsaved_assets`, `rev` and the manifest `title`.
   - **Its mutators mark the document:** `add_file`, `import` (text AND binary), `remove_file`, `set_entry` (only on a real change) and `rename_file`; `flush_active` already does, only on changed text.
@@ -140,4 +144,9 @@
     - `gui/CLAUDE.md`: document-level Save gates and marks read `DocState::dirty`; per-row markers read `ProjectDoc::file_unsaved`/`asset_unsaved` (the only sanctioned `EditorBuf::dirty` reader, active held row only); new mutations mark inside the `ProjectDoc` mutator; anything new baked into `fab:config` joins `config_fp`; filled circle = unsaved, `icons::DOT` ring = stale.
     - README "Using it": the Project tab, the Model breadcrumb, Save / Save As… / ⇧⌘S, the markers, and a `.scadproj` launch argument.
     - Every claim was checked against the code (`save.rs`, `doc_view.rs`, `file_ops.rs`, `project.rs`, `state.rs`, `panel.rs`).
-- [ ] TG.10 Release: ships in the desktop app and the web bundle on the next `v*` tag (v1.4.2), only on chotchki's word. hotchkiss.io's editor gets the web half when its pin moves. The release notes say to close any open `.scadproj` before updating from 1.4.1, because 1.4.1's relaunch reopens the temp copy.
+- [x] TG.10 Release: ships in the desktop app and the web bundle on the next `v*` tag (v1.4.2), only on chotchki's word. hotchkiss.io's editor gets the web half when its pin moves. The release notes say to close any open `.scadproj` before updating from 1.4.1, because 1.4.1's relaunch reopens the temp copy. **SHIPPED 2026-10-06 as v1.4.2** (chotchki: "commit freely, get ci to good and release"), tag on `466c5cad`:
+  - release-native 37514236688 and release-web 37514236625 are green.
+  - The release carries the dmg, the `.app` tarball, the Windows installer, the web bundle and a signed `latest.json` (1.4.2, `macos-aarch64`).
+  - The close-your-`.scadproj` warning is in the bump commit and at the top of the release notes.
+  - hotchkiss.io still pins v1.3.2.
+  - chotchki's own test of the released app is pending.

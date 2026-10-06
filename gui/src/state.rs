@@ -80,11 +80,16 @@ pub(crate) struct OpenDialog(pub(crate) Option<Task<Option<PathBuf>>>);
 /// The Model-tab code editor's live buffer (U.3.2): the active file's text, edited in place. The
 /// buffer — NOT the file on disk — is the render source; `preview_edited_buffer` writes it to a
 /// hidden temp beside the real file (so relative includes resolve) and re-renders after a debounce.
-/// `dirty` gates the explicit Save; `edited_at` (Bevy elapsed secs at the last keystroke) drives it.
+/// `dirty` = this buffer was edited since it was loaded (TG.1: one input to [`DocState`], never the
+/// Save gate itself); `edited_at` (Bevy elapsed secs at the last keystroke) drives the preview.
 #[derive(Resource, Default)]
 pub(crate) struct EditorBuf {
     pub(crate) text: String,
     pub(crate) path: PathBuf,
+    /// TG.2: the document whose `files[active]` this buffer holds — stamped by [`doc_into_editor`],
+    /// cleared by [`read_into_editor`] (a path-loaded buffer belongs to no document). Half of
+    /// [`ProjectDoc::editor_holds`](crate::project::ProjectDoc::editor_holds).
+    pub(crate) owner: Option<crate::project::DocId>,
     pub(crate) dirty: bool,
     pub(crate) edited_at: Option<f64>,
 }
@@ -95,6 +100,7 @@ pub(crate) struct EditorBuf {
 /// dirty, no pending edit). Used on the launch seed + every file switch.
 pub(crate) fn read_into_editor(editor: &mut EditorBuf, path: &Path) -> Option<config::FabConfig> {
     editor.path = path.to_path_buf();
+    editor.owner = None;
     let raw = std::fs::read_to_string(path).unwrap_or_default();
     let cfg = config::read_config_block(&raw);
     editor.text = config::strip_config_block(&raw);
@@ -116,6 +122,7 @@ pub(crate) fn doc_into_editor(
     i: usize,
 ) -> Option<config::FabConfig> {
     editor.path = project.editor_path(i);
+    editor.owner = Some(project.id());
     let (raw, dirty) = project
         .files
         .get(i)
@@ -126,6 +133,82 @@ pub(crate) fn doc_into_editor(
     editor.dirty = dirty;
     editor.edited_at = None;
     cfg
+}
+
+/// TG.1: the open document's unsaved state — the ONE answer every document-level gate and mark reads
+/// (Save, Cmd/Ctrl+S, the Model badge, chip, card, title). Per-row markers read
+/// [`ProjectDoc::file_unsaved`](crate::project::ProjectDoc::file_unsaved) instead. `dirty` is derived each frame by `sync_doc_state` from the document's own flags
+/// ([`ProjectDoc::is_dirty`](crate::project::ProjectDoc::is_dirty)), the live editor buffer, and the
+/// cut plan + bed against [`baseline`](Self::rebaseline). `EditorBuf::dirty` is NOT the save gate: it
+/// is reloaded from the viewed file on every switch, which is how unsaved work used to vanish.
+#[derive(Resource, Default)]
+pub(crate) struct DocState {
+    pub(crate) dirty: bool,
+    /// The `fab:config` Save last wrote, or the one the document opened with. `None` until the first
+    /// sync takes it from whatever is live (boot, or right after a model-state reset).
+    baseline: Option<config::ConfigFp>,
+    /// TG.2: the "opened <name> (<folder>)" line [`file_ops::adopt`](crate::file_ops::adopt) posted,
+    /// held until the open's render lands — the render's own "rendering" / "ready" statuses would
+    /// otherwise wipe it within a frame. `poll_job` takes it.
+    opened: Option<String>,
+}
+
+impl DocState {
+    /// Re-take the whole config baseline (TG.1): after a fresh parts build, once the pending
+    /// `fab:config` is applied (`poll_job`), and on save success with the fingerprint the save wrote.
+    pub(crate) fn rebaseline(&mut self, fp: config::ConfigFp) {
+        self.baseline = Some(fp);
+    }
+
+    /// Drop the baseline with the model state it describes (`ModelState::reset`). The next sync re-takes
+    /// it from the reset parts, so a document mid-open never reads unsaved against the OLD model's plan.
+    pub(crate) fn forget_baseline(&mut self) {
+        self.baseline = None;
+    }
+
+    /// Take the baseline from `live` if there is none yet; `sync_doc_state`'s first step.
+    pub(crate) fn baseline_or(&mut self, live: &config::ConfigFp) {
+        if self.baseline.is_none() {
+            self.baseline = Some(live.clone());
+        }
+    }
+
+    /// An auto-plan landed on part `i` (TG.1). A part whose baseline is EMPTY had no saved plan, so a
+    /// reopen re-derives this same plan: adopt it as saved. A part that HAD a saved plan keeps it, so
+    /// Reset-to-auto over a hand-tuned plan reads unsaved.
+    pub(crate) fn auto_planned(&mut self, i: usize, fp: Option<u64>) {
+        if let Some(slot) = self.baseline.as_mut().and_then(|b| b.parts.get_mut(i))
+            && slot.is_none()
+        {
+            *slot = fp;
+        }
+    }
+
+    /// Hold an open's status line for the render that follows it (TG.2).
+    pub(crate) fn announce_open(&mut self, line: String) {
+        self.opened = Some(line);
+    }
+
+    /// The held open line, once: `poll_job` folds it into the landed render's status.
+    pub(crate) fn take_opened(&mut self) -> Option<String> {
+        self.opened.take()
+    }
+
+    /// Does `live` differ from the baseline? No baseline yet reads clean.
+    pub(crate) fn config_dirty(&self, live: &config::ConfigFp) -> bool {
+        self.baseline.as_ref().is_some_and(|b| b != live)
+    }
+
+    /// The predicate itself (TG.1): the document's flags, OR an edited live buffer (it reaches the
+    /// document only on a flush), OR a cut plan / bed Save would write differently.
+    pub(crate) fn derive(
+        &self,
+        project: &crate::project::ProjectDoc,
+        editor_dirty: bool,
+        live: &config::ConfigFp,
+    ) -> bool {
+        project.is_dirty() || editor_dirty || self.config_dirty(live)
+    }
 }
 
 /// The `fab:config` block parsed from a freshly-loaded source (W.3.8), waiting for `poll_job` to apply it
@@ -559,6 +642,10 @@ pub(crate) enum PanelCmd {
     /// item you opened rather than minting a new one.
     Publish,
     Export,
+    /// Save the open document where it lives (TG.3) — the Save button and Cmd/Ctrl+S both write it;
+    /// [`save_doc_action`](crate::save::save_doc_action) routes it by [`plan`](crate::save::plan) and
+    /// reports the outcome, including "nothing to save".
+    Save,
     /// Save the edited model back to hotchkiss.io (W.5.8) — web only, and only when a save target was
     /// derived from the deep-link (the button that writes this is gated on [`SaveTarget`]).
     SaveToSite,
@@ -580,10 +667,11 @@ pub(crate) enum PanelCmd {
     /// [`MediaItem`]. The new title rides [`ItemRenameUi::commit`], since `PanelCmd` is `Copy`.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     RenameOnSite,
-    /// Save a multi-file project that has no `.scadproj` home yet (a loose `.scad` that grew a second
-    /// file, Z.3.7) — pops a native Save-As `.scadproj` dialog, then adopts that path as the home.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    SaveAsProject,
+    /// Save the document under a new name (TG.5) — the Project tab's Save As..., Cmd/Ctrl+Shift+S, and
+    /// Save on a desktop document with no file. A `.scad` for one text file, a `.scadproj` otherwise;
+    /// [`save_as_action`](crate::save::save_as_action) runs the dialog and the document moves to the
+    /// new file. Desktop only: the web's Save downloads and never routes here.
+    SaveAs,
     /// Manual update check (TB) — the Settings modal's "Check for updates" button. macOS only: the
     /// sole platform with signed updater artifacts ([`crate::update`]).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -592,13 +680,6 @@ pub(crate) enum PanelCmd {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     OpenUpdate,
 }
-
-/// The in-flight Save-As `.scadproj` (Z.3.7) — the native Save dialog + the zip write run off-thread (rfd
-/// can't block Bevy's loop), yielding the chosen path so [`poll_save_project`](crate::poll_save_project)
-/// can adopt it as the project home. Twin of [`ExportJob`]. Native-only.
-#[derive(Resource, Default)]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) struct SaveProjJob(pub(crate) Option<Task<Result<PathBuf, String>>>);
 
 /// The in-flight "Add files to the project" pick (Z.3.3) — a MULTI-file picker off the main thread, twin
 /// of [`OpenDialog`]. `Some(paths)` on pick (empty vec if the user picked nothing), `None` if cancelled;
@@ -626,7 +707,8 @@ pub(crate) struct RenameUi {
     /// buffer — permanently poisoning Reset-to-default for that file. The handler that renames is a
     /// different system and can't reach a `Local`, so it reports the move here instead. Carries the
     /// POST-dedup name: `rename_file` may hand back `foo-1.scad` when the user typed `foo.scad`.
-    pub(crate) renamed: Option<(PathBuf, PathBuf)>,
+    /// TG.5: a queue, because a Save As re-home moves every file of the document in one landing.
+    pub(crate) renamed: Vec<(PathBuf, PathBuf)>,
 }
 
 /// The round-trip SAVE target for the hotchkiss.io media item this session edits (W.5.7): the
@@ -778,6 +860,173 @@ pub(crate) fn resolve_conns(cuts: &Cuts, conns: &Conns) -> Vec<fab::Conn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::project::{ProjectDoc, ProjectHome};
+
+    const BED: [f32; 3] = [256.0; 3];
+
+    fn cut_part(at: &[f32]) -> Part {
+        let mut p = Part::default();
+        for &a in at {
+            p.cuts.list.push(CutDef {
+                axis: Axis::Z,
+                at: a,
+                enabled: true,
+            });
+        }
+        p
+    }
+
+    /// A saved two-file `.scadproj`-homed document, the editor viewing (and holding) file 0.
+    fn saved_project() -> (ProjectDoc, EditorBuf) {
+        let mut p = ProjectDoc::single(
+            "main.scad",
+            "cube(1);",
+            ProjectHome::ScadProj(PathBuf::from("/m/brace.scadproj")),
+        );
+        p.add_file("lib.scad", "module m(){}".into());
+        p.mark_saved(p.rev());
+        let mut e = EditorBuf::default();
+        doc_into_editor(&mut e, &p, 0);
+        (p, e)
+    }
+
+    /// TG.1: the bug chotchki hit. Viewing another file reloads `editor.dirty` from THAT file, so a
+    /// gate on it went grey; the document's state survives the switch.
+    #[test]
+    fn unsaved_survives_a_switch_that_reloads_the_editor() {
+        let (mut p, mut e) = saved_project();
+        let doc = DocState::default();
+        let live = config::config_fp(&[Part::default()], BED);
+        assert!(!doc.derive(&p, e.dirty, &live));
+
+        e.text = "cube(2);".into(); // type in main.scad
+        e.dirty = true;
+        assert!(
+            doc.derive(&p, e.dirty, &live),
+            "a live edit is unsaved before any flush"
+        );
+
+        // Click lib.scad: flush, switch, rehydrate — the apply_switch_file / file_ops sequence.
+        p.flush_active(&e.text);
+        p.set_active(1);
+        doc_into_editor(&mut e, &p, 1);
+        assert!(
+            !e.dirty,
+            "the view flag reloads clean — this is what the old gate read"
+        );
+        assert!(
+            doc.derive(&p, e.dirty, &live),
+            "the document is still unsaved"
+        );
+
+        // A structural change on a clean view (the reported case: add a file, nothing typed).
+        let (mut p, e) = saved_project();
+        p.import("logo.png", vec![0x89, b'P']);
+        assert!(doc.derive(&p, e.dirty, &live));
+    }
+
+    /// TG.1's config baselines: an auto-plan over NO saved plan reads clean (a reopen re-derives it),
+    /// Reset-to-auto over a SAVED plan reads unsaved, and so does a bed change.
+    #[test]
+    fn config_baselines_auto_plan_reset_and_bed() {
+        let (p, e) = saved_project();
+        let mut doc = DocState::default();
+
+        // Opened with no saved plan: poll_job re-takes the baseline from the freshly built parts.
+        let mut parts = vec![Part::default(), cut_part(&[10.0])];
+        doc.rebaseline(config::config_fp(&parts, BED));
+        assert!(!doc.derive(&p, e.dirty, &config::config_fp(&parts, BED)));
+
+        // The auto-plan lands on part 0 (empty baseline): a change until adopted, clean after.
+        parts[0] = cut_part(&[100.0, 200.0]);
+        assert!(doc.config_dirty(&config::config_fp(&parts, BED)));
+        doc.auto_planned(0, config::part_fp(&parts, 0));
+        assert!(!doc.derive(&p, e.dirty, &config::config_fp(&parts, BED)));
+
+        // Reset-to-auto on part 1, which HAD a saved plan: its cuts wipe, a new plan lands — unsaved.
+        parts[1] = Part::default();
+        assert!(doc.config_dirty(&config::config_fp(&parts, BED)));
+        parts[1] = cut_part(&[55.0]);
+        doc.auto_planned(1, config::part_fp(&parts, 1));
+        assert!(
+            doc.derive(&p, e.dirty, &config::config_fp(&parts, BED)),
+            "the saved plan is not what Save would write any more"
+        );
+        // ...until it's saved: the save re-takes the baseline with what it wrote.
+        doc.rebaseline(config::config_fp(&parts, BED));
+        assert!(!doc.derive(&p, e.dirty, &config::config_fp(&parts, BED)));
+
+        // The bed is part of the config Save bakes.
+        assert!(doc.derive(
+            &p,
+            e.dirty,
+            &config::config_fp(&parts, [256.0, 256.0, 300.0])
+        ));
+    }
+
+    /// TG.1: `ModelState::reset` forgets the baseline, so the open window before the new render lands
+    /// reads clean instead of comparing a reset plan to the OLD model's.
+    #[test]
+    fn a_forgotten_baseline_reads_clean_until_retaken() {
+        let mut doc = DocState::default();
+        doc.rebaseline(config::config_fp(&[cut_part(&[10.0])], BED));
+        let reset = config::config_fp(&[Part::default()], BED);
+        assert!(doc.config_dirty(&reset));
+        doc.forget_baseline();
+        assert!(!doc.config_dirty(&reset));
+        doc.baseline_or(&reset); // sync_doc_state's first step
+        assert!(!doc.config_dirty(&reset));
+        // The new model's auto-plan then lands on that empty slot and is adopted.
+        let planned = [cut_part(&[50.0])];
+        doc.auto_planned(0, config::part_fp(&planned, 0));
+        assert!(!doc.config_dirty(&config::config_fp(&planned, BED)));
+    }
+
+    /// The system itself, headless: it publishes the predicate into `DocState.dirty`, takes the
+    /// baseline on its first run, and tracks a cut moved afterwards.
+    #[test]
+    fn sync_doc_state_publishes_the_document_state() {
+        let (p, e) = saved_project();
+        let mut app = App::new();
+        app.insert_resource(p)
+            .insert_resource(e)
+            .insert_resource(Parts(vec![cut_part(&[10.0])]))
+            .insert_resource(SceneCfg {
+                source: None,
+                stl: None,
+                bed: BED,
+                plate: [256.0; 2],
+                root: None,
+                tmp: std::env::temp_dir(),
+                reslice_on_start: false,
+                cut_pct: 50.0,
+            })
+            .init_resource::<DocState>()
+            .add_systems(Update, crate::sync_doc_state);
+        app.update();
+        assert!(
+            !app.world().resource::<DocState>().dirty,
+            "first run baselines"
+        );
+
+        app.world_mut().resource_mut::<Parts>().0[0].cuts.list[0].at = 12.0; // drag the cut
+        app.update();
+        assert!(app.world().resource::<DocState>().dirty);
+
+        app.world_mut().resource_mut::<Parts>().0[0].cuts.list[0].at = 10.0; // and back
+        app.update();
+        assert!(
+            !app.world().resource::<DocState>().dirty,
+            "config is a comparison, not a latch"
+        );
+
+        app.world_mut()
+            .resource_mut::<crate::project::ProjectDoc>()
+            .set_entry(1);
+        app.update();
+        assert!(app.world().resource::<DocState>().dirty);
+    }
 
     /// `?back=` reaches `location.href`, so the gate is "relative same-origin path or nothing".
     #[test]

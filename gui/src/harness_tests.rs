@@ -75,11 +75,12 @@ fn harness() -> App {
         })
         .insert_resource(RenderTargetImage(Handle::default())) // dummy: only the Shot verb reads it
         .insert_resource(Parts(vec![seeded_part(vec![x_cut(0.0)])]))
-        .insert_resource(ScriptRunner {
-            actions: vec![],
-            idx: 0,
-            timer: 0,
-        })
+        .insert_resource(ScriptRunner::new(vec![]))
+        // TG.8: run_script's document verbs read these; the doc tests add the systems that answer them.
+        .init_resource::<PendingConfig>()
+        .init_resource::<DocState>()
+        .init_resource::<Platform>()
+        .init_resource::<SaveTarget>()
         .add_systems(
             Update,
             (
@@ -99,11 +100,7 @@ fn drive_seeded(script: &str, seed: impl FnOnce(&mut World)) -> App {
     seed(app.world_mut());
     let actions = parse_script(script);
     let n = actions.len();
-    app.insert_resource(ScriptRunner {
-        actions,
-        idx: 0,
-        timer: 0,
-    });
+    app.insert_resource(ScriptRunner::new(actions));
 
     let cap = 200 + n as u32 * 60; // every headless action drains in <=10 frames (Edit floor)
     let mut frames = 0u32;
@@ -584,4 +581,370 @@ fn revert_on_edit_ignores_spurious_change_but_reverts_a_real_edit() {
         0.0,
         "a real cut edit reverts the explode to the intact model"
     );
+}
+
+// ── TG.8 — the document verbs, end to end ─────────────────────────────────────────────────────────
+//
+// open -> edit -> save against a real `.scadproj` on disk, through `run_script` + the systems Save
+// needs (`sync_doc_state`, `save_doc_action`), then unzip what Save wrote. No render runs: `open`'s
+// `SwitchFile` lands nowhere, and the seeded part keeps its bounds, so the steps never wait.
+
+/// The committed fixture: `main.scad` (the entry) includes `lib.scad`, plus one binary asset, under a
+/// manifest title. A few hundred bytes, built by [`regenerate_bracket_fixture`], never from `models/`.
+const FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/bracket.scadproj"
+);
+const FIXTURE_TITLE: &str = "TG.8 bracket fixture";
+const FIXTURE_MAIN: &str =
+    "// TG.8 fixture: the entry renders the library's bracket.\ninclude <lib.scad>\nbracket();\n";
+const FIXTURE_LIB: &str = "module bracket() {\n  difference() {\n    cube([40, 20, 4]);\n    translate([10, 10, -1]) cylinder(d = 5, h = 6, $fn = 24);\n    translate([30, 10, -1]) cylinder(d = 5, h = 6, $fn = 24);\n  }\n}\n";
+/// A 1x1 transparent PNG: the asset rides the archive; nothing imports it.
+const FIXTURE_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+];
+
+/// An archive of `files` with `entry` and `title`, through the crate's own writer.
+fn scadproj_bytes(files: &[(&str, &[u8])], entry: &str, title: Option<&str>) -> Vec<u8> {
+    use fab_scad::scadproj;
+    let files = files
+        .iter()
+        .map(|(n, b)| (n.to_string(), b.to_vec()))
+        .collect();
+    let proj = scadproj::project_from_files(files, Some(entry.into()), title.map(Into::into))
+        .expect("a valid project");
+    scadproj::write_scadproj(&proj).expect("zip")
+}
+
+/// Rewrites the committed fixture. `cargo nextest run -p fab-gui --run-ignored only regenerate`.
+#[test]
+#[ignore = "writes the committed fixture; run by hand"]
+fn regenerate_bracket_fixture() {
+    let bytes = scadproj_bytes(
+        &[
+            ("main.scad", FIXTURE_MAIN.as_bytes()),
+            ("lib.scad", FIXTURE_LIB.as_bytes()),
+            ("logo.png", FIXTURE_PNG),
+        ],
+        "main.scad",
+        Some(FIXTURE_TITLE),
+    );
+    std::fs::create_dir_all(std::path::Path::new(FIXTURE).parent().unwrap()).unwrap();
+    std::fs::write(FIXTURE, bytes).unwrap();
+}
+
+/// A fresh scratch dir per test (nextest runs each test in its own process, so the pid suffices).
+fn scratch(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("fab_tg8_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// `harness()` plus the document systems, its temp under `dir`, stepped through `script` to the end.
+fn drive_doc(script: &str, dir: &std::path::Path) -> App {
+    drive_seeded(script, |w| {
+        w.resource_mut::<SceneCfg>().tmp = dir.join("tmp");
+        w.resource_mut::<Schedules>()
+            .add_systems(Update, (jobs::sync_doc_state, crate::save::save_doc_action));
+    })
+}
+
+fn failures(app: &App) -> &[String] {
+    &app.world().resource::<ScriptRunner>().failures
+}
+
+fn status(app: &App) -> &str {
+    &app.world().resource::<Status>().0
+}
+
+fn read_archive(path: &std::path::Path) -> fab_scad::scadproj::Project {
+    fab_scad::scadproj::read_scadproj(&std::fs::read(path).unwrap()).expect("a readable archive")
+}
+
+#[test]
+fn committed_fixture_is_two_files_one_asset_titled() {
+    // The e2e below leans on this shape; a regenerated fixture that drifts fails here first.
+    let p = read_archive(std::path::Path::new(FIXTURE));
+    assert_eq!(p.manifest.entry, "main.scad");
+    assert_eq!(p.manifest.title.as_deref(), Some(FIXTURE_TITLE));
+    let names: Vec<&str> = p.files.keys().map(String::as_str).collect();
+    assert_eq!(names, ["lib.scad", "logo.png", "main.scad"]);
+    assert_eq!(p.files["logo.png"], FIXTURE_PNG);
+    assert!(
+        std::fs::metadata(FIXTURE).unwrap().len() < 4096,
+        "keep it a few KB"
+    );
+}
+
+#[test]
+fn open_add_view_save_writes_the_archive() {
+    // The scenario no test covered, which is how v1.4.1 shipped an unreachable Save: open a project,
+    // add a file, switch the view (which used to reset the gate), save, and find it all in the zip.
+    let dir = scratch("e2e");
+    let doc = dir.join("bracket.scadproj");
+    std::fs::copy(FIXTURE, &doc).unwrap();
+    let hook = dir.join("hook.scad");
+    std::fs::write(&hook, "module hook() cube(3);\n").unwrap();
+    let app = drive_doc(
+        &format!(
+            "open {}; expect clean; addfile {}; expect dirty; view 0; expect dirty; save; expect clean",
+            doc.display(),
+            hook.display()
+        ),
+        &dir,
+    );
+    assert_eq!(
+        failures(&app),
+        [] as [String; 0],
+        "status: {}",
+        status(&app)
+    );
+    assert!(
+        status(&app).starts_with("saved bracket.scadproj -> "),
+        "{}",
+        status(&app)
+    );
+    let p = read_archive(&doc);
+    assert_eq!(
+        p.manifest.title.as_deref(),
+        Some(FIXTURE_TITLE),
+        "the title rides the re-zip"
+    );
+    assert_eq!(p.manifest.entry, "main.scad");
+    assert_eq!(p.files["hook.scad"], b"module hook() cube(3);\n");
+    assert_eq!(p.files["lib.scad"], FIXTURE_LIB.as_bytes());
+    assert_eq!(p.files["logo.png"], FIXTURE_PNG);
+    // The entry carries the baked plan now, and its model text is untouched.
+    let main = String::from_utf8(p.files["main.scad"].clone()).unwrap();
+    assert!(main.starts_with(FIXTURE_MAIN.trim_end()), "{main}");
+    assert!(main.contains("fab:config"), "{main}");
+    // The view moved off the entry and stayed there.
+    let project = app.world().resource::<crate::project::ProjectDoc>();
+    assert_eq!(project.files[project.active].name, "lib.scad");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_structural_save_drops_the_file_and_reopens_on_the_new_entry() {
+    // Spec R1 "deleting a file or changing the entry in a .scadproj": both read unsaved, and Save (not
+    // Save As) writes an archive without the deleted file that reopens on the new entry.
+    let dir = scratch("structural");
+    let doc = dir.join("bracket.scadproj");
+    std::fs::copy(FIXTURE, &doc).unwrap();
+    let hook = dir.join("hook.scad");
+    std::fs::write(&hook, "module hook() cube(3);\nhook();\n").unwrap();
+    // Sorted: lib.scad 0, main.scad 1; hook.scad lands at 2, then 1 once lib.scad goes.
+    let app = drive_doc(
+        &format!(
+            "open {}; addfile {}; save; expect clean; setentry 2; expect dirty; save; expect clean; \
+             delete 0; expect dirty; save; expect clean",
+            doc.display(),
+            hook.display()
+        ),
+        &dir,
+    );
+    assert_eq!(
+        failures(&app),
+        [] as [String; 0],
+        "status: {}",
+        status(&app)
+    );
+    let p = read_archive(&doc);
+    assert_eq!(p.manifest.entry, "hook.scad");
+    let names: Vec<&str> = p.files.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        ["hook.scad", "logo.png", "main.scad"],
+        "lib.scad is gone"
+    );
+    assert_eq!(p.manifest.title.as_deref(), Some(FIXTURE_TITLE));
+    // Reopened, the new entry is the one that renders.
+    let back = crate::jobs::open_document(&doc, &dir.join("reopen")).unwrap();
+    assert_eq!(back.files[back.entry].name, "hook.scad");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_same_stem_reopen_shows_the_new_entry_and_reads_clean() {
+    // Two archives named brace.scadproj unpack to the same temp dir with the same entry path; the
+    // old editor buffer (with an unsaved edit) must not leak into the second, nor into a re-open.
+    let dir = scratch("stem");
+    let (a, b) = (dir.join("a"), dir.join("b"));
+    for (d, text) in [(&a, "cube(1);\n"), (&b, "sphere(2);\n")] {
+        std::fs::create_dir_all(d).unwrap();
+        let bytes = scadproj_bytes(
+            &[("main.scad", text.as_bytes()), ("lib.scad", b"// lib\n")],
+            "main.scad",
+            None,
+        );
+        std::fs::write(d.join("brace.scadproj"), bytes).unwrap();
+    }
+    let (pa, pb) = (a.join("brace.scadproj"), b.join("brace.scadproj"));
+    let app = drive_doc(
+        &format!(
+            "open {}; edittext cylinder(3); expect dirty; open {}; expect clean",
+            pa.display(),
+            pb.display()
+        ),
+        &dir,
+    );
+    assert_eq!(failures(&app), [] as [String; 0]);
+    assert_eq!(app.world().resource::<EditorBuf>().text, "sphere(2);\n");
+    let project = app.world().resource::<crate::project::ProjectDoc>();
+    assert_eq!(project.files[project.entry].text, "sphere(2);\n");
+    assert_eq!(
+        read_archive(&pa).files["main.scad"],
+        b"cube(1);\n",
+        "a is never written"
+    );
+
+    // Re-opening the SAME file discards the unsaved edit.
+    let again = drive_doc(
+        &format!(
+            "open {p}; edittext cylinder(3); expect dirty; open {p}; expect clean",
+            p = pa.display()
+        ),
+        &dir,
+    );
+    assert_eq!(failures(&again), [] as [String; 0]);
+    assert_eq!(again.world().resource::<EditorBuf>().text, "cube(1);\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_binary_only_add_reads_dirty_and_saves() {
+    // A binary has no text flag to carry its unsaved state; `unsaved_assets` does (TG.1).
+    let dir = scratch("bin");
+    let doc = dir.join("bracket.scadproj");
+    std::fs::copy(FIXTURE, &doc).unwrap();
+    let blob = dir.join("plate.stl");
+    let bytes: Vec<u8> = (0u8..=255).collect(); // not UTF-8, so it can only land as an asset
+    std::fs::write(&blob, &bytes).unwrap();
+    let app = drive_doc(
+        &format!(
+            "open {}; addfile {}; expect dirty; save; expect clean",
+            doc.display(),
+            blob.display()
+        ),
+        &dir,
+    );
+    assert_eq!(
+        failures(&app),
+        [] as [String; 0],
+        "status: {}",
+        status(&app)
+    );
+    let project = app.world().resource::<crate::project::ProjectDoc>();
+    assert!(project.assets.contains_key("plate.stl"));
+    assert!(!project.asset_unsaved("plate.stl"));
+    assert_eq!(read_archive(&doc).files["plate.stl"], bytes);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_failed_expect_ends_the_run_and_is_reported() {
+    // A mismatch is a failure the caller can see (the CLI exits non-zero on it), and nothing after it
+    // runs: here the `addfile` never happens.
+    let dir = scratch("fail");
+    let doc = dir.join("bracket.scadproj");
+    std::fs::copy(FIXTURE, &doc).unwrap();
+    let hook = dir.join("hook.scad");
+    std::fs::write(&hook, "// hook\n").unwrap();
+    let app = drive_doc(
+        &format!(
+            "open {}; expect dirty; addfile {}",
+            doc.display(),
+            hook.display()
+        ),
+        &dir,
+    );
+    let out_of_range = drive_doc(
+        &format!("open {}; rename 7 x.scad; save", doc.display()),
+        &dir,
+    );
+    assert_eq!(
+        failures(&out_of_range),
+        ["rename 7: no such file".to_string()]
+    );
+    assert_eq!(
+        failures(&app),
+        ["expect dirty: the document is saved".to_string()]
+    );
+    let project = app.world().resource::<crate::project::ProjectDoc>();
+    assert!(project.files.iter().all(|f| f.name != "hook.scad"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn loose_and_structural_verbs_drive_the_document() {
+    // A loose folder: add copies in at once and stays clean, set-entry and delete are session-only, and
+    // a new file exists only in the session until Save, so it is unsaved. Then saveas packs it all and
+    // the document moves to the archive.
+    let dir = scratch("loose");
+    let folder = dir.join("brace");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("main.scad"), FIXTURE_MAIN).unwrap();
+    std::fs::write(folder.join("lib.scad"), FIXTURE_LIB).unwrap();
+    std::fs::write(folder.join("old.scad"), "// old\n").unwrap();
+    let hook = dir.join("hook.scad");
+    std::fs::write(&hook, "// hook\n").unwrap();
+    let packed = dir.join("packed.scadproj");
+    // Sorted: lib.scad 0, main.scad 1, old.scad 2; hook.scad lands at 3, then 2 once old.scad goes.
+    let app = drive_doc(
+        &format!(
+            "open {}; addfile {}; expect clean; setentry 0; expect clean; delete 2; expect clean; \
+             rename 2 hook2.scad; expect clean; newfile; expect dirty; edittext cube(1); expect dirty; \
+             saveas {}; expect clean",
+            folder.join("main.scad").display(),
+            hook.display(),
+            packed.display()
+        ),
+        &dir,
+    );
+    assert_eq!(
+        failures(&app),
+        [] as [String; 0],
+        "status: {}",
+        status(&app)
+    );
+    assert!(
+        folder.join("hook2.scad").exists(),
+        "rename moved the copy in the folder"
+    );
+    assert!(!folder.join("hook.scad").exists());
+    assert!(
+        folder.join("old.scad").exists(),
+        "a loose delete leaves the file on disk"
+    );
+    let project = app.world().resource::<crate::project::ProjectDoc>();
+    assert_eq!(
+        project.home,
+        crate::project::ProjectHome::ScadProj(packed.clone()),
+        "saveas re-homed the document"
+    );
+    let p = read_archive(&packed);
+    let names: Vec<&str> = p.files.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        ["hook2.scad", "lib.scad", "main.scad", "untitled.scad"]
+    );
+    assert_eq!(
+        p.manifest.entry, "lib.scad",
+        "the session's entry is the archive's"
+    );
+    assert!(
+        String::from_utf8_lossy(&p.files["untitled.scad"]).contains("cube(1);"),
+        "the unflushed edit is in the bytes"
+    );
+    // The folder's text files were never written by any of it.
+    assert_eq!(
+        std::fs::read_to_string(folder.join("main.scad")).unwrap(),
+        FIXTURE_MAIN
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

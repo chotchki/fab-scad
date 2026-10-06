@@ -44,156 +44,172 @@ pub(crate) struct PanelView<'w> {
     /// windowed app registers the resource — screenshot/scripted runs skip the update systems.
     #[cfg(target_os = "macos")]
     pub(crate) update: Option<Res<'w, crate::update::UpdateState>>,
+    /// TG.1: the document's unsaved state — what Save, the markers and the Open hold gate on. Read-only
+    /// since TG.3 moved Save out of `panel_ui` into `save_doc_action`.
+    pub(crate) doc: Res<'w, DocState>,
 }
 
-/// Bake the live slicing config into the buffer and persist it — the ONE local-save path, driven by both
-/// the Save button and the Cmd/Ctrl+S shortcut (W.3.40). Save follows the project HOME (Z.3.5): a
-/// `.scadproj` container RE-ZIPS the whole project back to itself; a loose/single file writes just the
-/// active file's config-baked `.scad` (native) or downloads it (web). `with_config_block` strips any prior
-/// block first, so re-saving REPLACES rather than stacks. Clears `dirty` only on a successful write.
-fn save_buffer(
-    editor: &mut EditorBuf,
-    parts: &[Part],
-    bed: [f32; 3],
-    project: &mut crate::project::ProjectDoc,
-) {
-    // Bake the CURRENT bed into the block too (W.3.8) — the model carries its own printer, so a web
-    // reload with no printers.toml still sizes right.
-    let printer = config::PrinterCfg {
-        bed: [bed[0] as f64, bed[1] as f64, bed[2] as f64],
-    };
-    // Sync the live active buffer into the file set first, so every save path sees the latest edit.
-    project.flush_active(&editor.text);
-    // Container: re-zip the WHOLE project back to its `.scadproj` home (Z.3.5). Native only for now — a
-    // web `.scadproj` save-back rides Z.3.4. On success every file is clean, not just the active one.
-    #[cfg(not(target_arch = "wasm32"))]
-    if let crate::project::ProjectHome::ScadProj(path) = project.home.clone() {
-        // No `extra`: a container's assets already live in the document (the loose folder's were
-        // absorbed at the Save-As that promoted it).
-        match rezip_project(project, parts, printer, &std::collections::BTreeMap::new()) {
-            Ok(bytes) => {
-                if std::fs::write(&path, bytes).is_ok() {
-                    editor.dirty = false;
-                    for f in &mut project.files {
-                        f.dirty = false;
-                    }
-                } else {
-                    error!("save .scadproj: writing {} failed", path.display());
-                }
-            }
-            Err(e) => error!("save .scadproj {}: {e:#}", path.display()),
-        }
-        return;
-    }
-    // Loose (Z.3.6): write back to the REAL folder — `loose_save_dir`, which answers "where does Save
-    // write?" rather than "what does the render root at?" (they agree since SW.3, but a container is
-    // exactly the case where they don't, and it returns above). The
-    // ENTRY is always written (config baked in, since it renders); every OTHER dirty file too, so
-    // in-memory edits to non-active files (they survive a switch) aren't dropped. The "Save as .scadproj"
-    // CTA is the OTHER option (pack them into one portable file); this keeps them loose in the folder.
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(real_dir) = crate::jobs::loose_save_dir(project) {
-        let entry = project.entry;
-        for (i, f) in project.files.iter().enumerate() {
-            if i != entry && !f.dirty {
-                continue; // skip clean non-entry files (the entry is always re-written for its config)
-            }
-            let text = if i == entry {
-                config::with_config_block(&f.text, parts, Some(printer))
-            } else {
-                f.text.clone()
-            };
-            if let Err(e) = std::fs::write(real_dir.join(&f.name), text) {
-                error!("save {}: {e}", f.name);
-            }
-        }
-        editor.dirty = false;
-        for f in &mut project.files {
-            f.dirty = false;
-        }
-        return;
-    }
-    // Fresh/pasted (native, no home to write in place) or the web (download). A multi-file doc becomes a
-    // `.scadproj` download (Z.3.8), a single file a `.scad` — via the shared source-variant helper.
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let baked = config::with_config_block(&editor.text, parts, Some(printer));
-        if std::fs::write(&editor.path, baked).is_ok() {
-            editor.dirty = false;
+/// One file's as-loaded customizer values: param name → value text.
+type Defaults = std::collections::HashMap<String, String>;
+
+/// The Customize tab's as-loaded defaults (X.2.4), per file of ONE document. TG.2: keyed by the
+/// editor's owner as well as its path — a path alone aliases across documents (two same-stem
+/// `.scadproj`s unpack to the same temp entry; a re-open reproduces its own paths), so a freshly
+/// opened document showed the OLD one's defaults and Reset spliced them in. A new owner drops every
+/// entry, so the map never outlives its document.
+#[derive(Default)]
+pub(crate) struct CustDefaults {
+    owner: Option<crate::project::DocId>,
+    by_path: std::collections::HashMap<std::path::PathBuf, Defaults>,
+}
+
+impl CustDefaults {
+    /// Z.3.10: a rename MOVES the key. Without the move the renamed file misses its entry and the next
+    /// capture records the buffer as it stands NOW — already customized — so Reset would forever reset
+    /// to whatever was last dialled in.
+    fn rename(&mut self, old: &std::path::Path, new: std::path::PathBuf) {
+        if let Some(v) = self.by_path.remove(old) {
+            self.by_path.insert(new, v);
         }
     }
-    #[cfg(target_arch = "wasm32")]
-    {
-        // Z.3.9: the DOCUMENT's name, not the active file's — a multi-file project downloaded while
-        // viewing `lib.scad` used to land as `lib.scadproj`.
-        let stem = project.doc_stem().unwrap_or_else(|| {
-            editor
-                .path
-                .file_stem()
-                .and_then(|n| n.to_str())
-                .filter(|n| !n.is_empty())
-                .unwrap_or("model")
-                .to_string()
-        });
-        match crate::jobs::project_source_variant(project, parts, printer, &editor.text, &stem) {
-            Ok((name, mime, bytes)) => {
-                if crate::web_host::download_bytes(&name, mime, &bytes) {
-                    editor.dirty = false;
-                    for f in &mut project.files {
-                        f.dirty = false;
-                    }
-                }
-            }
-            Err(e) => error!("save: {e:#}"),
+
+    /// `path`'s defaults in `owner`'s document, captured through `read` the first time they're asked.
+    fn capture(
+        &mut self,
+        owner: Option<crate::project::DocId>,
+        path: &std::path::Path,
+        read: impl FnOnce() -> Defaults,
+    ) -> &Defaults {
+        if owner != self.owner {
+            self.by_path.clear();
+            self.owner = owner;
         }
+        self.by_path.entry(path.to_path_buf()).or_insert_with(read)
     }
 }
 
-/// Seconds of hold to fire a [`hold_to_delete`] — long enough to be deliberate, short enough not to nag.
+/// Seconds of hold to fire a [`hold_to_confirm`] — long enough to be deliberate, short enough not to nag.
 const HOLD_SECS: f32 = 0.6;
 
-/// A press-and-HOLD delete (no modal — chotchki hates them): a trash button that FILLS with danger-red
-/// as you hold it; release early and the fill drains, hold to full and it fires (returns `true` that
-/// frame). The hold progress lives in egui memory keyed by `id` (transient, per-widget), so it needs no
-/// Bevy param — `panel_ui` is at its 16-param cap. Right-align the caller's layout to seat it at the edge.
-fn hold_to_delete(ui: &mut egui::Ui, id: egui::Id, hover: &str) -> bool {
-    let resp = ui
-        .add(egui::Button::new(egui::RichText::new(icons::DELETE).color(theme::DANGER)).small())
-        .on_hover_text(hover);
-    let dt = ui.input(|i| i.stable_dt);
-    let mut prog: f32 = ui.data(|d| d.get_temp(id).unwrap_or(0.0));
-    if resp.is_pointer_button_down_on() {
-        prog += dt / HOLD_SECS;
-        ui.ctx().request_repaint(); // animate the fill while held
-    } else {
-        // Drain fast on release (a flicked press shouldn't leave a half-charged button next time).
-        prog -= dt / (HOLD_SECS * 0.5);
+/// A hold's per-widget state (TG.2), kept in egui temp memory under the widget's id.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Hold {
+    /// Charge in `0..=1`.
+    prog: f32,
+    /// Fired and the pointer is still down: no re-arm until a release. Without the latch a long hold
+    /// recharges and fires AGAIN — and a row delete's id is the row INDEX, so after the list shifts up
+    /// the second fire deletes the NEXT file.
+    latched: bool,
+}
+
+impl Hold {
+    /// One frame of the charge (the testable half of [`hold_to_confirm`]): fills over [`HOLD_SECS`]
+    /// while `held`, drains twice as fast once released (a flicked press must not leave a half-charged
+    /// button for next time). Returns the next state and whether it FIRED: a full charge fires once,
+    /// then latches empty until the pointer lets go.
+    fn step(self, dt: f32, held: bool) -> (Hold, bool) {
+        if self.latched {
+            let next = Hold {
+                prog: 0.0,
+                latched: held,
+            };
+            return (next, false);
+        }
+        let prog = if held {
+            self.prog + dt / HOLD_SECS
+        } else {
+            self.prog - dt / (HOLD_SECS * 0.5)
+        }
+        .clamp(0.0, 1.0);
+        if prog >= 1.0 {
+            (
+                Hold {
+                    prog: 0.0,
+                    latched: true,
+                },
+                true,
+            )
+        } else {
+            (
+                Hold {
+                    prog,
+                    latched: false,
+                },
+                false,
+            )
+        }
     }
-    prog = prog.clamp(0.0, 1.0);
-    // The charging fill: a translucent danger sweep left→right across the button, glyph showing through.
+}
+
+/// A press-and-HOLD confirm (no modal — chotchki hates them; TG.2 generalized it from the delete): a
+/// button that FILLS as you hold it — danger-red for a destructive act, gold otherwise; release early
+/// and the fill drains, hold to full and it fires (returns `true` that frame). A plain click never
+/// fires. The hold progress lives in egui memory keyed by `id` (transient, per-widget), so it needs no
+/// Bevy param — `panel_ui` is at its 16-param cap. The caller builds the `button` (glyph or text, small
+/// or not); right-align its layout to seat a row action at the edge.
+fn hold_to_confirm(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    button: egui::Button<'_>,
+    hover: &str,
+    danger: bool,
+) -> bool {
+    let resp = ui.add(button).on_hover_text(hover);
+    let dt = ui.input(|i| i.stable_dt);
+    let prev: Hold = ui.data(|d| d.get_temp(id).unwrap_or_default());
+    let (hold, fired) = prev.step(dt, resp.is_pointer_button_down_on());
+    let prog = hold.prog;
+    if resp.is_pointer_button_down_on() || prog > 0.0 {
+        ui.ctx().request_repaint(); // animate the fill while held, and while it drains
+    }
+    // The charging fill: a translucent sweep left→right across the button, label showing through.
     if prog > 0.0 {
         let r = resp.rect;
         let fill = egui::Rect::from_min_size(r.min, egui::vec2(r.width() * prog, r.height()));
+        let [cr, cg, cb, _] = if danger { theme::DANGER } else { theme::GOLD }.to_array();
         ui.painter().rect_filled(
             fill,
             2.0,
-            egui::Color32::from_rgba_unmultiplied(220, 38, 38, 110),
+            egui::Color32::from_rgba_unmultiplied(cr, cg, cb, 110),
         );
-        ui.ctx().request_repaint(); // keep animating while it drains, too
     }
-    if prog >= 1.0 {
-        ui.data_mut(|d| d.insert_temp(id, 0.0_f32));
-        return true;
-    }
-    ui.data_mut(|d| d.insert_temp(id, prog));
-    false
+    ui.data_mut(|d| d.insert_temp(id, hold));
+    fired
 }
 
-/// The file name of `p` (its last component) for a project-home readout — falls back to the whole path.
-fn base(p: &std::path::Path) -> String {
-    p.file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| p.to_string_lossy().into_owned())
+/// TG.2: egui keeps the code editor's cursor AND undo history (whole-text snapshots) under its widget
+/// id, so right after an open or a file switch Cmd+Z put the PREVIOUS file's text into this one. Drop
+/// that state whenever the buffer changes hands: another document or another file. A rename or a
+/// Save As re-points the path, so it loses the undo history too; that costs less than a leak.
+fn forget_foreign_history(
+    ctx: &egui::Context,
+    id: egui::Id,
+    owner: Option<crate::project::DocId>,
+    path: &std::path::Path,
+) {
+    let key = id.with("held_by");
+    let now = (owner, path.to_path_buf());
+    if ctx
+        .data(|d| d.get_temp::<(Option<crate::project::DocId>, std::path::PathBuf)>(key))
+        .as_ref()
+        != Some(&now)
+    {
+        ctx.data_mut(|d| {
+            d.remove::<egui::text_edit::TextEditState>(id);
+            d.insert_temp(key, now);
+        });
+    }
+}
+
+/// TG.7: the UNSAVED marker — a painter-drawn FILLED circle. The stale marker stays `icons::DOT`, which
+/// the FILL=0 font subset renders as a RING, so the two differ in shape (spec: "Unsaved and stale look
+/// different") with no font regeneration and no tofu risk. Hover text is the caller's.
+fn unsaved_marker(ui: &mut egui::Ui) -> egui::Response {
+    const D: f32 = 9.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(D, D), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), D * 0.5, theme::GOLD_DIM);
+    resp
 }
 
 /// The whole control panel (U.3), immediate-mode: an app-wide top tab bar + bottom status bar +
@@ -211,7 +227,7 @@ pub(crate) fn panel_ui(
     mut active: ResMut<ActiveConn>,
     mut edit: ResMut<EditCut>,
     mut tab: ResMut<Tab>,
-    mut project: ResMut<crate::project::ProjectDoc>,
+    project: Res<crate::project::ProjectDoc>,
     status: Res<Status>,
     mut open_dialog: ResMut<OpenDialog>,
     mut editor: ResMut<EditorBuf>,
@@ -222,41 +238,44 @@ pub(crate) fn panel_ui(
     mut seam: ResMut<PanelSeam>,
     // X.2.4 reset-to-default: per-file map of param name → as-loaded value. A `Local` (not a resource)
     // so it needs no per-app init and captures automatically in every app that runs `panel_ui`.
-    mut cust_defaults: Local<
-        std::collections::HashMap<std::path::PathBuf, std::collections::HashMap<String, String>>,
-    >,
+    mut cust_defaults: Local<CustDefaults>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    // W.3.40: Cmd/Ctrl+S saves, from ANY tab — COMMAND is egui's platform primary (⌘ on macOS, Ctrl
-    // elsewhere). Consumed unconditionally (so the editor never also sees it), saved only when dirty —
-    // matching the Save button's enabled-gate. Checked before the tab match so it fires even when the
-    // Save button (Model tab only) is off screen. On web the browser's own save-page dialog is already
-    // suppressed by the window's `prevent_default_event_handling` (see clipboard.rs).
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) && editor.dirty {
-        save_buffer(
-            &mut editor,
-            &parts.0,
-            [scene.bed[0], scene.bed[1], scene.bed[2]],
-            &mut project,
-        );
+    // W.3.40: Cmd/Ctrl+S saves, from ANY tab — COMMAND is egui's platform primary (Cmd on macOS, Ctrl
+    // elsewhere). Consumed unconditionally (so the editor never also sees it) and sent unconditionally:
+    // TG.3's `save_doc_action` answers a clean document with "nothing to save" instead of a silent
+    // no-op. Checked before the tab match so it fires even when no Save button is on screen. On web
+    // the browser's own save-page dialog is already suppressed by the window's
+    // `prevent_default_event_handling` (see clipboard.rs).
+    // TG.5: Cmd/Ctrl+Shift+S is Save As on a desktop, checked FIRST — `consume_key` matches modifiers
+    // logically (an unrequested Shift is ignored), so the plain chord would swallow the shifted one.
+    // The web has no Save As (Save downloads), so there the shifted chord falls through to Save.
+    if view.platform.shows_picker()
+        && ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::S,
+            )
+        })
+    {
+        writers.cmd.write(PanelCmd::SaveAs);
+    } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+        writers.cmd.write(PanelCmd::Save);
     }
     // X.2: the customizer params for the current buffer (owned, so it doesn't hold `editor`'s borrow).
     // Drives the conditional Customize tab + its widgets. Cheap — `customize` parses only the buffer.
     let cv_params = crate::customize::extract(&editor.text);
-    // Z.3.10: a rename MOVES this map's key. Without the move the renamed file misses its own entry and
-    // `or_insert_with` below re-captures "as-loaded" defaults from the buffer as it stands NOW — i.e.
-    // already customized — so Reset-to-default would forever reset to whatever was last dialled in. The
-    // renaming handler is a different system and can't reach a `Local`, so it reports the move instead.
-    if let Some((old, new)) = writers.rename.renamed.take()
-        && let Some(v) = cust_defaults.remove(&old)
-    {
-        cust_defaults.insert(new, v);
+    // Z.3.10: the renaming handler is a different system and can't reach a `Local`, so it reports the
+    // move and the defaults' key follows it here (see [`CustDefaults::rename`]).
+    // TG.5: a Save As re-home moves every file at once, so the moves queue.
+    for (old, new) in writers.rename.renamed.drain(..) {
+        cust_defaults.rename(&old, new);
     }
-    // Capture the as-loaded defaults the first time we see this file (first frame ⇒ still the file's own
-    // values, before any customization). Keyed by path, so a file switch captures fresh defaults.
-    cust_defaults.entry(editor.path.clone()).or_insert_with(|| {
+    // Capture the as-loaded defaults the first time we see this file of this DOCUMENT (first frame ⇒
+    // still the file's own values, before any customization) — see [`CustDefaults`].
+    let cv_defaults = Some(cust_defaults.capture(editor.owner, &editor.path, || {
         cv_params
             .iter()
             .map(|p| {
@@ -269,8 +288,14 @@ pub(crate) fn panel_ui(
                 (p.name.clone(), v)
             })
             .collect()
-    });
-    let cv_defaults = cust_defaults.get(&editor.path);
+    }));
+    // TG.7: the document as every surface names it — the header chip, the Project card, the Save hover —
+    // all from the route Save actually takes (`save_route`), so none can promise what Save doesn't do.
+    let home = crate::file_ops::home_dir();
+    let on_site = view.save_target.0.is_some();
+    let route = crate::save::save_route(&project, *view.platform, on_site);
+    let card = crate::doc_view::doc_card(&project, &route, on_site, home.as_deref());
+    let save_hover = crate::save::plan_line(&route, home.as_deref());
     // A delete defers past the row loop (index stability), tagged with the PART it belongs to (T.2b).
     let mut to_remove: Option<(usize, usize)> = None;
     // A per-piece "reset to auto" (U.3.4) likewise defers past the Orientation list's `parts` borrow.
@@ -330,6 +355,26 @@ pub(crate) fn panel_ui(
                         .font(theme::quattro(13.0))
                         .color(theme::TEXT_MUTED),
                 );
+                // TG.7: the document chip — its name on every tab (nothing outside the Project tab used
+                // to say what was open), the unsaved marker, the full location on hover; a click goes
+                // to the Project tab, where the card and Save live.
+                let chip = ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(card.name.as_str())
+                                .size(14.0)
+                                .color(theme::NAVY),
+                        )
+                        .fill(theme::FAINT_BG)
+                        .stroke(egui::Stroke::new(1.0, theme::BORDER_SUBTLE)),
+                    )
+                    .on_hover_text(format!("{} — open the Project tab", card.full));
+                if chip.clicked() {
+                    *tab = Tab::Project;
+                }
+                if view.doc.dirty {
+                    unsaved_marker(ui).on_hover_text("unsaved changes");
+                }
                 ui.separator();
                 // The Customize tab (X.2) slots in after Model, but ONLY when the model exposes
                 // parameters — an empty customizer is a wart, so the tab appears with the content.
@@ -480,40 +525,105 @@ pub(crate) fn panel_ui(
         .show(&mut viewport, |ui| {
             match *tab {
                 Tab::Project => {
-                    // The project's files (Phase Z). The ENTRY renders; the rest are libs / parts /
-                    // assets. Click a file to view + edit it on the Model tab. Save follows the home: a
-                    // loose `.scad` writes in place, a `.scadproj` re-zips, the web downloads.
-                    ui.label(theme::chrome("Project files", 16.0).color(theme::NAVY));
-                    // A loose/fresh project that has grown past one file is in .scadproj territory (Z.3.7):
-                    // it still saves loose, but the portable option is to pack it into a single .scadproj.
-                    let needs_promote = project.is_multifile()
-                        && !matches!(project.home, crate::project::ProjectHome::ScadProj(_));
-                    let home_hint = match &project.home {
-                        crate::project::ProjectHome::ScadProj(p) => {
-                            format!("{} — a .scadproj (a zip; rename to .zip to peek)", base(p))
+                    // TG.7: the DOCUMENT card leads the tab — name, place · kind, what Save does here, and
+                    // Save / Save As… / Open… — so "what is open and how do I save it" is answered before
+                    // the file list. The old one-line hint was zip trivia for a `.scadproj` and told a
+                    // fresh multi-file document it "saves in place". The text is `doc_view`'s (tested).
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(card.name.as_str())
+                                .size(16.0)
+                                .color(theme::NAVY)
+                                .strong(),
+                        )
+                        .on_hover_text(card.full.as_str());
+                        if view.doc.dirty {
+                            unsaved_marker(ui).on_hover_text("unsaved changes");
                         }
-                        // Z.3.9: WebModel BEFORE the promote guard. `needs_promote` is
-                        // `is_multifile() && !ScadProj`, which a multi-file WEB project also satisfies —
-                        // so the guard used to swallow this arm and tell a web user to "Save in place"
-                        // and use a pack button that's desktop-only. The web never promotes; it re-zips.
-                        crate::project::ProjectHome::WebModel(n) => format!("{n} — from the web"),
-                        _ if needs_promote => {
-                            "loose files — Save writes them in place; pack them into one portable \
-                             .scadproj below"
-                                .into()
+                    });
+                    for line in [&card.place, &card.save_rule] {
+                        ui.label(
+                            egui::RichText::new(line.as_str())
+                                .font(theme::quattro(12.0))
+                                .color(theme::TEXT_MUTED),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        // Save: gold and enabled while unsaved, grey and disabled when clean (the macOS
+                        // default; chotchki, 2026-10-05). Same `PanelCmd::Save` as Cmd/Ctrl+S.
+                        let dirty = view.doc.dirty;
+                        let caption = theme::chrome("Save", 14.0);
+                        let save = if dirty {
+                            egui::Button::new(caption.color(theme::NAVY)).fill(theme::GOLD)
+                        } else {
+                            egui::Button::new(caption)
+                        };
+                        if ui
+                            .add_enabled(dirty, save)
+                            .on_hover_text(save_hover.as_str())
+                            .on_disabled_hover_text(crate::save::nothing_line(&project))
+                            .clicked()
+                        {
+                            writers.cmd.write(PanelCmd::Save);
                         }
-                        crate::project::ProjectHome::ScadFile(p) => {
-                            format!("{} — a loose .scad (saves in place)", base(p))
+                        // TG.5: Save As… for EVERY desktop document (it replaced Z.3.7's gold promote).
+                        // The hover names the file kind it writes — `.scad` for one file, `.scadproj`
+                        // otherwise; the kind walks a loose folder for assets, so only while hovered.
+                        if view.platform.shows_picker()
+                            && ui
+                                .button("Save As…")
+                                .on_hover_ui(|ui| {
+                                    let ext = crate::save::SaveAsKind::of(
+                                        &project,
+                                        crate::save::has_disk_assets(&project),
+                                    )
+                                    .ext();
+                                    ui.label(format!(
+                                        "write this document to a new .{ext} and keep working \
+                                         there — the original stays as it was"
+                                    ));
+                                })
+                                .clicked()
+                        {
+                            writers.cmd.write(PanelCmd::SaveAs);
                         }
-                        crate::project::ProjectHome::Fresh => {
-                            "unsaved — one file saves as .scad, two-or-more as .scadproj".into()
+                        // TG.2: an open REPLACES the document (adopt), so while it's unsaved Open… asks
+                        // for a hold — never a modal — and a plain click does nothing. OPEN is
+                        // desktop-only: on the web the document is whatever `?model=` handed us, and
+                        // swapping it out would orphan the save-back target. TG.7: text-only — it used
+                        // to share Add…'s `+` glyph.
+                        let open = view.platform.shows_picker()
+                            && if view.doc.dirty {
+                                hold_to_confirm(
+                                    ui,
+                                    egui::Id::new("proj_open_discard"),
+                                    egui::Button::new("hold to discard changes and open…"),
+                                    "this document has unsaved changes — hold to discard them and \
+                                     open a .scad model or a .scadproj project",
+                                    true,
+                                )
+                            } else {
+                                ui.button("Open…")
+                                    .on_hover_text("open a .scad model or a .scadproj project")
+                                    .clicked()
+                            };
+                        if open && open_dialog.0.is_none() {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                open_dialog.0 =
+                                    Some(AsyncComputeTaskPool::get().spawn(async move {
+                                        rfd::AsyncFileDialog::new()
+                                            .add_filter(
+                                                "OpenSCAD source or project",
+                                                &["scad", "scadproj"],
+                                            )
+                                            .pick_file()
+                                            .await
+                                            .map(|h| h.path().to_path_buf())
+                                    }));
+                            }
                         }
-                    };
-                    ui.label(
-                        egui::RichText::new(home_hint)
-                            .font(theme::quattro(12.0))
-                            .color(theme::TEXT_MUTED),
-                    );
+                    });
                     // Z.3.10: rename the ITEM on hotchkiss.io — the DOCUMENT's name (what the gallery
                     // shows and what every future download/publish is called), as opposed to the file
                     // rows below, which rename files INSIDE it. Gated on a derived MediaItem, exactly
@@ -570,7 +680,7 @@ pub(crate) fn panel_ui(
                     ui.separator();
                     // File rows: the entry carries the GOLD render-pointer (a static label); every OTHER
                     // row leads with a NAVY ▸ button that promotes it to the render target. The active
-                    // (editor-shown) row is the selected pill; a dirty file shows the unsaved dot; a red
+                    // (editor-shown) row is the selected pill; a dirty file shows the unsaved marker; a red
                     // trash button removes it (never the entry, never the last file).
                     let multi = project.files.len() > 1;
                     // Z.3.10: file MANAGEMENT (rename / set-entry / delete) is available on BOTH
@@ -638,19 +748,26 @@ pub(crate) fn panel_ui(
                                     writers.rename.focus = true;
                                 }
                             }
-                            if f.dirty {
-                                ui.colored_label(theme::GOLD_DIM, icons::DOT)
-                                    .on_hover_text("unsaved");
+                            // TG.1: stored OR live edits — the active row marks as you type.
+                            if project.file_unsaved(i, &editor) {
+                                unsaved_marker(ui).on_hover_text("unsaved");
                             }
                             // Delete: RIGHT-aligned column, HOLD to fire (destructive → deliberate).
                             if manage && multi && !is_entry {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if hold_to_delete(
+                                        if hold_to_confirm(
                                             ui,
                                             egui::Id::new(("proj_del", i)),
-                                            "hold to remove from the project",
+                                            egui::Button::new(
+                                                egui::RichText::new(icons::DELETE)
+                                                    .color(theme::DANGER),
+                                            )
+                                            .small(),
+                                            // TG.6: loose delete is session-only — say so.
+                                            crate::file_ops::delete_hover(&project),
+                                            true,
                                         ) {
                                             writers.cmd.write(PanelCmd::DeleteFile(i));
                                         }
@@ -667,40 +784,22 @@ pub(crate) fn panel_ui(
                                 egui::RichText::new(name.as_str()).color(theme::TEXT_MUTED),
                             )
                             .on_hover_text("binary asset (import/surface) — rides the project, not editable");
+                            // TG.1/TG.7: an added binary is unsaved too, with the same filled marker.
+                            if project.asset_unsaved(name) {
+                                unsaved_marker(ui).on_hover_text("unsaved");
+                            }
                         });
                     }
                     ui.separator();
-                    // Project actions. Add/New work on BOTH platforms (Z.3.10) — Add reads bytes through
-                    // the browser's own file input on web and rfd on desktop, New is a pure ProjectDoc
-                    // edit; both write a PanelCmd that `project_files_action{,_web}` handles. OPEN stays
-                    // desktop-only: it replaces the whole document, and on the web the document is
-                    // whatever `?model=` handed us — swapping it out would orphan the save-back target.
+                    // Add/New, below the rows they extend, on BOTH platforms (Z.3.10) — Add reads bytes
+                    // through the browser's own file input on web and rfd on desktop, New is a pure
+                    // ProjectDoc edit; both write a PanelCmd that `project_files_action{,_web}` handles.
+                    // (Open… and Save As… live on the document card above, TG.7.)
                     ui.horizontal(|ui| {
-                        if view.platform.shows_picker()
-                            && ui
-                                .button(format!("{}  Open…", icons::ADD))
-                                .on_hover_text("open a .scad model or a .scadproj project")
-                                .clicked()
-                            && open_dialog.0.is_none()
-                        {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                open_dialog.0 =
-                                    Some(AsyncComputeTaskPool::get().spawn(async move {
-                                        rfd::AsyncFileDialog::new()
-                                            .add_filter(
-                                                "OpenSCAD source or project",
-                                                &["scad", "scadproj"],
-                                            )
-                                            .pick_file()
-                                            .await
-                                            .map(|h| h.path().to_path_buf())
-                                    }));
-                            }
-                        }
                         if ui
                             .button(format!("{}  Add…", icons::ADD))
-                            .on_hover_text("add existing files to this project")
+                            // TG.6: a loose Add writes into the real folder — say so up front.
+                            .on_hover_text(crate::file_ops::add_hover(&project))
                             .clicked()
                         {
                             writers.cmd.write(PanelCmd::AddFiles);
@@ -713,55 +812,40 @@ pub(crate) fn panel_ui(
                             writers.cmd.write(PanelCmd::NewFile);
                         }
                     });
-                    if view.platform.shows_picker() {
-                        // The promote CTA (Z.3.7): pack a loose multi-file project into one portable
-                        // .scadproj (a native Save-As; then it saves as a container in place). Gold, so it
-                        // reads as the deliberate step, not a routine button.
-                        if needs_promote {
-                            ui.add_space(4.0);
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        theme::chrome("Save as .scadproj…", 14.0)
-                                            .color(theme::NAVY),
-                                    )
-                                    .fill(theme::GOLD),
-                                )
-                                .on_hover_text("pack these files into one portable .scadproj")
-                                .clicked()
-                            {
-                                writers.cmd.write(PanelCmd::SaveAsProject);
-                            }
-                        }
-                    }
                 }
                 Tab::Model => {
+                    // TG.7: the breadcrumb — which file is in the editor, which document it's in, and
+                    // which file renders when that isn't this one (the viewport keeps drawing the entry,
+                    // and Customize follows the VIEWED file, so the tab has to say both).
+                    ui.label(
+                        egui::RichText::new(crate::doc_view::breadcrumb(&project))
+                            .font(theme::quattro(12.0))
+                            .color(theme::TEXT_MUTED),
+                    );
                     // Save (explicit): the buffer renders live, but the file on disk only changes here or
-                    // via Cmd/Ctrl+S (W.3.40). The write itself — config-block bake + per-platform
-                    // delivery — lives in `save_buffer`.
+                    // via Cmd/Ctrl+S (W.3.40). Both send `PanelCmd::Save`; where it writes and what it
+                    // reports is `save::save_doc_action` (TG.3).
                     ui.horizontal(|ui| {
-                        let save_hover = if cfg!(target_arch = "wasm32") {
-                            "download .scad"
-                        } else {
-                            "save to disk"
-                        };
+                        // TG.4: the hover says where THIS document's Save goes (`save_route` — the
+                        // same table `save_doc_action` routes by), e.g. "download Brace.scadproj"; the
+                        // old fixed "download .scad" was wrong for every project. TG.7: labelled — an
+                        // icon-only floppy didn't read as the way to save.
                         if ui
-                            .add_enabled(editor.dirty, egui::Button::new(icons::SAVE))
-                            .on_hover_text(save_hover)
+                            .add_enabled(
+                                view.doc.dirty,
+                                egui::Button::new(format!("{}  Save", icons::SAVE)),
+                            )
+                            .on_hover_text(save_hover.as_str())
+                            .on_disabled_hover_text(crate::save::nothing_line(&project))
                             .clicked()
                         {
-                            save_buffer(
-                                &mut editor,
-                                &parts.0,
-                                [scene.bed[0], scene.bed[1], scene.bed[2]],
-                                &mut project,
-                            );
+                            writers.cmd.write(PanelCmd::Save);
                         }
-                        if editor.dirty {
-                            ui.colored_label(
-                                theme::GOLD_DIM,
-                                format!("{} unsaved", icons::DOT), // icons::DOT — a raw bullet is tofu
-                            );
+                        // TG.1: the DOCUMENT's state — a clean view of an unsaved project still says so.
+                        // TG.7: the filled marker, never the stale ring.
+                        if view.doc.dirty {
+                            unsaved_marker(ui);
+                            ui.colored_label(theme::GOLD_DIM, "unsaved");
                         }
                         // Set-entry from the editor (Z.3.6): viewing a file that ISN'T the render
                         // target, one click makes it the entry — no trip back to the Project tab.
@@ -794,7 +878,10 @@ pub(crate) fn panel_ui(
                                 )
                                 .fill(theme::GOLD),
                             )
-                            .on_hover_text("update this model's files on hotchkiss.io")
+                            .on_hover_text(crate::save::plan_line(
+                                &crate::save::plan(&project, *view.platform, true),
+                                None,
+                            ))
                             .clicked()
                     {
                         writers.cmd.write(PanelCmd::SaveToSite);
@@ -810,6 +897,7 @@ pub(crate) fn panel_ui(
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             let editor_id = ui.make_persistent_id("fab_model_editor");
+                            forget_foreign_history(ui.ctx(), editor_id, editor.owner, &editor.path);
                             let focused = ui.memory(|m| m.has_focus(editor_id));
                             // W.3.35: Tab / Shift+Tab re-indents the SELECTION. Intercept it BEFORE the
                             // widget — egui's default Tab moves focus (and `.code_editor()`'s would insert a
@@ -961,8 +1049,9 @@ pub(crate) fn panel_ui(
                             }
                         });
                         if bed != scene.bed {
-                            scene.set_configured_bed(bed); // slaves the export plate to the new bed
-                            editor.dirty = true; // enable Save so the new bed bakes into fab:config
+                            // Slaves the export plate to the new bed. Unsaved via the config
+                            // fingerprint (TG.1) — no `editor.dirty` patch for a file switch to erase.
+                            scene.set_configured_bed(bed);
                         }
                     }
                     ui.separator();
@@ -1475,5 +1564,198 @@ pub(crate) fn signal_ready(mut fired: Local<bool>, mut contexts: EguiContexts) {
         && let Ok(ev) = web_sys::CustomEvent::new("fab-gui:ready")
     {
         let _ = doc.dispatch_event(&ev);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn charged(prog: f32) -> Hold {
+        Hold {
+            prog,
+            latched: false,
+        }
+    }
+
+    /// One frame of a lone code editor at `id`, focused, fed `events`; `held` names whose buffer it is
+    /// the way `panel_ui` does (`None` = no reset, the pre-fix widget).
+    fn editor_frame(
+        ctx: &egui::Context,
+        id: egui::Id,
+        t: f64,
+        text: &mut String,
+        events: Vec<egui::Event>,
+        held: Option<(Option<crate::project::DocId>, &std::path::Path)>,
+    ) {
+        let input = egui::RawInput {
+            time: Some(t),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            if let Some((owner, path)) = held {
+                forget_foreign_history(ui.ctx(), id, owner, path);
+            }
+            ui.memory_mut(|m| m.request_focus(id));
+            ui.add(egui::TextEdit::multiline(text).id(id).code_editor());
+        });
+    }
+
+    fn cmd_z() -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }]
+    }
+
+    /// TG.2 (spec: nothing in an opened document comes from the previous one's editor): Cmd+Z right
+    /// after the buffer changes hands must not restore the previous file's text. egui's undoer keeps
+    /// whole-text snapshots under the widget id, and the first half shows it really does leak without
+    /// the reset, so this can't pass vacuously. Within one file, undo still works.
+    #[test]
+    fn undo_never_crosses_into_the_previous_documents_text() {
+        let id = egui::Id::new("fab_model_editor");
+        let path = std::path::Path::new("/tmp/fab-gui/scadproj/brace/main.scad");
+        let (a, b) = (
+            crate::project::ProjectDoc::default().id(),
+            crate::project::ProjectDoc::default().id(),
+        );
+        // Each run: A's text is on screen and focused, then a same-path document B is adopted (only
+        // the buffer and its owner change, as `adopt` does), then Cmd+Z.
+        let run = |reset: bool| {
+            let ctx = egui::Context::default();
+            let mut text = "cube(1);".to_string();
+            for t in 0..3 {
+                editor_frame(
+                    &ctx,
+                    id,
+                    t as f64,
+                    &mut text,
+                    vec![],
+                    reset.then_some((Some(a), path)),
+                );
+            }
+            text = "sphere(2);".to_string();
+            editor_frame(
+                &ctx,
+                id,
+                3.0,
+                &mut text,
+                cmd_z(),
+                reset.then_some((Some(b), path)),
+            );
+            text
+        };
+        assert_eq!(
+            run(false),
+            "cube(1);",
+            "without the reset egui leaks A's text into B"
+        );
+        assert_eq!(run(true), "sphere(2);", "B's text stays B's");
+
+        // The same owner and file keep their history: an edit undoes back to the loaded text.
+        let ctx = egui::Context::default();
+        let mut text = "cube(1);".to_string();
+        let held = Some((Some(a), path));
+        for t in 0..3 {
+            editor_frame(&ctx, id, t as f64, &mut text, vec![], held);
+        }
+        text.push_str(" // edit");
+        editor_frame(&ctx, id, 3.0, &mut text, cmd_z(), held);
+        assert_eq!(text, "cube(1);");
+    }
+
+    /// TG.2: the hold's charge — fills over HOLD_SECS, fires exactly once at full, drains twice as
+    /// fast on release, and never leaves 0..=1.
+    #[test]
+    fn hold_fills_fires_once_and_drains() {
+        let frame = HOLD_SECS / 4.0;
+        let mut h = Hold::default();
+        for _ in 0..3 {
+            let fired;
+            (h, fired) = h.step(frame, true);
+            assert!(!fired, "fired early at {}", h.prog);
+        }
+        assert!(
+            (h.prog - 0.75).abs() < 1e-5,
+            "three quarter-holds = 0.75, got {}",
+            h.prog
+        );
+        let fired;
+        (h, fired) = h.step(frame, true);
+        assert!(fired, "a full hold fires");
+        assert_eq!(h.prog, 0.0, "and shows empty");
+
+        // Release: drains at twice the fill rate, floors at empty, never fires.
+        let (q, fired) = charged(0.75).step(frame, false);
+        assert!(!fired);
+        assert!(
+            (q.prog - 0.25).abs() < 1e-5,
+            "a quarter-hold of release drains 0.5, got {}",
+            q.prog
+        );
+        assert_eq!(q.step(frame, false), (Hold::default(), false));
+        // A click (one short press, then release) never fires.
+        let (q, fired) = Hold::default().step(1.0 / 60.0, true);
+        assert!(!fired && q.prog < 1.0);
+        // A huge frame (a stall) clamps rather than overshooting.
+        assert!(Hold::default().step(10.0, true).1);
+        assert_eq!(charged(0.5).step(10.0, false), (Hold::default(), false));
+    }
+
+    fn vals(width: &str) -> Defaults {
+        Defaults::from([("width".to_string(), width.to_string())])
+    }
+
+    /// TG.2 review: the Customize defaults never cross documents. Two same-stem archives share one
+    /// temp entry path, and a re-open reproduces its own path — either used to keep the OLD document's
+    /// as-loaded values, so a freshly opened, clean document offered Reset and spliced them in.
+    #[test]
+    fn customize_defaults_recapture_for_a_new_document_at_the_same_path() {
+        let entry = std::path::Path::new("/tmp/fab-gui/scadproj/brace/main.scad");
+        let (a, b) = (
+            crate::project::DocId::default(),
+            crate::project::DocId::default(),
+        );
+        let mut d = CustDefaults::default();
+        assert_eq!(d.capture(Some(a), entry, || vals("10")), &vals("10"));
+        // Same document, later frame: the capture sticks (the buffer may be customized by now).
+        assert_eq!(d.capture(Some(a), entry, || vals("20")), &vals("10"));
+        // Same path, NEW document (same-stem archive, or a re-open of a saved file): recaptured.
+        assert_eq!(d.capture(Some(b), entry, || vals("30")), &vals("30"));
+        // A rename within the document moves the capture with the file.
+        let moved = std::path::PathBuf::from("/tmp/fab-gui/scadproj/brace/brace.scad");
+        d.rename(entry, moved.clone());
+        assert_eq!(d.capture(Some(b), &moved, || vals("99")), &vals("30"));
+    }
+
+    /// TG.2 review: a hold kept down past the fire must NOT recharge and fire again. The row delete
+    /// keys its hold by row index, so a second fire after the list shifts would delete the next file.
+    /// Only a release re-arms it.
+    #[test]
+    fn a_continued_hold_never_fires_twice() {
+        let frame = HOLD_SECS / 4.0;
+        let (mut h, fired) = charged(0.9).step(frame, true);
+        assert!(fired);
+        for _ in 0..40 {
+            let again;
+            (h, again) = h.step(frame, true);
+            assert!(!again, "a held-down button refired");
+            assert_eq!(h.prog, 0.0, "a latched hold shows no charge");
+        }
+        // Release, then a fresh full hold fires again.
+        (h, _) = h.step(frame, false);
+        assert_eq!(h, Hold::default(), "a release re-arms");
+        let mut fires = 0;
+        for _ in 0..4 {
+            let f;
+            (h, f) = h.step(frame, true);
+            fires += f as u32;
+        }
+        assert_eq!(fires, 1);
     }
 }

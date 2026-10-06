@@ -86,7 +86,7 @@ Save SHALL write according to the kind of document:
 - **THEN** a save dialog asks where to save it, and after a successful save the window title names the new file
 
 ### Requirement: Every desktop document can be saved under a new name
-The desktop app SHALL offer Save As… on the Project tab and on ⇧⌘S (Ctrl+Shift+S) for every document. Save As SHALL write a `.scad` when the document is one text file with no assets and a `.scadproj` otherwise. Its dialog SHALL start in the document's own folder, or the user's home folder for a document with no file, never a temporary folder, and SHALL suggest the document's name. After a successful Save As, the document SHALL be the new file: later Saves write there, the title names it, and the original file is unchanged.
+The desktop app SHALL offer Save As… on the Project tab and on ⇧⌘S (Ctrl+Shift+S) for every document. Save As SHALL write a `.scad` when the document is one text file with no assets, counting importable files that sit beside a loose file in its folder, and a `.scadproj` otherwise, so an `import()` is never stranded. Its dialog SHALL start in the document's own folder, or the user's home folder for a document with no file, never a temporary folder, and SHALL suggest the document's name. After a successful Save As, the document SHALL be the new file: later Saves write there, the title names it, and the original file is unchanged.
 
 #### Scenario: Save As on an existing .scadproj
 - **WHEN** `~/models/bracket.scadproj` is open and the user saves it as `~/models/bracket-v2.scadproj`
@@ -119,11 +119,19 @@ Opening a document SHALL show that document's saved contents and render its entr
 - **WHEN** the desktop app is launched as `fab-gui ~/models/bracket.scadproj`
 - **THEN** the project opens with its entry rendering and the window title names `bracket.scadproj`
 
+#### Scenario: Launching with a .scad that doesn't exist yet
+- **WHEN** the desktop app is launched with the path of a `.scad` that does not exist
+- **THEN** it opens an empty file named for that path, and the status says Save will write it there
+
+#### Scenario: Undo never reaches into the previous document
+- **WHEN** the user opens a document and immediately presses ⌘Z in the editor
+- **THEN** the editor keeps the newly opened text; no text from the previously open document comes back
+
 ### Requirement: The open document is named on every screen
 The GUI SHALL name the open document wherever the user is:
 - **Window title (desktop):** `<document> — fab-scad`, with "(unsaved)" while unsaved, or `untitled — fab-scad` for a document with no file.
 - **Header:** names the document on every tab.
-- **Project tab:** opens with the document's name, its folder or origin, its kind (`.scadproj`, loose folder, not saved yet, or hotchkiss.io), one line saying what Save does for it, and its Save, Save As… and Open… controls.
+- **Project tab:** opens with the document's name, its folder or origin, its kind (`.scadproj`, loose folder, a single `.scad` file, not saved yet, a hotchkiss.io item, or a web model with no site item), one line saying what Save does for it, and its Save, Save As… and Open… controls.
 - **Model tab:** names the file in the editor and the document it belongs to, and, when that file is not the entry, which file renders.
 
 User-facing text SHALL describe what Save does, not the archive format.

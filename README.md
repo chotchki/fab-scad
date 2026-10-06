@@ -40,7 +40,11 @@ real models, and it renders heavy BOSL2 pieces that OpenSCAD times out on — th
 **The GUI** (`fab-gui`, Bevy + egui) is the main way in — the SAME app on the desktop and on the web. A
 live editor (renders as you type) feeding a top-tab workflow:
 
-- **Model** — edit; save; open in the external OpenSCAD if you want it.
+- **Project** — what's open and how it saves: the document's name, folder and kind (a `.scadproj`, a
+  loose `.scad` folder, a hotchkiss.io item, not saved yet), what Save does to it, Save (plus Save As… and
+  Open… on the desktop), then its files (add, new, rename, delete, pick which one renders).
+- **Model** — edit (a breadcrumb says which file you're in and which one renders); save; open in the
+  external OpenSCAD if you want it.
 - **Customize** — OpenSCAD-style top-level params become widgets (sliders/combos/checkboxes), spliced
   back into the source; appears only when the model exposes parameters.
 - **Parts** — per top-level part: cuts + connectors, printer bed X/Y/Z, auto fit-to-bed. Connectors are
@@ -49,8 +53,15 @@ live editor (renders as you type) feeding a top-tab workflow:
 - **Export** — a live plates·pieces·fill metric, a Bambu multi-plate `.3mf` export, and a push back to
   hotchkiss.io.
 
+**Save** writes the document where it lives: a `.scadproj` rewrites the archive (every file, asset and the
+cut plan), a loose `.scad` (or folder of them) gets its edited files back, the web downloads. It's grey
+when there's nothing to save, and ⌘S (Ctrl+S) saves from any tab. **Save As…** (⇧⌘S, Ctrl+Shift+S;
+desktop only) writes a new `.scad` or `.scadproj` and the document MOVES there, the original untouched. A
+filled dot marks unsaved work (a ring means a tab is stale), and the header chip (and the desktop window
+title) name what's open. The rules live in [`docs/web-projects-design.md`](docs/web-projects-design.md#phase-tg--the-document-is-what-you-save).
+
 ```sh
-cargo run -p fab-gui -- part.scad          # the desktop app
+cargo run -p fab-gui -- part.scad          # the desktop app (a .scadproj opens as a project)
 ```
 
 The web build is `gui/web/build-wasm.sh` — served cross-origin-isolated (COOP/COEP) so the threaded

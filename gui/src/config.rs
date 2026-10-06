@@ -179,16 +179,27 @@ pub(crate) fn read_config_block(text: &str) -> Option<FabConfig> {
     }
 }
 
-/// `text` with any `fab:config` block line removed + trailing blank lines trimmed — the clean model
-/// source (what the user edits + what the evaluator sees; the block is re-appended only on persist).
+/// `text` with any `fab:config` block line removed, plus the ONE blank separator line right above it —
+/// the clean model source (what the user edits + what the evaluator sees; the block is re-appended
+/// only on persist).
+///
+/// TG.3: exactly the inverse of what [`reattach_config_block`] / [`with_config_block`] append, and
+/// block-less text comes back byte-identical, so hydrate -> flush is a fixpoint. It used to trim EVERY
+/// trailing blank line: a file whose model ends in blank lines then re-flushed different from what it
+/// was, and merely viewing another file marked a just-saved document unsaved.
 pub(crate) fn strip_config_block(text: &str) -> String {
+    let is_block = |l: &str| l.trim_start().starts_with("// fab:config");
+    if !text.lines().any(is_block) {
+        return text.to_string();
+    }
     let trailing_nl = text.ends_with('\n');
-    let mut lines: Vec<&str> = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("// fab:config"))
-        .collect();
-    while lines.last().is_some_and(|l| l.trim().is_empty()) {
-        lines.pop();
+    let mut lines: Vec<&str> = Vec::new();
+    for l in text.lines() {
+        if !is_block(l) {
+            lines.push(l);
+        } else if lines.last().is_some_and(|p| p.trim().is_empty()) {
+            lines.pop(); // the separator the append wrote, not the user's
+        }
     }
     let mut s = lines.join("\n");
     if trailing_nl && !s.is_empty() {
@@ -323,6 +334,43 @@ fn part_to_slicing(part: &Part, index: usize, nth: usize) -> Option<PartSlicing>
         connector,
         orient,
     })
+}
+
+// ── the config fingerprint (TG.1): "would Save bake a different fab:config?" ──────────────────────
+// `Parts` has no write chokepoint (cuts, connectors, orient, AutoPlace, Reset-to-auto, the bed all write
+// it from different systems), so unsaved-config is a COMPARISON, not a flag: fingerprint exactly what
+// Save persists and diff it against a baseline (`DocState`). Hashing the persisted projection means
+// what Save drops can't read as a change: a disabled cut, a connector on one, an auto orientation.
+
+/// What Save would bake as `fab:config`, fingerprinted (TG.1). Per part in `Parts` order, plus the
+/// bed, which every save writes as the printer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ConfigFp {
+    /// [`part_fp`] per part; `None` = the part persists nothing (it auto-derives on reopen).
+    pub(crate) parts: Vec<Option<u64>>,
+    /// The bed as `f32` bits — exact, and the same `f32`s Save widens to the printer's `f64`s.
+    pub(crate) bed: [u32; 3],
+}
+
+/// Part `i`'s persisted projection — [`part_to_slicing`]'s block serialized as Save serializes it —
+/// hashed. `None` when the part writes no block, or when the block won't serialize (then
+/// [`config_block`] writes nothing either, so `None` is still what Save does).
+pub(crate) fn part_fp(parts: &[Part], i: usize) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let part = parts.get(i)?;
+    let nth = parts[..i].iter().filter(|p| p.name == part.name).count();
+    let json = serde_json::to_string(&part_to_slicing(part, i, nth)?).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    json.hash(&mut h);
+    Some(h.finish())
+}
+
+/// The whole live config's fingerprint: every part's [`part_fp`] plus `bed`.
+pub(crate) fn config_fp(parts: &[Part], bed: [f32; 3]) -> ConfigFp {
+    ConfigFp {
+        parts: (0..parts.len()).map(|i| part_fp(parts, i)).collect(),
+        bed: bed.map(f32::to_bits),
+    }
 }
 
 /// GUI placement → manifest connector (the inverse of [`conn_to_placed`]): an onion carries its
@@ -557,6 +605,37 @@ mod tests {
         );
     }
 
+    /// TG.3: strip is the exact inverse of the append, so a buffer that ends in blank lines survives
+    /// save -> hydrate -> flush byte-identical, and a block-less file is never touched (a view of it
+    /// can't dirty it).
+    #[test]
+    fn strip_then_reattach_is_a_fixpoint_for_trailing_blank_lines() {
+        let parts = [part_with(Some("p"), &[(Axis::Z, 40.0, true)], &[])];
+        for buf in [
+            "cube(1);",
+            "cube(1);\n",
+            "cube(1);\n\n\n",
+            "cube(1);\n  \n",
+            "",
+        ] {
+            let saved = with_config_block(buf, &parts, None);
+            let shown = strip_config_block(&saved);
+            assert_eq!(
+                reattach_config_block(&saved, &shown),
+                saved,
+                "{buf:?}: the hydrated buffer re-flushes to the saved bytes"
+            );
+            assert_eq!(
+                with_config_block(&shown, &parts, None),
+                saved,
+                "{buf:?}: re-saving changes nothing"
+            );
+        }
+        for raw in ["cube(1);\n\n\n", "cube(1);\r\n", "cube(1);"] {
+            assert_eq!(strip_config_block(raw), raw, "no block, no change");
+        }
+    }
+
     #[test]
     fn an_included_libs_config_block_does_not_leak_in() {
         // chotchki's flag: a model that INCLUDEs a lib must not pick up the lib's fab:config. The
@@ -605,6 +684,112 @@ mod tests {
             read_config_block(&twice).unwrap().parts[0].cut[0].at.f(),
             41.0
         );
+    }
+
+    // ── the config fingerprint (TG.1) ─────────────────────────────────────────────────────────────
+    /// What Save drops can't read as a change: a disabled cut (and a connector on it), and an AUTO
+    /// orientation. A manual orientation, an enabled cut, and the bed all do.
+    #[test]
+    fn fingerprint_tracks_only_what_save_persists() {
+        let bed = [256.0; 3];
+        let base = vec![part_with(
+            Some("p"),
+            &[(Axis::Z, 40.0, true)],
+            &[(0, fab::ConnKind::Onion)],
+        )];
+        let fp = config_fp(&base, bed);
+        assert!(fp.parts[0].is_some());
+
+        let mut p = vec![part_with(
+            Some("p"),
+            &[(Axis::Z, 40.0, true), (Axis::X, 9.0, false)],
+            &[(0, fab::ConnKind::Onion), (1, fab::ConnKind::Bolt)],
+        )];
+        assert_eq!(
+            config_fp(&p, bed),
+            fp,
+            "a disabled cut + its connector persist nothing"
+        );
+        p[0].orient.map.insert(([0, 0, 0], 0), [0.0, 0.0, 1.0]); // the auto-pick seeds `map` only
+        assert_eq!(
+            config_fp(&p, bed),
+            fp,
+            "an auto orientation persists nothing"
+        );
+
+        p[0].orient.set_manual(([0, 0, 0], 0), [0.0, 0.0, 1.0]);
+        assert_ne!(config_fp(&p, bed), fp, "a manual orientation persists");
+        p[0].orient.reset(([0, 0, 0], 0));
+        assert_eq!(config_fp(&p, bed), fp);
+        p[0].cuts.list[1].enabled = true;
+        assert_ne!(config_fp(&p, bed), fp, "enabling the cut persists it");
+        // A connector placed on an enabled cut persists, and so does moving one.
+        let fresh = || {
+            vec![part_with(
+                Some("p"),
+                &[(Axis::Z, 40.0, true)],
+                &[(0, fab::ConnKind::Onion)],
+            )]
+        };
+        let mut placed = fresh();
+        let mut conn = placed[0].conns.list[0];
+        conn.pos = [3.0, 4.0];
+        placed[0].conns.list.push(conn);
+        assert_ne!(
+            config_fp(&placed, bed),
+            fp,
+            "placing a connector persists it"
+        );
+        let mut moved = fresh();
+        moved[0].conns.list[0].pos[0] += 1.0;
+        assert_ne!(config_fp(&moved, bed), fp, "moving a connector persists it");
+        assert_ne!(
+            config_fp(&base, [256.0, 256.0, 300.0]),
+            fp,
+            "the bed is in it"
+        );
+
+        // A part with nothing to persist is `None` — the "no saved plan" an auto-plan may adopt.
+        assert_eq!(config_fp(&[part_named("q")], bed).parts, vec![None]);
+    }
+
+    /// The whole Save → reopen loop, fingerprinted: a plan + bed baked into fab:config, read back and
+    /// applied to freshly built parts the way `poll_job` does, fingerprints identically. So a reopened
+    /// saved plan reads clean, f32 → f64 → JSON → f32 included.
+    #[test]
+    fn a_saved_plan_reapplied_fingerprints_the_same() {
+        let mut live = vec![
+            part_with(
+                Some("wall"),
+                &[(Axis::Z, 40.3, true), (Axis::Y, 1.0 / 3.0, true)],
+                &[(1, fab::ConnKind::Bolt)],
+            ),
+            part_with(Some("wall"), &[], &[]), // auto-derives: no block
+            part_with(
+                Some("frame"),
+                &[(Axis::X, -12.7, true)],
+                &[(0, fab::ConnKind::Onion)],
+            ),
+        ];
+        live[0].conns.list[0].pos = [0.1, 7.77];
+        live[2]
+            .orient
+            .set_manual(([1, 0, 0], 0), [0.0, 0.70710677, 0.70710677]);
+        let bed = [325.3, 320.0, 299.9];
+        let saved = with_config_block(
+            "cube(1);\n",
+            &live,
+            Some(PrinterCfg {
+                bed: bed.map(f64::from),
+            }),
+        );
+
+        let cfg = read_config_block(&saved).expect("reads back");
+        let mut fresh = vec![part_named("wall"), part_named("wall"), part_named("frame")];
+        apply_blocks(&mut fresh, &cfg.parts);
+        let p = cfg.printer.expect("printer saved").bed;
+        let reopened_bed = [p[0] as f32, p[1] as f32, p[2] as f32];
+        assert_eq!(config_fp(&fresh, reopened_bed), config_fp(&live, bed));
     }
 
     #[test]

@@ -132,7 +132,9 @@ the project archive when the source is multi-file.
 - **Extension `.scadproj`, and SAY it's a zip.** The distinct suffix is the disambiguator (no collision
   with a random `.zip`), but the UX LOUDLY tells people a `.scadproj` is just a zip they can rename and
   unzip — in the file-open filter, the docs, and a tooltip. No magic, no lock-in: it's their folder in a
-  zip.
+  zip. (Revised in Phase TG: the DOCS still say it, the UI no longer does. The "rename to .zip to peek"
+  tooltip read as trivia next to a Save that didn't say what it wrote, so user-facing text now describes
+  what Save does, never the archive format.)
 
 ## Phase Z sequence
 
@@ -195,3 +197,175 @@ undone.
 
 The paste flow (W.3.33) keeps its scratch-file path render — a pasted buffer has no `base_dir` for a pack to
 root at, and nothing to be stale against.
+
+## Phase TG — the document is what you save
+
+**Verdict: unsaved is a property of the DOCUMENT, not of the editor.** Through v1.4.1, Save, ⌘S and the
+"unsaved" badge read `EditorBuf::dirty`, which `doc_into_editor` reloads from whichever file is being
+viewed. Clicking a clean library file hid an unsaved edit to the entry, and Add, Delete, Set entry and
+every cut-plan edit never set the flag at all. That is how a `.scadproj` with a freshly added file ended up
+with a grey Save and a ⌘S that did nothing (chotchki, dogfooding 1.4.1). Three earlier fixes patched the
+flag at call sites and the next file switch undid each one. Now one predicate answers "would Save write
+something it hasn't?", and every surface reads it: Save, ⌘S, the Model badge, the row markers, the window
+title, the header chip and the Open hold.
+
+### What counts as unsaved
+
+`sync_doc_state` (`gui/src/jobs.rs`) derives `DocState::dirty` every frame as an OR of three things:
+
+- **`ProjectDoc::is_dirty()`:** any file with unsaved text, any unsaved binary asset or a structural change
+  (a file added, deleted or renamed, or the entry moved) when the home PERSISTS structure. The mutators
+  mark the document themselves (`add_file`, `import`, `remove_file`, `set_entry`, `rename_file`,
+  `flush_active`), so a new gesture can't forget to.
+- **`EditorBuf::dirty`:** the viewed file's stored flag (loaded on every switch) plus edits since. It still
+  counts because an edit only reaches the document on a flush, but it's one INPUT now, never the gate.
+- **The config fingerprint:** `config::config_fp` hashes exactly what `part_to_slicing` bakes into
+  `fab:config` per part, plus the bed, and `DocState` compares it to a baseline. `Parts` has about six
+  writers (cuts, connectors, orient, AutoPlace, Reset-to-auto, the bed) and no chokepoint, so config
+  dirtiness is a COMPARISON, not a flag. Hashing the persisted projection means what Save drops (a
+  disabled cut, an auto orientation) can't read as a change.
+
+Viewing a different file touches none of the three.
+
+The config baseline is re-taken in exactly three places:
+
+1. **After a fresh parts build,** once the pending `fab:config` is applied (an open, or an entry change).
+   Both sides come from the same live `f32`s, never a re-parse of the file, so a saved plan reopens clean.
+2. **Per part, when an auto-plan lands on a part whose baseline is EMPTY** (`DocState::auto_planned`). No
+   saved plan means a reopen re-derives the same one, so a model that auto-plans on open reads clean. A
+   part that HAD a saved plan keeps its baseline, so Reset-to-auto over a hand-tuned plan reads unsaved
+   (correctly: Save would write something different).
+3. **On save success,** to what that save baked.
+
+`ModelState::reset` drops the baseline along with the model it describes, so the frames between an open
+and its render never compare the new document against the OLD model's plan.
+
+A save that lands on a later frame (a Save As dialog, a hotchkiss.io upload) captures `rev`, a counter
+every mutation bumps, and lands through `mark_saved(rev)`, which does nothing if `rev` moved. An edit typed
+while the dialog was up stays unsaved instead of being counted as saved by bytes that never held it.
+
+### Where Save goes
+
+`save::plan` is the ONE table, and the Save hover and the Project card's Save rule are written from it, so
+the text can't promise something the button doesn't do:
+
+- **Desktop `.scadproj`:** rewrite the archive: every file and asset, the manifest title (which a re-zip used
+  to drop) and the entry baked with the cut plan and printer.
+- **Desktop loose folder:** write the entry (config baked) plus every other file and asset with unsaved
+  changes back into the folder. Each write is independent and atomic, and only the files that landed
+  clear, so a half-failed save keeps its failures marked.
+- **Desktop with no file yet:** Save opens Save As (the macOS convention). A session started without a
+  file now boots holding an owned, empty `untitled.scad`, so typed text lands in a real document (it used
+  to `fs::write("")` and fail silently).
+- **The web:** Save downloads the document, `.scad` for one file and `.scadproj` for more, and a download
+  the browser accepts counts as saved. A hotchkiss.io item downloads TOO (`save_route` folds the site
+  plan into a download), because a keystroke shouldn't replace a published item's files. "Save to
+  hotchkiss.io" on the Model tab is the deliberate site update, and a successful upload clears unsaved.
+
+Every outcome lands in the status line: `saved <name> -> <folder>`, `save failed: <why> — still unsaved`
+or `nothing to save — <name> is up to date` (⌘S on a clean document answers rather than doing nothing).
+Save is enabled exactly when the document is unsaved and grey when clean, and the Project card's Save goes
+gold while unsaved (chotchki, 2026-10-05).
+
+Two of the rules are types, not conventions:
+
+- **`DocSnapshot::capture` is the ONLY input the serializers take** (`rezip_project`,
+  `project_source_variant`), and it always splices the live editor text over the active file. The web
+  site save used to upload the active file WITHOUT its unflushed edit (the uploaded mesh and source then
+  disagreed), because splicing was something each caller had to remember. Web Publish goes through it
+  too.
+- **`atomic_write`** writes a sibling temp file, syncs it, renames it over the target and keeps the
+  original's permissions. On any failure the temp is removed and the old file is intact. A SIBLING, so the
+  rename never crosses a filesystem.
+
+After a container save, the temp unpack is re-materialized from the saved document, so `import()` reads
+what was just saved.
+
+### Save As (desktop only)
+
+⇧⌘S (Ctrl+Shift+S) or the card's Save As…, on every desktop document; it replaced Z.3.7's gold "Save as
+.scadproj…" promote. It writes a `.scad` for one text file with no assets and a `.scadproj` otherwise (a
+loose folder's on-disk siblings count as assets, so a plain-file Save As can't strand an `import()`ed
+neighbor). The dialog starts in the document's own folder (`ProjectDoc::home_dir`), or your home folder for
+a document with no file, NEVER `scene.source`: for a `.scadproj` that's the temp unpack, and a file saved
+there is gone on the next same-stem open. It suggests the document's name. The bytes and their `rev` are
+captured when the dialog opens. On success the document MOVES to the new file (`save::rehome`), later
+Saves write there, and the status says the original was left unchanged. The web has no Save As, so the
+shifted chord there falls through to Save.
+
+### Opening replaces, never merges
+
+`file_ops::adopt` is the one way a loaded document becomes the open one: the Open dialog, the launch
+argument, the web `?model=` fetch and the `--script` `open` verb all go through it. It hydrates the editor
+from the entry, stamps the buffer with the document's `DocId`, stages the entry's `fab:config` for the
+render to apply, and clears `scene.source` so the switch reads as a render-target change (old plan reset,
+entry re-rendered). Then it posts `opened <name> (<folder>)` with the REAL folder, never the temp.
+
+`DocId` exists because path equality isn't identity. `editor_holds` used to decide who owned the live
+buffer by path alone, and two `.scadproj`s with the same stem unpack to the same temp path, so opening
+`b/brace.scadproj` after `a/brace.scadproj` wrote a's editor text into b (re-opening the same file did the
+same). Now the id AND the path have to match, which makes the alias unrepresentable for any future loader,
+not just the current ones (the M.5.4.5 invariant-types rule). `sync_doc_state` debug-asserts it. The egui
+code editor's own state (cursor plus an undo history of whole-text snapshots) is dropped whenever the
+buffer's owner or path changes, or ⌘Z right after an open would put the previous document's text back.
+
+While the document is unsaved, Open… is press-and-hold ("hold to discard changes and open…",
+`hold_to_confirm`, 0.6s), the same gesture as a row Delete and no modal. A plain click does nothing.
+Re-opening the same file is therefore a revert to the saved text. `fab-gui x.scadproj` opens the project
+(it used to hang). Open is desktop-only: on the web the document is whatever `?model=` handed over, and
+swapping it would orphan the save-back target.
+
+### Loose folders: the SW doctrine, applied consistently
+
+The SW rule above stands (the PREVIEW never writes, explicit file operations do), and TG applies it to
+every file kind and says it in the UI (chotchki, 2026-10-05):
+
+- **Add** copies EVERY added file into the folder at once, `.scad` included (it used to copy only the
+  importable assets). A name the folder or the document already has is REFUSED with a status, never
+  overwritten or quietly renamed, and the copy uses `create_new`, so a file that appears between the check
+  and the write is refused by the OS rather than clobbered. The added file reads clean, because the folder
+  already holds it.
+- **Rename** stays immediate, with its on-disk clash refusal (`file_ops::rename_clash`).
+- **Delete** stays session-only. Its hover reads "hold to remove from this session — the file stays
+  in the folder", and a multi-file folder's Save rule says the same.
+- **Set entry** is a session view change: a loose folder has no manifest to record it in. Save bakes the
+  config into whichever file is the entry when it runs.
+
+So `ProjectHome::persists_structure` is false for a loose home and none of those four marks it unsaved.
+Text edits (New file included: it's unsaved text until Save writes it) and the cut plan are the ONLY
+loose changes that wait for Save. "Nothing touches disk until
+Save" was the cleaner story and got rejected: an added asset would have to render from an in-memory
+overlay until Save, and Save would have to delete files out of real folders.
+
+### What the GUI says
+
+The text comes from pure functions in `gui/src/doc_view.rs` (table-tested, plus a glyph audit for tofu),
+and `panel_ui` only lays it out:
+
+- **The Project tab** leads with the document card: name, place and kind (`~/models · .scadproj`,
+  `~/models/brace · loose folder`, `not saved yet`, `on hotchkiss.io`), the Save rule, then Save, Save As…
+  and Open….
+- **The desktop window title:** `bracket.scadproj (unsaved) — fab-scad`, written only when it changes. On
+  the web the host page owns `<title>`.
+- **The header chip:** the document's name and unsaved marker on every tab, the full path on hover, and a
+  click goes to the Project tab.
+- **The Model tab:** a labelled Save (hover from `plan`) and the breadcrumb
+  `hook.scad · in bracket.scadproj · main.scad renders`.
+- **Markers:** unsaved is a painter-drawn FILLED circle, and stale stays `icons::DOT`, which the FILL=0 font
+  subset renders as a RING. Two shapes, no font regeneration.
+
+### Known limits (filed in `openspec/backlog.md`)
+
+- **Stale still over-fires.** Viewing a non-entry file lights every tab's stale ring, because
+  `sync_pipeline` hashes the VIEWED file against the entry's render. TG only made the two markers look
+  different.
+- **Nothing guards a close.** Closing the window (or ⌘Q, which winit 0.30 can't intercept) with unsaved
+  changes doesn't ask, there's no recovery snapshot and the web has no `beforeunload`. Save before you
+  quit.
+- **Native Rename and container Delete still `state.reset()`** after the file op and rebuild the model.
+  The rebuild re-applies the entry's SAVED plan (`ProjectDoc::entry_config`, the same block every fresh
+  build stashes), so the document still reads right, but an UNSAVED plan edit made before the rename or
+  delete is gone. Before the spec-coverage pass the rebuild stashed nothing: an auto-plan replaced the
+  saved plan and read clean, and the next Save wrote it over the real one.
+- **Temp paths leak.** Export, the Publish title default and the self-update relaunch still see the temp
+  unpack path instead of the real one.

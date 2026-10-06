@@ -80,26 +80,52 @@ pub(crate) fn setup_offscreen(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
-    scene: Res<SceneCfg>,
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] mut scene: ResMut<SceneCfg>,
     png: Res<ScreenshotPng>,
     mut editor: ResMut<EditorBuf>,
     mut project: ResMut<crate::project::ProjectDoc>,
+    mut pending_config: ResMut<PendingConfig>,
+    mut status: ResMut<Status>,
+    mut doc_state: ResMut<DocState>,
     pool: Res<GeomPool>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
+    // TG.2: the launch document opens and is adopted as in the windowed app, so a `.scadproj` frames
+    // too. The still frame renders `Source::Path(scene.source)`, which for a container is the entry
+    // `unpack_scadproj` materialized under the temp — the whole image is there, includes and all.
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(src) = scene.source.clone() {
-        read_into_editor(&mut editor, &src);
-        let name = src
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "model.scad".into());
-        *project = crate::project::ProjectDoc::single(
-            name,
-            editor.text.clone(),
-            crate::project::ProjectHome::ScadFile(src.clone()),
-        );
-        project.base_dir = src.parent().map(std::path::Path::to_path_buf);
+        match crate::jobs::open_document(&src, &scene.tmp) {
+            Ok(doc) => {
+                crate::file_ops::adopt(
+                    &mut project,
+                    &mut editor,
+                    &mut pending_config,
+                    &mut scene.source,
+                    &mut status,
+                    &mut doc_state,
+                    doc,
+                );
+                scene.source = Some(project.editor_path(project.entry));
+            }
+            Err(e) => {
+                eprintln!("screenshot: open: {e:#}");
+                if crate::jobs::is_scadproj(&src) {
+                    scene.source = None; // a zip is no render source
+                } else {
+                    read_into_editor(&mut editor, &src);
+                }
+            }
+        }
     }
+    #[cfg(target_arch = "wasm32")]
+    let _ = (
+        &mut editor,
+        &mut project,
+        &mut pending_config,
+        &mut status,
+        &mut doc_state,
+    );
     // Synchronous here — no UI to freeze. Render whole for bounds + the cut plane, then
     // (if asked) slice at the chosen cut so the PNG verifies an off-center cut.
     let (display, colored) =

@@ -11,7 +11,7 @@
 
 #![allow(dead_code)] // Phase Z foundation — the document model + seams; wired into render/open/save/tab in Z.3.2–Z.3.5.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use bevy::prelude::*;
@@ -41,9 +41,36 @@ pub(crate) enum ProjectHome {
     WebModel(String),
 }
 
+impl ProjectHome {
+    /// TG.1: does Save have to write a STRUCTURAL change (add / delete / rename / set-entry) for it to
+    /// stick? A container re-zips its file set + manifest, and a Fresh or web document only exists as
+    /// what Save writes. A loose folder doesn't: Add and Rename land on disk at once and Delete and
+    /// set-entry are session-only (SW.3 doctrine, design Decision 7), so none of them is unsaved there.
+    pub(crate) fn persists_structure(&self) -> bool {
+        !matches!(self, ProjectHome::ScadFile(_))
+    }
+}
+
+/// TG.2: a process-unique document identity. Every [`ProjectDoc`] constructor mints one (`Default` is
+/// the minting path, and every constructor goes through it), and [`EditorBuf`](crate::state::EditorBuf)
+/// records the id whose file it holds. Paths alone can't say whose buffer it is: two `.scadproj`s with
+/// the same stem materialize to the same temp dir, and re-opening a file reproduces its own paths, so
+/// either used to hand the OLD document's editor text to the new one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DocId(u64);
+
+impl Default for DocId {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        DocId(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 /// The open document — ALWAYS a project. `EditorBuf` is the view onto `files[active]`.
 #[derive(Resource, Default)]
 pub(crate) struct ProjectDoc {
+    /// TG.2: minted at construction, never reassigned — see [`DocId`].
+    id: DocId,
     pub(crate) files: Vec<ProjectFile>,
     /// Binary (non-text) assets keyed by project-relative path — ride-along, not text-editable.
     pub(crate) assets: BTreeMap<String, Vec<u8>>,
@@ -56,6 +83,18 @@ pub(crate) struct ProjectDoc {
     /// (no copy, `include`s + save resolve in place) or a temp materialization dir for a `.scadproj`.
     /// `None` on the web (in-memory, rendered via [`render_pack`](Self::render_pack) + `Source::Bytes`).
     pub(crate) base_dir: Option<PathBuf>,
+    /// The `.scadproj` manifest's title, kept from the archive it opened from (TG.1) — re-zip used to
+    /// drop it. `None` for anything that didn't come from a titled archive.
+    pub(crate) title: Option<String>,
+    /// TG.1: a file was added, deleted or renamed, or the entry moved, since the last save. Counts
+    /// toward [`is_dirty`](Self::is_dirty) only where the home persists structure.
+    structure_dirty: bool,
+    /// TG.1: binary assets imported since the last save — the per-row marker a binary has no
+    /// `ProjectFile::dirty` to carry.
+    unsaved_assets: BTreeSet<String>,
+    /// TG.1: bumped by every mutation, so a save that snapshotted at `rev` can tell whether anything
+    /// moved under it before [`mark_saved`](Self::mark_saved) clears the flags.
+    rev: u64,
 }
 
 impl ProjectDoc {
@@ -75,7 +114,7 @@ impl ProjectDoc {
             entry: 0,
             active: 0,
             home,
-            base_dir: None,
+            ..Default::default()
         }
     }
 
@@ -115,6 +154,7 @@ impl ProjectDoc {
             active: entry,
             home,
             base_dir: Some(base_dir),
+            ..Default::default()
         }
     }
 
@@ -140,16 +180,46 @@ impl ProjectDoc {
         }
     }
 
-    /// Does `path` still name `files[active]`? The flush-before-switch predicate: when it's false the
-    /// live buffer is NOT this file's, so flushing it would write one file's text over another's.
-    /// A rename that forgets to re-point `editor.path` silently turns this false, and the next switch
-    /// then discards every unsaved edit — which is why both callers go through here.
-    pub(crate) fn editor_holds(&self, path: &std::path::Path) -> bool {
-        self.active < self.files.len() && self.editor_path(self.active) == path
+    /// This document's identity (TG.2).
+    pub(crate) fn id(&self) -> DocId {
+        self.id
+    }
+
+    /// Does the editor buffer belong to `files[active]` of THIS document? The flush-before-switch
+    /// predicate: when it's false the live buffer is NOT this file's, so flushing it would write one
+    /// file's text over another's. TG.2: the owner id must match as well as the path — a same-stem
+    /// archive or a re-open reproduces the path exactly, and path equality alone handed the previous
+    /// document's buffer to the new one. A rename that forgets to re-point `editor.path` silently turns
+    /// this false, and the next switch then discards every unsaved edit. Every switch-time flush goes
+    /// through here, and so does every save (TG.3: `save_doc_action`'s flush and
+    /// [`DocSnapshot::capture`](crate::save::DocSnapshot::capture)'s splice).
+    pub(crate) fn editor_holds(&self, editor: &crate::state::EditorBuf) -> bool {
+        editor.owner == Some(self.id)
+            && self.active < self.files.len()
+            && self.editor_path(self.active) == editor.path
+    }
+
+    /// TG.2 (design Risks): the buffer names one of this document's files but another document owns
+    /// it — the aliasing `DocId` exists to rule out, i.e. a loader that swapped the document without
+    /// [`adopt`](crate::file_ops::adopt). `sync_doc_state` debug-asserts it never holds.
+    pub(crate) fn editor_aliases(&self, editor: &crate::state::EditorBuf) -> bool {
+        editor.owner.is_some_and(|o| o != self.id)
+            && (0..self.files.len()).any(|i| self.editor_path(i) == editor.path)
+    }
+
+    /// The `fab:config` the ENTRY carries — what the document last saved (or opened with) for its
+    /// render, since a save lands its baked block in the entry's text. TG.1: a fresh parts build stashes
+    /// this, never the VIEWED file's block, so the rebuilt plan and the re-taken baseline are the
+    /// saved one whichever file is on screen.
+    pub(crate) fn entry_config(&self) -> Option<crate::config::FabConfig> {
+        self.files
+            .get(self.entry)
+            .and_then(|f| crate::config::read_config_block(&f.text))
     }
 
     /// Flush the editor's live text back into `files[active]` before a switch, so a per-file edit
-    /// survives moving away and back. Marks the file dirty when the text actually changed.
+    /// survives moving away and back. Marks the file dirty (and bumps `rev`) only when the text actually
+    /// changed.
     ///
     /// The incoming text is the editor buffer, which is `fab:config`-STRIPPED — so the stored file's
     /// block is carried across rather than flushed away ([`config::reattach_config_block`]). Two things
@@ -160,6 +230,7 @@ impl ProjectDoc {
             let merged = crate::config::reattach_config_block(&f.text, text);
             if f.text != merged {
                 f.dirty = true;
+                self.rev += 1;
             }
             f.text = merged;
         }
@@ -172,10 +243,12 @@ impl ProjectDoc {
         }
     }
 
-    /// Make file `i` the render ENTRY (the "primary render target"). No-op when out of range.
+    /// Make file `i` the render ENTRY (the "primary render target"). No-op when out of range or already
+    /// the entry — only a real move is a structural change (TG.1).
     pub(crate) fn set_entry(&mut self, i: usize) {
-        if i < self.files.len() {
+        if i < self.files.len() && i != self.entry {
             self.entry = i;
+            self.touch_structure();
         }
     }
 
@@ -206,12 +279,14 @@ impl ProjectDoc {
             text,
             dirty: true,
         });
+        self.touch_structure();
         self.files.len() - 1
     }
 
     /// Import raw bytes under `name` — a UTF-8 text file (.scad + the text formats) becomes an editable
     /// file, anything else a binary asset. Returns the FINAL (de-duplicated) project-relative name so the
-    /// caller can materialize it. Marks a text import dirty (a change to persist on save).
+    /// caller can materialize it. Marks the import unsaved either way (TG.1): a text file through its own
+    /// `dirty`, a binary through `unsaved_assets`, and the file set through `structure_dirty`.
     pub(crate) fn import(&mut self, name: &str, bytes: Vec<u8>) -> String {
         let uniq = self.unique_name(name);
         if is_text_file(&uniq) {
@@ -226,11 +301,14 @@ impl ProjectDoc {
                 // A "text" name that isn't UTF-8 rides as an opaque asset rather than corrupting.
                 Err(e) => {
                     self.assets.insert(uniq.clone(), e.into_bytes());
+                    self.unsaved_assets.insert(uniq.clone());
                 }
             }
         } else {
             self.assets.insert(uniq.clone(), bytes);
+            self.unsaved_assets.insert(uniq.clone());
         }
+        self.touch_structure();
         uniq
     }
 
@@ -244,8 +322,10 @@ impl ProjectDoc {
             return None;
         }
         let uniq = self.unique_name(new_name);
-        let old = std::mem::replace(&mut self.files[i].name, uniq);
-        self.files[i].dirty = true;
+        let old = std::mem::replace(&mut self.files[i].name, uniq.clone());
+        self.follow_loose_home(&old, &uniq);
+        // TG.1: structural, not a text edit — so a loose rename (already on disk) reads saved.
+        self.touch_structure();
         Some(old)
     }
 
@@ -266,7 +346,101 @@ impl ProjectDoc {
         };
         fix(&mut self.entry);
         fix(&mut self.active);
+        let entry = self.entry_name().to_string();
+        self.follow_loose_home(&removed.name, &entry);
+        self.touch_structure();
         Some(removed.name)
+    }
+
+    /// TG.7: a loose home names the file the document is called by (title, chip, card, publish stem),
+    /// so when that file is renamed — or dropped from the session, where `to` is the new entry — the
+    /// home follows it. Same folder only: a `to` with a directory part would re-aim
+    /// [`plan`](crate::save::plan)'s write dir at a subfolder, so that one keeps the stale name.
+    fn follow_loose_home(&mut self, from: &str, to: &str) {
+        if let ProjectHome::ScadFile(p) = &mut self.home
+            && p.file_name().is_some_and(|n| n == from)
+            && std::path::Path::new(to).components().count() == 1
+        {
+            p.set_file_name(to);
+        }
+    }
+
+    /// A structural mutation landed: the file set or entry moved (TG.1).
+    fn touch_structure(&mut self) {
+        self.structure_dirty = true;
+        self.rev += 1;
+    }
+
+    /// TG.1: would Save write something it hasn't? Any file with unsaved text, any unsaved asset, or a
+    /// structural change where the home persists structure. The live editor buffer and the cut plan
+    /// are NOT in here — they live outside the document; [`DocState`](crate::state::DocState) folds
+    /// them in.
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.files.iter().any(|f| f.dirty)
+            || !self.unsaved_assets.is_empty()
+            || (self.structure_dirty && self.home.persists_structure())
+    }
+
+    /// The mutation counter a save snapshots before it writes (TG.1).
+    pub(crate) fn rev(&self) -> u64 {
+        self.rev
+    }
+
+    /// TG.1: a save that captured the document at `at_rev` succeeded — clear every unsaved flag. A no-op
+    /// returning `false` when `rev` moved since the capture: a later edit (made while a dialog or an
+    /// upload was in flight) didn't reach that write, so nothing may read saved.
+    pub(crate) fn mark_saved(&mut self, at_rev: u64) -> bool {
+        if self.rev != at_rev {
+            return false;
+        }
+        self.structure_dirty = false;
+        self.unsaved_assets.clear();
+        for f in &mut self.files {
+            f.dirty = false;
+        }
+        true
+    }
+
+    /// TG.3: a PARTIAL save landed (a loose folder writes file by file) — clear just the `files`
+    /// indices and `assets` it wrote; everything else stays unsaved. Same stale-`rev` rule as
+    /// [`mark_saved`](Self::mark_saved). Structure isn't touched: the only home that saves per file is
+    /// a loose folder, which doesn't persist structure.
+    pub(crate) fn mark_written(&mut self, at_rev: u64, files: &[usize], assets: &[String]) -> bool {
+        if self.rev != at_rev {
+            return false;
+        }
+        for &i in files {
+            if let Some(f) = self.files.get_mut(i) {
+                f.dirty = false;
+            }
+        }
+        for a in assets {
+            self.unsaved_assets.remove(a);
+        }
+        true
+    }
+
+    /// TG.6: `name` (a file or an asset) is on disk byte-for-byte as the document holds it — a loose Add
+    /// copies the file into the folder at once — so it carries no unsaved marker. Leaves `rev` and
+    /// structure alone: the add that preceded it already moved both, and a loose home ignores structure.
+    pub(crate) fn mark_on_disk(&mut self, name: &str) {
+        if let Some(f) = self.files.iter_mut().find(|f| f.name == name) {
+            f.dirty = false;
+        }
+        self.unsaved_assets.remove(name);
+    }
+
+    /// The row marker for file `i` (TG.1): its stored flag, or, for the active file, live edits in the
+    /// buffer that no flush has carried into the document yet. `editor` only counts when it HOLDS
+    /// `files[active]` — a buffer that belongs to no file marks no row.
+    pub(crate) fn file_unsaved(&self, i: usize, editor: &crate::state::EditorBuf) -> bool {
+        self.files.get(i).is_some_and(|f| f.dirty)
+            || (i == self.active && editor.dirty && self.editor_holds(editor))
+    }
+
+    /// The row marker for binary asset `name` (TG.1).
+    pub(crate) fn asset_unsaved(&self, name: &str) -> bool {
+        self.unsaved_assets.contains(name)
     }
 
     /// From a `.scadproj` archive's bytes: text files → editable `files`, binary → `assets`, entry from
@@ -274,6 +448,7 @@ impl ProjectDoc {
     pub(crate) fn from_scadproj(bytes: &[u8], home: ProjectHome) -> anyhow::Result<Self> {
         let p = scadproj::read_scadproj(bytes)?;
         let entry_name = p.manifest.entry.clone();
+        let title = p.manifest.title.clone();
         let mut files = Vec::new();
         let mut assets = BTreeMap::new();
         for (name, body) in p.files {
@@ -301,7 +476,8 @@ impl ProjectDoc {
             entry,
             active: entry,
             home,
-            base_dir: None,
+            title,
+            ..Default::default()
         })
     }
 
@@ -329,6 +505,19 @@ impl ProjectDoc {
             ProjectHome::WebModel(n) => stem_of(std::path::Path::new(n)),
             ProjectHome::ScadProj(p) | ProjectHome::ScadFile(p) => stem_of(p),
             ProjectHome::Fresh => None,
+        }
+    }
+
+    /// TG.5: the folder this DOCUMENT lives in — a `.scadproj`'s folder, or a loose document's — where
+    /// Save As starts. `None` for a document with no file (fresh, or a web name). Not the user's home
+    /// ([`file_ops::home_dir`](crate::file_ops::home_dir)), and never `base_dir`, which for a
+    /// `.scadproj` is the temp it unpacked to.
+    pub(crate) fn home_dir(&self) -> Option<PathBuf> {
+        match &self.home {
+            ProjectHome::ScadProj(p) | ProjectHome::ScadFile(p) => {
+                p.parent().map(|d| d.to_path_buf())
+            }
+            ProjectHome::Fresh | ProjectHome::WebModel(_) => None,
         }
     }
 
@@ -398,26 +587,6 @@ impl ProjectDoc {
             libs.push((name.clone(), body.clone()));
         }
         (main, libs)
-    }
-
-    /// Serialize the whole project to `.scadproj` bytes (the ≥2-file save path). `active_text` splices the
-    /// editor's live text for `files[active]` so an unsaved edit is captured.
-    pub(crate) fn to_scadproj_bytes(&self, active_text: &str) -> anyhow::Result<Vec<u8>> {
-        let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        for (i, f) in self.files.iter().enumerate() {
-            let text = if i == self.active {
-                active_text.to_string()
-            } else {
-                f.text.clone()
-            };
-            files.insert(f.name.clone(), text.into_bytes());
-        }
-        for (name, body) in &self.assets {
-            files.insert(name.clone(), body.clone());
-        }
-        let project =
-            scadproj::project_from_files(files, Some(self.entry_name().to_string()), None)?;
-        scadproj::write_scadproj(&project)
     }
 }
 
@@ -675,6 +844,220 @@ mod tests {
         assert_eq!(d.import("hook.scad", b"// two".to_vec()), "hook-1.scad");
     }
 
+    /// TG.1: a document fresh out of any constructor has nothing to save.
+    #[test]
+    fn constructors_start_clean() {
+        let single = ProjectDoc::single("m.scad", "cube(1);", ProjectHome::Fresh);
+        assert!(!single.is_dirty());
+
+        let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        files.insert("main.scad".into(), b"cube(1);".to_vec());
+        files.insert("logo.png".into(), vec![0x89, b'P', b'N', b'G']);
+        let bytes = scadproj::write_scadproj(
+            &scadproj::project_from_files(files, Some("main.scad".into()), Some("Brace".into()))
+                .unwrap(),
+        )
+        .unwrap();
+        let proj = ProjectDoc::from_scadproj(&bytes, ProjectHome::Fresh).unwrap();
+        assert!(!proj.is_dirty());
+        assert!(!proj.asset_unsaved("logo.png"));
+        assert_eq!(
+            proj.title.as_deref(),
+            Some("Brace"),
+            "the manifest title is kept"
+        );
+
+        let dir = std::env::temp_dir().join(format!("fab_tg1_clean_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.scad"), "cube(1);").unwrap();
+        std::fs::write(dir.join("b.scad"), "sphere(1);").unwrap();
+        let loose = ProjectDoc::from_disk(
+            dir.clone(),
+            &[dir.join("a.scad"), dir.join("b.scad")],
+            &dir.join("a.scad"),
+        );
+        assert!(!loose.is_dirty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A saved two-file document in `home` (the table's starting point).
+    fn saved_doc(home: ProjectHome) -> ProjectDoc {
+        let mut d = ProjectDoc::single("main.scad", "cube(1);", home);
+        d.add_file("lib.scad", "module m(){}".into());
+        assert!(d.mark_saved(d.rev()));
+        assert!(!d.is_dirty(), "the fixture starts saved");
+        d
+    }
+
+    /// TG.1: every mutation Save would write, per home. Text and asset changes are unsaved
+    /// everywhere; STRUCTURE (add / delete / rename / set-entry as such) only where the home persists
+    /// it — a loose folder already holds an add or rename, and keeps delete and the entry session-only.
+    #[test]
+    fn every_mutation_marks_the_document_per_home() {
+        type Mutation = fn(&mut ProjectDoc);
+        // (what, mutation, unsaved in a loose folder?) — every one is unsaved in the other homes.
+        let table: [(&str, Mutation, bool); 8] = [
+            ("edit the active text", |d| d.flush_active("cube(2);"), true),
+            (
+                "add a text file",
+                |d| {
+                    d.add_file("hook.scad", "".into());
+                },
+                true,
+            ),
+            (
+                "import a text file",
+                |d| {
+                    d.import("hook.scad", b"// h".to_vec());
+                },
+                true,
+            ),
+            (
+                "import a binary",
+                |d| {
+                    d.import("logo.png", vec![0x89, b'P']);
+                },
+                true,
+            ),
+            (
+                "rename",
+                |d| {
+                    d.rename_file(1, "util.scad");
+                },
+                false,
+            ),
+            (
+                "delete",
+                |d| {
+                    d.remove_file(1);
+                },
+                false,
+            ),
+            ("set the entry", |d| d.set_entry(1), false),
+            (
+                "edit then switch away",
+                |d| {
+                    d.flush_active("cube(3);");
+                    d.set_active(1);
+                },
+                true,
+            ),
+        ];
+        let homes = [
+            (ProjectHome::Fresh, false),
+            (ProjectHome::WebModel("Brace.scadproj".into()), false),
+            (
+                ProjectHome::ScadProj(PathBuf::from("/m/brace.scadproj")),
+                false,
+            ),
+            (ProjectHome::ScadFile(PathBuf::from("/m/main.scad")), true),
+        ];
+        for (home, loose) in homes {
+            for (what, mutate, unsaved_when_loose) in table {
+                let mut d = saved_doc(home.clone());
+                let rev = d.rev();
+                mutate(&mut d);
+                assert!(d.rev() > rev, "{what} on {home:?} didn't bump rev");
+                let want = !loose || unsaved_when_loose;
+                assert_eq!(d.is_dirty(), want, "{what} on {home:?}");
+            }
+        }
+    }
+
+    /// TG.1: what is NOT a change stays clean — a view switch, re-picking the current entry, an
+    /// unchanged flush, a no-op rename.
+    #[test]
+    fn non_changes_stay_clean() {
+        let mut d = saved_doc(ProjectHome::ScadProj(PathBuf::from("/m/brace.scadproj")));
+        let rev = d.rev();
+        d.set_active(1);
+        d.set_entry(0); // already the entry
+        d.flush_active("module m(){}"); // lib.scad's own text
+        assert_eq!(d.rename_file(1, "lib.scad"), None);
+        assert!(!d.is_dirty());
+        assert_eq!(d.rev(), rev, "nothing moved");
+    }
+
+    /// TG.1: the row markers. A binary gets one; the active row marks LIVE edits, but only from a
+    /// buffer that actually holds it.
+    #[test]
+    fn row_markers_cover_assets_and_live_edits() {
+        let mut d = saved_doc(ProjectHome::Fresh);
+        let mut e = crate::state::EditorBuf {
+            path: d.editor_path(0),
+            owner: Some(d.id()),
+            ..Default::default()
+        };
+        assert!(!d.file_unsaved(0, &e));
+        e.dirty = true; // typed, not flushed
+        assert!(d.file_unsaved(0, &e), "the active row marks as you type");
+        assert!(!d.file_unsaved(1, &e), "and only the active row");
+        e.path = PathBuf::from("elsewhere.scad");
+        assert!(
+            !d.file_unsaved(0, &e),
+            "a buffer that holds no file marks no row"
+        );
+
+        d.import("logo.png", vec![0x89, b'P']);
+        assert!(d.asset_unsaved("logo.png"));
+        assert!(d.mark_saved(d.rev()));
+        assert!(!d.asset_unsaved("logo.png"));
+    }
+
+    /// TG.2: what `sync_doc_state` debug-asserts never happens — another document's buffer at one of
+    /// this one's paths (a same-stem archive swapped in without `adopt`). An unowned buffer, one at a
+    /// path the document doesn't have, and this document's own buffer on any file are all fine.
+    #[test]
+    fn editor_aliases_only_another_documents_buffer_at_our_path() {
+        let d = saved_doc(ProjectHome::ScadProj(PathBuf::from("/m/brace.scadproj")));
+        let other = ProjectDoc::default().id();
+        let at = |owner, path| crate::state::EditorBuf {
+            path,
+            owner,
+            ..Default::default()
+        };
+        assert!(d.editor_aliases(&at(Some(other), d.editor_path(1))));
+        assert!(!d.editor_aliases(&at(Some(d.id()), d.editor_path(1))));
+        assert!(!d.editor_aliases(&at(None, d.editor_path(0))));
+        assert!(!d.editor_aliases(&at(Some(other), PathBuf::from("/x/else.scad"))));
+        // The entry's block is what a fresh build re-applies (TG.1); none here.
+        assert!(d.entry_config().is_none());
+        let mut c = ProjectDoc::single(
+            "main.scad",
+            crate::config::with_config_block(
+                "cube(1);",
+                &[],
+                Some(crate::config::PrinterCfg {
+                    bed: [200.0, 210.0, 220.0],
+                }),
+            ),
+            ProjectHome::Fresh,
+        );
+        c.add_file("lib.scad", String::new());
+        c.set_active(1); // the viewed file never decides it
+        let cfg = c.entry_config().expect("the entry's block");
+        assert_eq!(cfg.printer.map(|p| p.bed), Some([200.0, 210.0, 220.0]));
+    }
+
+    /// TG.1: `mark_saved` clears what the save captured — and nothing, if the document moved after the
+    /// capture (an edit made while a dialog or an upload was in flight never reached that write).
+    #[test]
+    fn mark_saved_clears_only_at_the_captured_rev() {
+        let mut d = saved_doc(ProjectHome::ScadProj(PathBuf::from("/m/brace.scadproj")));
+        d.flush_active("cube(2);");
+        d.import("logo.png", vec![1]);
+        let captured = d.rev();
+        d.add_file("late.scad", "".into()); // lands after the snapshot
+        assert!(!d.mark_saved(captured), "a stale rev clears nothing");
+        assert!(d.is_dirty());
+        assert!(d.files[0].dirty && d.asset_unsaved("logo.png"));
+
+        assert!(d.mark_saved(d.rev()));
+        assert!(!d.is_dirty());
+        assert!(d.files.iter().all(|f| !f.dirty));
+    }
+
     #[test]
     fn scadproj_save_round_trips() {
         let mut d = ProjectDoc::single("main.scad", "cube(1);", ProjectHome::Fresh);
@@ -683,9 +1066,43 @@ mod tests {
             text: "module hook(){}".into(),
             dirty: false,
         });
-        let bytes = d.to_scadproj_bytes(&d.files[0].text.clone()).unwrap();
-        let back = ProjectDoc::from_scadproj(&bytes, ProjectHome::Fresh).unwrap();
+        d.title = Some("Trash Can Brace".into());
+        // TG.3: through the ONE serializer Save uses (a `DocSnapshot` into `rezip_project`).
+        let save = |d: &ProjectDoc| {
+            let snap = crate::save::DocSnapshot::capture(d, &crate::state::EditorBuf::default());
+            let printer = crate::config::PrinterCfg {
+                bed: [256.0, 256.0, 256.0],
+            };
+            crate::jobs::rezip_project(&snap, &[], printer, &BTreeMap::new()).unwrap()
+        };
+        let back = ProjectDoc::from_scadproj(&save(&d), ProjectHome::Fresh).unwrap();
         assert_eq!(back.files.len(), 2);
         assert_eq!(back.entry_name(), "main.scad");
+        // The manifest title rides the round trip (re-zip used to write `None`).
+        assert_eq!(back.title.as_deref(), Some("Trash Can Brace"));
+        let twice = ProjectDoc::from_scadproj(&save(&back), ProjectHome::Fresh).unwrap();
+        assert_eq!(twice.title.as_deref(), Some("Trash Can Brace"));
+    }
+
+    /// TG.3: a partial save clears exactly what it wrote — and nothing once the document moved.
+    #[test]
+    fn mark_written_clears_only_what_landed() {
+        let mut d = saved_doc(ProjectHome::ScadFile(PathBuf::from("/m/main.scad")));
+        d.flush_active("cube(2);");
+        d.set_active(1);
+        d.flush_active("module m(){cube(2);}");
+        d.import("logo.png", vec![1]);
+        let rev = d.rev();
+        assert!(d.mark_written(rev, &[0], &[]));
+        assert!(!d.files[0].dirty && d.files[1].dirty);
+        assert!(d.asset_unsaved("logo.png") && d.is_dirty());
+        assert!(d.mark_written(rev, &[1], &["logo.png".into()]));
+        assert!(!d.is_dirty());
+        d.flush_active("module m(){cube(3);}");
+        assert!(
+            !d.mark_written(rev, &[1], &[]),
+            "a stale rev clears nothing"
+        );
+        assert!(d.files[1].dirty);
     }
 }

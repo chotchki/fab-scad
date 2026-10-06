@@ -106,6 +106,18 @@ Alternative: "nothing touches disk until Save". It is a cleaner story, but an ad
 - **`run_scripted`** registers the project and save systems, so offscreen screenshots of the new card are possible. The visual check is a manual task box (offscreen `--script` renders egui reliably), not CI.
 - **`native_entry`** accepts a `.scadproj` argument and routes it through unpack + adopt. Today it hangs.
 
+**10. As built (2026-10-06): where implementation moved the design.**
+- **Whose config a re-render applies.** A render-target change stashes the ENTRY's `fab:config`, never the viewed file's. The old "the viewed file is the entry" assumption broke on a loose delete of the entry while a library was on screen.
+- **Rename and container Delete re-apply the last SAVED plan.** They stash `entry_config()` before `state.reset()`, so the document reads clean on that plan. Unsaved plan edits are still lost on those paths; that is the `fresh=false` follow-up.
+- **Undo can't cross documents.** egui's undo history is keyed by a constant widget id, so the editor drops its `TextEditState` whenever the buffer's `(owner, path)` changes. That covers an open, and also a file switch, a rename of the active file and a Save As, all of which leaked history before TG.
+- **Hover text.** Save's hover comes from `save_route`, not `plan()`: Save on a hotchkiss.io item downloads, and only the "Save to hotchkiss.io" button says it updates the site.
+- **`strip_config_block` removes only the separator line**, not every trailing blank line, so a hydrate → flush round trip is a fixpoint and reads clean.
+- **Launch arguments.** A launch with a `.scad` that doesn't exist opens a new empty file homed at that path.
+- **Save As format.** `.scadproj` is chosen whenever the loose folder holds an importable asset, even for one text file.
+- **Card kinds.** The card adds "`.scad` file" for a one-file loose document and "from the web" for a web model with no site item.
+- **Harness stepping.** Only cut and layout verbs wait for the render's bounds, which is what makes a fresh, model-less session scriptable.
+- **`DocState`** ended in `PanelView` (read-only in `panel_ui`), once TG.3 moved Save out of the panel.
+
 ## Risks / Trade-offs
 
 - [The config fingerprint misreads float round-trips, so a freshly opened model reads unsaved] → The baseline is taken from the LIVE parts after the pending config is applied, never by re-parsing the file. Both sides of the comparison come from the same projection of the same `f32`s. TG.1's tests open a saved plan and assert clean.

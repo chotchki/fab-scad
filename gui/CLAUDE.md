@@ -30,3 +30,26 @@ Audit before shipping a glyph:
 comments) is a tofu risk. Verify rendered glyphs on a real frame, not just a compile (see the
 `gui-real-window-verify` memory: offscreen `--screenshot`/`--script` renders egui reliably; the
 windowed `--shot` PNG goes black from a CLI-spawned window).
+
+## Save UI reads the document's state, never the editor's flag
+
+Document-level gates and marks (the Save buttons, Cmd/Ctrl+S, the Model badge, the header chip, the
+Project card, the window title, the Open hold) read `DocState::dirty` — `view.doc.dirty` in `panel_ui` —
+which `sync_doc_state` derives each frame. Per-ROW markers read `ProjectDoc::file_unsaved(i, &editor)` /
+`asset_unsaved(name)`, never `view.doc.dirty` (that lights every row when any part is unsaved).
+`file_unsaved` is the ONLY sanctioned reader of `EditorBuf::dirty`, and only for the active row the
+editor holds (`editor_holds`). Nothing else gates on `EditorBuf::dirty`: `doc_into_editor` reloads it
+from the viewed file on every switch, so a gate on it loses unsaved work the moment the user clicks
+another file (v1.4.1 shipped exactly that; TG fixed it).
+
+- A new document mutation marks itself inside the `ProjectDoc` mutator that makes it (`add_file`,
+  `import`, `remove_file`, `set_entry`, `rename_file`, `flush_active`), never by flipping a flag at the
+  call site. Call-site patches were undone by the next file switch three times.
+- Anything new Save bakes into `fab:config` outside `part_to_slicing` and the bed has to join
+  `config::config_fp`, or it changes without reading unsaved.
+- The rules (what counts, the three config baselines, save routing per home, the loose-folder rules)
+  live in `docs/web-projects-design.md` "Phase TG".
+
+Markers: a FILLED circle (`unsaved_marker`, painter-drawn `circle_filled`) means UNSAVED; `icons::DOT`,
+which the FILL=0 subset renders as a RING, means STALE. Keep them different shapes: don't draw unsaved
+with `icons::DOT` (two rings) or a raw `●` (tofu, above).

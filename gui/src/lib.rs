@@ -54,6 +54,7 @@ mod console; // W.3.16 — the in-app console (echo/warnings + tracing), a botto
 mod cover; // W.3.29.3 — the offscreen gallery-cover scene, shared by desktop + web publish
 mod customize;
 mod cuts;
+mod doc_view; // TG.7 — what the GUI says about the open document: card, window title, breadcrumb (pure, table-tested)
 mod editor_brackets; // W.3.38 — bracket matching (pure token-based matcher, unit-tested)
 mod editor_indent; // W.3.35 — Tab/Shift+Tab re-indents the editor selection (pure transform, unit-tested)
 // Z.3.10 — Project-tab document mutations (rename/new/delete/set-entry) as cfg-free, unit-tested pure
@@ -79,6 +80,7 @@ mod render_quality; // W.3.25.2 — the live view's Draft|Final quality (a globa
 mod settings; // W.3.27 — the desktop Settings modal (hotchkiss.io publish key); native only
 // Web save-back target derivation (W.5) — pure URL logic (native-tested), no web-sys. Derives the
 // `PUT /media/<ref>/variants` target from the `?model=` deep-link; the wasm boot reads the param.
+mod save; // TG.3 — the one save path: plan, DocSnapshot, atomic_write, save_doc_action
 #[cfg(any(target_arch = "wasm32", test))]
 mod save_target;
 mod scene;
@@ -125,10 +127,8 @@ pub(crate) use geom_wasm::GeomPool;
 pub fn native_entry() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (bed, plate) = bed_size().unwrap_or(([256.0; 3], [256.0; 3]));
-    let source = args
-        .iter()
-        .find(|a| a.ends_with(".scad"))
-        .map(PathBuf::from);
+    // Absolute, so the document's home (what Save writes, what the status names) doesn't hang off cwd.
+    let source = launch_source(&args).map(|p| launch_absolute(&p));
     // Prefer the OPENED MODEL's location for the workspace root over cwd (W.3.21): a double-clicked
     // `.app` launches with cwd `/`, so a cwd-based `find_root` returns None → no library paths → BOSL2
     // unresolvable → every module undefined → empty render. Walk up from the .scad's dir first; fall
@@ -160,6 +160,58 @@ pub fn native_entry() {
     } else {
         run_windowed(cfg, flag_value(&args, "--shot").map(PathBuf::from));
     }
+}
+
+/// Flags whose NEXT argument is their value, not a positional — [`launch_source`] skips those.
+const VALUE_FLAGS: [&str; 4] = ["--script", "--screenshot", "--shot", "--cut"];
+
+/// TG.2: the document to open at launch — the first positional `.scad` or `.scadproj` (any case). The
+/// old picker matched only a `.scad` suffix, so `fab-gui x.scadproj` booted with NO document: nothing
+/// to render, and the `--script`/`--screenshot` harnesses wait on bounds that never come, forever.
+/// Flag values are skipped, so a `--script "open other.scad"` names no launch document; `.stl` is
+/// `SceneCfg::stl`'s, not a document.
+fn launch_source(args: &[String]) -> Option<PathBuf> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if VALUE_FLAGS.contains(&a.as_str()) {
+            it.next();
+            continue;
+        }
+        let p = std::path::Path::new(a);
+        let doc = jobs::is_scadproj(p)
+            || p.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("scad"));
+        if doc {
+            return Some(p.to_path_buf());
+        }
+    }
+    None
+}
+
+/// TG.2: the launch document as an absolute path with `.` and `..` folded out LEXICALLY —
+/// `std::path::absolute` keeps `..`, so `fab-gui ../models/x.scad` named its home `…/fab-scad/../models`
+/// in the open status and, later, in Save. Not `canonicalize`: that resolves symlinks (macOS `/tmp` →
+/// `/private/tmp`), naming a folder the user never typed. Lexical folding can disagree with the
+/// filesystem only through a symlinked directory followed by `..`, which a launch argument doesn't do
+/// in practice. Falls back to the path as given when there's no cwd to resolve against.
+fn launch_absolute(p: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut out = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            Component::CurDir => {}
+            // `pop` refuses to climb past the root, which is where `/..` lands anyway.
+            Component::ParentDir
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                out.pop();
+            }
+            Component::ParentDir if out.has_root() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
@@ -264,6 +316,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     .init_resource::<SliceInBackground>()
     .init_resource::<PendingConfig>()
     .init_resource::<PanelSeam>()
+    .init_resource::<DocState>() // TG.1 — the document's unsaved state every Save surface reads
     .insert_resource(Status("rendering".into()))
     .add_message::<ReSlice>()
     .add_message::<AutoPlace>()
@@ -285,7 +338,12 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
             // Auto-on-open: a fresh too-big model auto-slices + connects (kick), then the plan
             // lands and seeds cuts + connectors (poll). After poll_job so bounds are set.
             (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
-            (poll_open_dialog, apply_switch_file, preview_edited_buffer),
+            // TG.2: chained so an open's SwitchFile resets + re-renders in the SAME frame it's adopted —
+            // unordered, the outgoing model's render could land in the gap and claim the "opened" line.
+            (
+                (poll_open_dialog, apply_switch_file).chain(),
+                preview_edited_buffer,
+            ),
             sync_overlays,
             sync_overlay_visuals,
             sync_dim_labels,
@@ -300,6 +358,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
                 auto_slice_action,
                 export_plates_action,
                 poll_export,
+                save::save_doc_action, // TG.3 — Save + Cmd/Ctrl+S, every platform and home
             ),
             (
                 sync_tab_modes,
@@ -313,6 +372,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
                 do_auto_place,
                 estimate_copack, // U.3.5 — reactive co-pack metric for the Export tab
                 sync_pipeline,   // U.3.7 — per-node stale flags + busy for the tab-bar feedback
+                sync_doc_state,  // TG.1 — the document's unsaved state (Save, Cmd/Ctrl+S, markers)
             ),
         ),
     )
@@ -332,15 +392,18 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     // Z.3.3: the Project-tab file management (set entry, add/new/delete files). This is the NATIVE
     // half — the ops touch the fs + drive the rfd multi-picker; the web half is
     // `project_files_action_web` (registered above), sharing the document rules via `file_ops`.
-    // Registered ahead of nothing in particular; SwitchFiles it emits land next frame.
+    // Registered ahead of nothing in particular; SwitchFiles it emits land next frame. TG.5's Save As
+    // (dialog + landing) rides here too: the rfd dialog is the native half of it.
     #[cfg(not(target_arch = "wasm32"))]
-    app.init_resource::<state::SaveProjJob>().add_systems(
+    app.init_resource::<save::SaveAsJob>().add_systems(
         Update,
         (
             project_files_action,
             poll_add_dialog,
-            save_as_project_action,
-            poll_save_project,
+            save::save_as_action,
+            save::poll_save_as,
+            // TG.7: after the doc sync, so the title reads this frame's unsaved state.
+            sync_window_title.after(sync_doc_state),
         ),
     );
     // W.3.27: the desktop Settings modal (hotchkiss.io publish key). Native only — the web publishes via
@@ -515,6 +578,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         // panel_ui panics on a missing resource.
         .init_resource::<SaveTarget>()
         .init_resource::<console::ConsoleUi>()
+        .init_resource::<DocState>() // TG.1: panel_ui reads it; a still frame never runs the sync
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
@@ -588,12 +652,9 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
     .init_resource::<SliceInBackground>()
     .init_resource::<PendingConfig>()
     .init_resource::<PanelSeam>()
+    .init_resource::<DocState>() // TG.1
     .insert_resource(Status("rendering".into()))
-    .insert_resource(ScriptRunner {
-        actions,
-        idx: 0,
-        timer: 0,
-    })
+    .insert_resource(ScriptRunner::new(actions))
     .add_message::<ReSlice>()
     .add_message::<AutoPlace>()
     .add_message::<SwitchFile>()
@@ -633,13 +694,22 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 export_plates_action, // the `export` script verb → co-pack .3mf (T.2b.4)
             ),
             sync_pipeline, // U.3.7 feedback: keep the offscreen harness faithful to run_windowed
+            sync_doc_state, // TG.1, likewise
             run_script,
         ),
     )
     .add_systems(
         EguiPrimaryContextPass,
         (theme::install_theme, panel_ui.run_if(theme::theme_ready)).chain(),
-    );
+    )
+    // TG.8: the `save` verb is a real PanelCmd::Save, so the one save path must be here to answer it.
+    .add_systems(Update, save::save_doc_action);
+    // TG.8: the Project tab's native file handlers, as `run_windowed` registers them — including the
+    // every-frame flush of the live buffer into the document, so a scripted run sees the same unsaved
+    // state a window would. Save As stays out: its rfd dialog would block a headless run, and the
+    // `saveas <path>` verb is its dialog-free twin.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_systems(Update, (project_files_action, poll_add_dialog));
     // W.3.27: the Settings modal in the scripted harness — a headless real-frame check of the publish
     // key screen (the `settings` verb opens it). Native only (settings/credentials are desktop-only).
     #[cfg(not(target_arch = "wasm32"))]
@@ -660,5 +730,84 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
             EguiPrimaryContextPass,
             publish_dialog::publish_dialog.run_if(theme::theme_ready),
         );
-    app.run();
+    // TG.8: a failed `expect` (or an open that opened nothing) exits non-zero, so a script is a check.
+    if let AppExit::Error(code) = app.run() {
+        std::process::exit(i32::from(code.get()));
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// TG.2: the launch-argument picker takes a `.scad` or a `.scadproj` (any case) — the `.scadproj`
+    /// it used to drop is what left `fab-gui x.scadproj` with no document — and never an `.stl` or a
+    /// flag's value.
+    #[test]
+    fn launch_source_takes_scad_and_scadproj_only() {
+        let pick = |a: &[&str]| launch_source(&args(a));
+        assert_eq!(pick(&["m/a.scad"]), Some(PathBuf::from("m/a.scad")));
+        assert_eq!(
+            pick(&["~/models/bracket.scadproj"]),
+            Some(PathBuf::from("~/models/bracket.scadproj"))
+        );
+        assert_eq!(pick(&["B.SCADPROJ"]), Some(PathBuf::from("B.SCADPROJ")));
+        assert_eq!(pick(&["part.stl"]), None);
+        assert_eq!(
+            pick(&["part.stl", "x.scadproj"]),
+            Some(PathBuf::from("x.scadproj"))
+        );
+        assert_eq!(pick(&[]), None);
+        assert_eq!(
+            pick(&["notes.scadx", "scad"]),
+            None,
+            "an extension, not a suffix"
+        );
+        // A flag's value is not a positional, even when it ends in .scad.
+        assert_eq!(pick(&["--script", "open other.scad"]), None);
+        assert_eq!(
+            pick(&["--screenshot", "out.png", "--cut", "40", "m.scadproj"]),
+            Some(PathBuf::from("m.scadproj"))
+        );
+        assert_eq!(
+            pick(&["--reslice", "m.scad"]),
+            Some(PathBuf::from("m.scad"))
+        );
+    }
+
+    /// TG.2 review: the launch path is absolute with `.`/`..` folded, so the status and Save never
+    /// name `~/workspace/fab-scad/../models`.
+    #[test]
+    fn launch_absolute_folds_dot_segments() {
+        let p = |s: &str| launch_absolute(std::path::Path::new(s));
+        assert_eq!(
+            p("/w/fab-scad/../models/x.scad"),
+            PathBuf::from("/w/models/x.scad")
+        );
+        assert_eq!(p("/w/./m/./x.scad"), PathBuf::from("/w/m/x.scad"));
+        assert_eq!(
+            p("/../x.scad"),
+            PathBuf::from("/x.scad"),
+            "never climbs past the root"
+        );
+        let rel = p("../x.scad");
+        assert!(rel.is_absolute(), "relative resolves against cwd: {rel:?}");
+        assert!(
+            !rel.components()
+                .any(|c| c == std::path::Component::ParentDir),
+            "{rel:?}"
+        );
+        assert_eq!(
+            rel,
+            std::env::current_dir()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("x.scad")
+        );
+    }
 }

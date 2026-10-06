@@ -7,7 +7,7 @@
   - every ci.yml job green on the landing commit (boot-gate compiles the cfg(wasm32) save and document-state arms, which no native check builds);
   - `packaging/web/e2e-save.sh` run against the release tag, because TG.4 changes what a web save uploads;
   - `docs/web-projects-design.md` updated (TG.9).
-- [ ] TG.1 The document's unsaved state (design Decisions 1-2):
+- [x] TG.1 The document's unsaved state (design Decisions 1-2):
   - **`ProjectDoc` gains** `structure_dirty`, `unsaved_assets`, `rev` and the manifest `title`.
   - **Its mutators mark the document:** `add_file`, `import` (text AND binary), `remove_file`, `set_entry` (only on a real change) and `rename_file`; `flush_active` already does, only on changed text.
   - **`is_dirty()`** counts `structure_dirty` only for homes that persist structure. **`mark_saved(at_rev)`** is a no-op when `rev` moved.
@@ -22,7 +22,11 @@
     - the fingerprint ignores disabled cuts and auto orientations;
     - a saved plan re-applied reads clean;
     - an auto-plan over an empty baseline reads clean, Reset-to-auto over a saved plan reads dirty, and a bed change reads dirty.
-- [ ] TG.2 Opening adopts the document (Decisions 3 and 8):
+  - **Spec-coverage fixes (2026-10-06):**
+    - A fresh parts build now always rebuilds the ENTRY's saved plan. The native rename and the container Delete stash `ProjectDoc::entry_config()` before `state.reset()`; they stashed nothing, so the saved plan gave way to an auto-plan that read clean, and the next Save wrote it over the real one. `apply_switch_file`'s target-change arm stashes the entry's block too, not the viewed file's (a target change with a library on screen stashed the library's). Unsaved plan edits are still dropped on rename and container delete: that is backlog follow-up (2).
+    - `poll_job`'s apply-config-and-rebaseline step is `seat_fresh_parts`, so a test can land a render.
+    - Tests: `jobs::tests::a_rename_or_container_delete_rebuilds_the_saved_plan` (fails without the stash), the fingerprint test now places and moves a connector, and `project::tests::editor_aliases_only_another_documents_buffer_at_our_path` covers `entry_config`.
+- [x] TG.2 Opening adopts the document (Decisions 3 and 8):
   - **Identity:** a process-unique `DocId` is stamped by every `ProjectDoc` constructor. `EditorBuf` records its owner, and `editor_holds` checks the id and the path.
   - **`file_ops::adopt`** hydrates the editor from the entry, stamps the owner, clears `scene.source` so the switch re-renders, resets the old plan, applies the pending config, and posts `opened <name> (<folder>)`.
   - **Loaders use it:** `poll_open_dialog`, boot and the web model fetch.
@@ -32,7 +36,11 @@
     - re-adopting a same-stem archive or the same file never inherits the buffer, shows the new entry text and reads clean;
     - the launch-argument picker takes `.scad` and `.scadproj` and rejects `.stl`;
     - `hold_to_confirm`'s progress math.
-- [ ] TG.3 One save path (Decision 4):
+  - **Spec-coverage fixes (2026-10-06):**
+    - egui kept the code editor's undo history (whole-text snapshots) under one constant widget id, so Cmd+Z right after an open or a file switch put the previous file's text into the new one. `panel::forget_foreign_history` drops the widget state whenever the buffer's owner or path changes. A rename or a Save As loses undo history as a result. Test: `panel::tests::undo_never_crosses_into_the_previous_documents_text`, whose first half reproduces the leak on a bare egui context.
+    - The design's Risks mitigation landed: `sync_doc_state` debug-asserts `!project.editor_aliases(&editor)` (another document's buffer at one of this document's paths).
+    - Tests: `jobs::tests::a_same_stem_open_rerenders_with_its_own_plan` runs `apply_switch_file` after adopting a same-path archive and checks the render kick, the wiped plan and the new plan; `save::tests::a_boot_always_holds_a_document` now boots a valid `.scadproj` (home, temp `base_dir`, render identity, stashed plan, clean, window title, status).
+- [x] TG.3 One save path (Decision 4):
   - **New `gui/src/save.rs`:**
     - `plan()` returns `Rezip` | `WriteLoose` | `NeedsSaveAs` | `Download` | `Site`;
     - `DocSnapshot::capture` always splices in the live active text;
@@ -50,13 +58,16 @@
     - an `atomic_write` failure keeps the original (cfg(unix), read-only dir);
     - a loose partial failure leaves the failed file dirty;
     - the manifest title round-trips (extends `scadproj_save_round_trips`).
-- [ ] TG.4 The web saves what is on screen:
+  - **Also landed:** `config::strip_config_block` removes only the one separator line before the block, not every trailing blank line, so hydrate then flush is a fixpoint and a saved entry stays saved across file views.
+  - **Spec-coverage fix (2026-10-06):** `save::tests::save_doc_action_rezip_failure_keeps_everything_unsaved` covers the container failure path: a read-only archive gets the status, stays byte-identical, and the document, buffer and asset marker stay unsaved. `atomic_write` refuses a read-only file itself, so it holds as root too, unlike `atomic_write_failure_keeps_the_original`.
+- [x] TG.4 The web saves what is on screen:
   - `save_action` and `publish_web` serialize through `DocSnapshot`.
   - `SaveJob` carries the `rev` it captured, and `poll_save` calls `mark_saved(rev)` on success.
   - The Save hover text comes from `plan()` ("download X.scadproj", "update on hotchkiss.io").
   - **Unit test in this box (cfg-free):** a multi-file document with an edited, unflushed active buffer → `project_source_variant`'s archive contains the edit.
   - **Verify** with `bash gui/web/build-wasm.sh` building clean.
-- [ ] TG.5 Save As for every desktop document (Decision 5):
+  - **As landed:** the Save hover comes from `save_route`, not `plan()`. Save on a hotchkiss.io item downloads, and only the Save to hotchkiss.io button reads "update on hotchkiss.io".
+- [x] TG.5 Save As for every desktop document (Decision 5):
   - **`save_as_action`** replaces the promote button and `save_as_project_action`.
   - **⇧⌘S** is checked before ⌘S.
   - **The dialog** offers `.scad` for one text file with no assets and `.scadproj` otherwise. Its defaults come from `doc_stem()` and a new `home_dir()`, never `scene.source`.
@@ -67,7 +78,7 @@
     - a defaults table (name, folder, offered extension per home);
     - re-home per target kind;
     - a fresh seed owns the buffer, so typed text lands in `files[0]`.
-- [ ] TG.6 Loose folders, consistently (Decision 7):
+- [x] TG.6 Loose folders, consistently (Decision 7):
   - **Add** copies EVERY added file into the folder immediately, `.scad` included. It refuses a name that exists on disk with a status, and the copied file is clean.
   - **Rename** keeps its existing on-disk clash refusal.
   - **Delete's hover** reads "remove from this session — the file stays in the folder".
@@ -77,7 +88,7 @@
     - adding `hook.scad` to a loose doc writes it and leaves the doc clean;
     - an on-disk name clash is refused and nothing is overwritten;
     - a loose delete leaves the file on disk.
-- [ ] TG.7 Show the document (Decision 6):
+- [x] TG.7 Show the document (Decision 6):
   - **Pure, table-tested text functions:** `doc_card`, `window_title` and `breadcrumb`.
   - **The Project tab** opens with the card: name, place · kind, the Save rule from `plan()`, `[Save]` (gold when unsaved, grey when clean), `[Save As…]` and a text-only `[Open…]`. The file rows and `[+ Add…] [New file]` follow.
   - **A native window-title system** writes `<document> (unsaved) — fab-scad` only on change.
@@ -88,7 +99,14 @@
   - **Unit tests in this box:**
     - card, title and breadcrumb tables (a fresh multi-file card never says "in place"; a `.scadproj` card names its Save rule and never mentions zip);
     - every string passes the gui/CLAUDE.md glyph audit (known-safe non-ASCII only).
-- [ ] TG.8 The harness drives the document (Decision 9):
+  - **Looked at** (offscreen `--script`, 2026-10-06): a `.scadproj`, a loose folder and a one-file `.scad`, clean and with an edit — card, chip, filled markers, labelled Save, breadcrumb; no tofu. A fresh session and a non-entry breadcrumb can't be reached yet (the harness steps only after a first render's bounds, and has no `view` verb): TG.8's by-hand shots cover them.
+  - **Review fixes:**
+    - A loose document's home now follows its file. `ProjectDoc::rename_file` re-points a `ScadFile` home when its file is renamed, and `remove_file` re-points it to the entry when it is dropped from the session. Same folder only: a subfolder name keeps the old name so Save's write dir never moves. Before this, the title, chip and card kept naming a file that had moved.
+    - The one-file loose Save rule names `entry_name()`, the file Save writes.
+    - The loose multi-file rule now says Delete is session-only (Decision 7).
+    - A site item's rule says the Save to hotchkiss.io button is on the Model tab.
+    - Test: `doc_view::tests::loose_name_follows_the_home_file`.
+- [x] TG.8 The harness drives the document (Decision 9):
   - **`--script` verbs:** `open` (`.scadproj` via unpack + adopt), `addfile <path>`, `newfile`, `view <i>`, `setentry <i>`, `rename <i> <name>`, `delete <i>`, `save`, `saveas <path>` and `expect dirty|clean` (a mismatch exits non-zero).
   - **`run_scripted`** registers the project and save systems.
   - **Unit tests:** `parse_script` per verb.
@@ -97,9 +115,29 @@
     - a same-stem re-open shows the new entry text and reads clean;
     - a binary-only add reads dirty and saves.
   - **Then by hand:** offscreen `--script` screenshots of the card, chip and breadcrumb for a `.scadproj`, a loose folder and a fresh session, checked by eye for tofu and wording. Record them in this box.
-- [ ] TG.9 Docs:
+  - **Landed:**
+    - The verbs are `script.rs`'s `step_doc`, over a `ScriptDoc` SystemParam (run_script stays under the 16-param cap). A re-render is owed the way `adopt` owes one: clear `scene.source`, write `SwitchFile`. `saveas` is `save_as_to`: the dialog-free `save_as_action` + `poll_save_as`.
+    - A failed `expect`, an `open` that opens nothing, or an out-of-range index ends the run, and `run_scripted` exits non-zero.
+    - Only cut and layout verbs wait for bounds now. Document verbs, tabs, shots and waits step once the render is idle, which is what lets a fresh session be scripted.
+    - The rename on-disk clash refusal moved into `file_ops::rename_clash`, shared by `project_files_action` and the verb.
+    - `run_scripted` registers `save_doc_action`, `project_files_action` and `poll_add_dialog`. Not Save As: its rfd dialog would block a headless run.
+    - Fixture: `gui/tests/fixtures/bracket.scadproj` (951 bytes: `main.scad` includes `lib.scad`, `logo.png`, a title), written by the ignored `regenerate_bracket_fixture`.
+    - Tests: `parse_script_reads_every_document_verb`, `parse_script_drops_malformed_document_verbs`, `only_cut_and_layout_verbs_wait_for_geometry`, `rename_clash_refuses_an_existing_folder_file`, and in `harness_tests.rs` `committed_fixture_is_two_files_one_asset_titled`, `open_add_view_save_writes_the_archive`, `a_same_stem_reopen_shows_the_new_entry_and_reads_clean` (also re-opens the same file), `a_binary_only_add_reads_dirty_and_saves`, `a_failed_expect_ends_the_run_and_is_reported` and `loose_and_structural_verbs_drive_the_document` (setentry, delete, rename, newfile and saveas on a loose folder).
+  - **Spec-coverage fix (2026-10-06):** `a_structural_save_drops_the_file_and_reopens_on_the_new_entry` runs Save, not Save As, on the `.scadproj` fixture after `setentry` and `delete`. Both read unsaved, the archive has no `lib.scad`, keeps `logo.png` and the title, and reopens on `hook.scad`.
+  - **Looked at** (offscreen `--script`, 2026-10-06; the scratchpad's `tg-shots/`, every `expect` in the scripts passed):
+    - `.scadproj` (`proj-1..4`): the card names the file, folder and `.scadproj`, with "Save rewrites bracket.scadproj: every file, asset and the cut plan". `addfile` turns the chip, card name and `hook.scad` row to filled dots, Save goes gold, and Open… reads "hold to discard changes and open…". `view 0` gives the breadcrumb "lib.scad · in bracket.scadproj · main.scad renders" by a labelled Save and "unsaved". `save` posts "saved bracket.scadproj -> <folder>" and greys Save.
+    - Loose folder (`loose-1..4`): "<folder> · loose folder", and the rule says Add and Rename change the folder at once while Delete only drops a file from the session. `addfile peg.scad` copies it in and stays clean. The edit marks `main.scad`. The breadcrumb reads "lib.scad · in the brace folder · main.scad renders". `save` writes `main.scad` with its config.
+    - Fresh session (`fresh-1..4`): "untitled · not saved yet · Save asks where to save it". The edit and a `newfile` give "untitled-1.scad · in untitled · untitled.scad renders". `saveas` re-homes it to `untitled.scadproj`, named in the card and chip.
+    - No tofu anywhere. Filled unsaved dots and stale rings sit side by side, and differ.
+    - Seen, not TG.8's to fix: the stale rings that light every tab while a non-entry file is viewed are the filed stale-vs-unsaved follow-up. The window title has no offscreen window to show, so its check stays `doc_view`'s table test.
+- [x] TG.9 Docs:
   - **`docs/web-projects-design.md`** gains a "the document is what you save" section: the unsaved definition, the three baselines, save routing per home, the loose-folder rules and the Open hold.
   - **`gui/CLAUDE.md`:** Save UI reads document state, never the editor's flag; a filled circle means unsaved and a ring means stale.
   - **README "Using it"** adds the Project tab, Save, Save As… and ⇧⌘S.
   - **Verify** that each doc matches the landed behavior.
+  - **Landed:**
+    - `docs/web-projects-design.md` "Phase TG — the document is what you save": what counts as unsaved, the three config baselines, `rev`, save routing per home (including that a hotchkiss.io item's Save downloads and the site update is the Model tab's button), the `DocSnapshot`/`atomic_write` invariants, Save As, `adopt` + `DocId`, the Open hold, the loose-folder rules, what the GUI says, and the known limits filed in the backlog. The Phase Z "say it's a zip … and a tooltip" decision is annotated as revised: the docs still say it, the UI doesn't.
+    - `gui/CLAUDE.md`: document-level Save gates and marks read `DocState::dirty`; per-row markers read `ProjectDoc::file_unsaved`/`asset_unsaved` (the only sanctioned `EditorBuf::dirty` reader, active held row only); new mutations mark inside the `ProjectDoc` mutator; anything new baked into `fab:config` joins `config_fp`; filled circle = unsaved, `icons::DOT` ring = stale.
+    - README "Using it": the Project tab, the Model breadcrumb, Save / Save As… / ⇧⌘S, the markers, and a `.scadproj` launch argument.
+    - Every claim was checked against the code (`save.rs`, `doc_view.rs`, `file_ops.rs`, `project.rs`, `state.rs`, `panel.rs`).
 - [ ] TG.10 Release: ships in the desktop app and the web bundle on the next `v*` tag (v1.4.2), only on chotchki's word. hotchkiss.io's editor gets the web half when its pin moves. The release notes say to close any open `.scadproj` before updating from 1.4.1, because 1.4.1's relaunch reopens the temp copy.

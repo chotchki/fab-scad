@@ -167,7 +167,7 @@ pub(crate) fn publish_kick(
     // What gets published is what's ON SCREEN, so the live buffer lands in the document first — the
     // render below reads the document, and so does the archive. (Under the old shadow this happened by
     // accident: the preview wrote the shadow file that publish then re-read.)
-    if project.editor_holds(&editor.path) {
+    if project.editor_holds(&editor) {
         project.flush_active(&editor.text);
     }
     // The archive has to be SELF-CONTAINED, so a loose project's on-disk sibling assets ride along —
@@ -187,7 +187,12 @@ pub(crate) fn publish_kick(
     // upload_model can point at it — the `.scadproj` extension tells the server it's a project), else a
     // config-baked `.scad` staged from the LIVE entry text.
     let upload_source = if project.is_multifile() || !extra.is_empty() {
-        match rezip_project(&project, &parts.0, printer, &extra) {
+        match rezip_project(
+            &crate::save::DocSnapshot::capture(&project, &editor),
+            &parts.0,
+            printer,
+            &extra,
+        ) {
             Ok(bytes) => {
                 let _ = std::fs::create_dir_all(&out_dir);
                 let path = out_dir.join(format!("{stem}.scadproj"));

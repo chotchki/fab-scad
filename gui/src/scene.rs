@@ -75,6 +75,9 @@ pub(crate) fn setup_windowed(
     #[cfg_attr(target_arch = "wasm32", allow(unused_mut, unused_variables))]
     mut pending_config: ResMut<PendingConfig>,
     #[cfg(target_arch = "wasm32")] mut model_fetch: ResMut<crate::jobs::ModelFetch>,
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut, unused_variables))] mut doc_state: ResMut<
+        DocState,
+    >,
     pool: Res<GeomPool>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
@@ -83,27 +86,20 @@ pub(crate) fn setup_windowed(
     // Phase Z / Z.3.6 + SW.3: a launched `.scad` opens as a loose PROJECT rooted at its own REAL folder
     // and homed at the real file, so Save writes back in place. The render rides `Source::Pack` — the
     // doc's live buffers ARE the render truth — so no temp shadow exists and the preview writes nothing.
+    // TG.2: a `.scadproj` launch argument unpacks + opens as the project (it used to be dropped by the
+    // arg picker, leaving a document-less app), and either kind goes through `adopt` like the Open
+    // dialog. TG.5: a boot always ends holding an owned document — no argument or a failed one falls
+    // back to an `untitled.scad` or the named file (`file_ops::boot_document`). Boot kicks its own
+    // render below, so `source` is re-aimed at the entry's path there rather than via a `SwitchFile`.
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(src) = scene.source.clone() {
-        match crate::jobs::open_loose(&src) {
-            Ok(doc) => {
-                let entry_path = doc
-                    .base_dir
-                    .as_ref()
-                    .zip(doc.files.get(doc.entry))
-                    .map(|(b, f)| b.join(&f.name));
-                *project = doc;
-                if let Some(ep) = entry_path {
-                    pending_config.0 = doc_into_editor(&mut editor, &project, project.entry);
-                    scene.source = Some(ep); // the entry's REAL path — identity, not content
-                }
-            }
-            Err(e) => {
-                status.0 = format!("open: {e}");
-                pending_config.0 = read_into_editor(&mut editor, &src);
-            }
-        }
-    }
+    let boot_err = crate::file_ops::boot_document(
+        &mut project,
+        &mut editor,
+        &mut pending_config,
+        &mut scene,
+        &mut status,
+        &mut doc_state,
+    );
     // Web boot source (W.3.6 + W.3.12): a `?model=<url>` page parameter fetches that .scad into the
     // editor (poll_model_fetch lands it — async, so the fetch spawns here and the seed happens there);
     // without one, seed the NO-INCLUDE demo and arm the debounced preview, so the geom Worker renders
@@ -122,19 +118,24 @@ pub(crate) fn setup_windowed(
                     .spawn(async move { crate::web_host::fetch_bytes(&url).await }),
             );
         } else {
-            editor.text = WEB_DEMO.to_string();
-            // Z.3.10: `editor.path` NAMES the buffer's owning file on the web — `apply_switch_file`
-            // flushes the live text back only when `path == files[active].name` (jobs.rs). The demo
-            // seeded the buffer without it, so the very first switch away silently dropped whatever
-            // had been typed into the demo. Harmless while the web had no way to add a second file;
-            // not harmless now that it does.
-            editor.path = std::path::PathBuf::from("demo.scad");
-            editor.edited_at = Some(0.0);
-            *project = crate::project::ProjectDoc::single(
-                "demo.scad",
-                WEB_DEMO,
-                crate::project::ProjectHome::Fresh,
+            // Z.3.10 + TG.2: the buffer must be OWNED by the demo document (path AND id) — the flush
+            // before a switch only writes back a buffer the document holds, and a demo seeded without
+            // that silently dropped whatever had been typed into it on the first switch away.
+            // `adopt` hydrates + stamps it; a `Fresh` demo posts no "opened" line.
+            crate::file_ops::adopt(
+                &mut project,
+                &mut editor,
+                &mut pending_config,
+                &mut scene.source,
+                &mut status,
+                &mut doc_state,
+                crate::project::ProjectDoc::single(
+                    "demo.scad",
+                    WEB_DEMO,
+                    crate::project::ProjectHome::Fresh,
+                ),
             );
+            editor.edited_at = Some(0.0);
         }
     }
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
@@ -188,7 +189,12 @@ pub(crate) fn setup_windowed(
     // Render the model's parts off-thread; poll_job seeds each part + its first cut when bounds land.
     // Native: the project pack (live buffers, SW.3); wasm (or no project): the path/buffer flows.
     #[cfg(not(target_arch = "wasm32"))]
-    crate::jobs::kick_render_pack(&pool, &mut job, &mut status, &scene, &project, None, true);
+    {
+        crate::jobs::kick_render_pack(&pool, &mut job, &mut status, &scene, &project, None, true);
+        if let Some(e) = boot_err {
+            status.0 = e;
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     kick_render(&pool, &mut job, &mut status, &scene, true);
 }
@@ -234,6 +240,25 @@ pub(crate) fn resize_bed(
         if part.cuts.list.is_empty() {
             part.auto_planned.0 = None; // re-check whole-vs-cut against the resized bed
         }
+    }
+}
+
+/// TG.7: the desktop window title names the open document — `bracket.scadproj (unsaved) — fab-scad`
+/// ([`doc_view::window_title`](crate::doc_view::window_title)). Written ONLY when the string changes:
+/// bevy_winit calls `set_title` for every changed `Window`, and the comparison reads through `Deref`, so
+/// an unchanged frame never marks it. Native only — on the web the host page owns `<title>`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn sync_window_title(
+    project: Res<crate::project::ProjectDoc>,
+    doc: Res<DocState>,
+    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+) {
+    let Ok(mut window) = windows.single_mut() else {
+        return; // the offscreen harnesses run windowless
+    };
+    let title = crate::doc_view::window_title(&project, doc.dirty);
+    if window.title != title {
+        window.title = title;
     }
 }
 
@@ -422,4 +447,60 @@ pub(crate) fn bed_size() -> Option<([f64; 3], [f64; 3])> {
 /// minimal config that still loads the plates but shows the "customized presets" prompt).
 pub(crate) fn default_bambu_preset() -> Option<fab_scad::printers::BambuPreset> {
     load_default_printer().and_then(|p| p.bambu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How many frames the primary `Window` read as changed — what bevy_winit's `set_title` keys on.
+    #[derive(Resource, Default)]
+    struct Changes(u32);
+
+    fn count_changes(q: Query<(), Changed<Window>>, mut n: ResMut<Changes>) {
+        n.0 += q.iter().count() as u32;
+    }
+
+    /// TG.7: the title names the document and its unsaved state, and is written ONLY when that string
+    /// changes — a per-frame write would mark the window changed (and re-`set_title`) every frame.
+    #[test]
+    fn window_title_writes_only_on_change() {
+        let doc = crate::project::ProjectDoc::single(
+            "main.scad",
+            "",
+            crate::project::ProjectHome::ScadProj("/m/bracket.scadproj".into()),
+        );
+        let mut app = App::new();
+        app.insert_resource(doc)
+            .init_resource::<DocState>()
+            .init_resource::<Changes>()
+            .add_systems(Update, (sync_window_title, count_changes).chain());
+        let win = app
+            .world_mut()
+            .spawn((Window::default(), bevy::window::PrimaryWindow))
+            .id();
+        let title = |app: &App| app.world().get::<Window>(win).unwrap().title.clone();
+        let changes = |app: &App| app.world().resource::<Changes>().0;
+
+        app.update();
+        assert_eq!(title(&app), "bracket.scadproj — fab-scad");
+        assert_eq!(
+            changes(&app),
+            1,
+            "the spawn + first title land as one change"
+        );
+        app.update();
+        app.update();
+        assert_eq!(
+            changes(&app),
+            1,
+            "an unchanged title never re-marks the window"
+        );
+
+        app.world_mut().resource_mut::<DocState>().dirty = true;
+        app.update();
+        assert_eq!(title(&app), "bracket.scadproj (unsaved) — fab-scad");
+        app.update();
+        assert_eq!(changes(&app), 2, "one write for the one change");
+    }
 }
